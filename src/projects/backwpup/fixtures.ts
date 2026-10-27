@@ -17,7 +17,11 @@ import { ScenarioKeys } from "./support/encryption-keys";
 import { JobExports } from "./support/job-transfer";
 import { ChangedMarkers, removeMarkers, seedMarkers } from "./support/markers";
 import { CliRestore, contentKeptOut, restoreSite } from "./support/cli-restore";
-import { ContentCopy, assertNoContentCopyLeft } from "./support/content-copy";
+import { ContentCopy } from "./support/content-copy";
+import {
+  LEFTOVER_FIXTURE_OPTIONS,
+  assertNoContentCopyLeft,
+} from "./support/content-copy-leftover";
 import { BACKWPUP_SITE_RESIDUE } from "./support/residue";
 import { resolveSiteResidue } from "../../common/wp/residue";
 import { PrivateFolder, privateFolderKey } from "./support/private-folder";
@@ -141,7 +145,10 @@ interface BackWPupWorkerFixtures {
   /**
    * Refuses, before the worker's first scenario, a site still holding a copy of `wp-content` an
    * earlier run's restore guard could not put back — that site's `wp-content` may be damaged, so every
-   * result on it would be suspect, and the copy may be the only way back. Automatic.
+   * result on it would be suspect, and the copy may be the only way back — unless it is provably
+   * orphaned (stamped by another boot, used by no process): then it is put back (or, holding none to
+   * put back, removed) and the worker goes on. The auth setup's preflight runs the same first, before
+   * its gates. Automatic.
    */
   // eslint-disable-next-line @typescript-eslint/no-invalid-void-type -- Playwright's type for a fixture that produces no value.
   contentCopyLeftover: void;
@@ -160,7 +167,7 @@ export const test = base.extend<BackWPupFixtures, BackWPupWorkerFixtures>({
       await assertNoContentCopyLeft(boundSite);
       await use();
     },
-    { scope: "worker", auto: true, box: true },
+    LEFTOVER_FIXTURE_OPTIONS,
   ],
   onboarding: async ({ page }, use) => {
     await use(new OnboardingPage(page));

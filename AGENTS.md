@@ -213,7 +213,15 @@ fixtures](docs/guides/authoring-tests.md#backwpups-fixtures). Rules to know befo
   routines, events, triggers) or a relocated `wp-content`. Before a files restore it copies
   `wp-content` as root into root-only `<root>/.e2e_content_copy/` and puts it back with `tar
 --recursive-unlink` once no run is in flight; a copy that cannot go back is kept with its way back
-  spelled out, and every BackWPup worker refuses a site still holding one (`contentCopyLeftover`).
+  spelled out, and every BackWPup worker refuses a site still holding one (`contentCopyLeftover`;
+  the auth setup tries first, before its gates) — unless no process uses it (argv or working
+  directory in it, or a restore in the root) and it holds none to put back, or its whole copy is
+  stamped by another boot (every use is stamped with the host's boot id just before it): it is then
+  claimed (`mv -T` to `.e2e_content_copy.recovering-<hex>`), put back or removed, and the run goes
+  on; a restore that reached the database too also has the database's defaults it saved beside the
+  copy set back (`support/content-copy-leftover.ts`). The restore is refused if the host rebooted
+  since the copy was taken; a put-back first waits for a restore a dropped connection left running,
+  acts only on a copy holding its run's token, and marks it back durably in the same root command.
   It also restores the default collation and removes the scenario's own snapshots, told from other
   runs' by either changed marker.
 
@@ -261,8 +269,9 @@ lives in a sibling module, unit-testable without it.
 **MUST — `src/common/hooks/**/*.hooks.ts` belongs in every product's `steps` globs.** That glob is
 the only importer: omit it and the lifecycle is _silently absent_.
 
-A product declares its `debug.log` preset (`ProductConfig.debugLog`) and `stopRunningWork`; the config
-factory registers both per process, so shared hooks never import product code (RegExps and functions
+A product declares its `debug.log` preset (`ProductConfig.debugLog`), `stopRunningWork` and
+`settleLeftovers` (the auth setup's); the config factory registers them per process, so shared code
+never imports product code (RegExps and functions
 cannot ride project metadata anyway).
 
 ## Device profiles (desktop & `@mobile`)
@@ -311,7 +320,9 @@ only with all four of its marks (`GRACEFUL_FS_PATCH`). Admit a module only once 
 **Auth fixture / setup:** [`auth.setup.ts`](src/common/auth/auth.setup.ts) is a dependency project run
 before the scenarios, in three steps:
 
-1. **Pre-flight** (gating), per real site: the transport works (ssh: connection, WP-CLI, `rootDir`;
+1. **Pre-flight** (gating), per real site — after settling what the product's killed runs left
+   (`ProductConfig.settleLeftovers`; best-effort, a refusal is a warning; never in the healthcheck),
+   since that damage can stop WordPress booting: the transport works (ssh: connection, WP-CLI, `rootDir`;
    docker: container up, WP-CLI inside; local: `rootDir`, WP-CLI on `PATH`) and `wp core
 is-installed` passes — a WordPress that cannot boot (old PHP, DB down, a fatal) is reported as
    that, never as "not installed". Then the **admin UI is English** (`determine_locale()` for the
@@ -570,7 +581,7 @@ this file goes in the right `docs/` file, linked from the [Documentation map](#d
 - The config factory (`createProductConfig`) or its project pairs.
 - The metadata/credential registry (`registerPool`, `routingMetadata`) and the per-process policy
   registries (`registerDebugLogOptions`, `registerSiteResidue`, `registerSiteDbResidue`,
-  `registerSiteDataDirResolver`, `registerStopRunningWork`).
+  `registerSiteDataDirResolver`, `registerStopRunningWork`, `registerSettleLeftovers`).
 - Artifact directories, `RUN_ID`, the `*_ROOT` env vars.
 - The drain (`config/drain.ts`, `E2E_INTERNAL_STOP_FILE`, `drainGate`) and its escalation signals.
 - The run's reporters: `[cell]` notice, results stream (`results.jsonl`, schema, reader,

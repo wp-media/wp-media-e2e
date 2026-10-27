@@ -5,6 +5,7 @@ import type {
   Edition,
   ResolveSiteDataDirs,
   SiteConfig,
+  SettleLeftovers,
   SiteResidue,
   StopRunningWork,
 } from "./types";
@@ -233,4 +234,31 @@ export function getStopRunningWork(
   product: string,
 ): StopRunningWork | undefined {
   return runningWorkStops.get(product);
+}
+
+// Per-process registry: product -> how to settle what its killed runs left on a site. A function, so
+// it could never ride project metadata at all.
+const leftoverSettlers = new Map<string, SettleLeftovers>();
+
+/**
+ * Registers how a product settles what its earlier runs left on a site, for the auth setup's
+ * preflight to call before its gates. Called while building the config, in each process. A product
+ * that leaves nothing such is not registered.
+ */
+export function registerSettleLeftovers(
+  product: string,
+  settle: SettleLeftovers | undefined,
+): void {
+  if (settle === undefined) return;
+  leftoverSettlers.set(product, settle);
+}
+
+/**
+ * How a product settles its leftovers, or `undefined` when it declares none — the preflight then
+ * asks nothing. Never throws, for the same reason as {@link getSiteResidue}.
+ */
+export function getSettleLeftovers(
+  product: string,
+): SettleLeftovers | undefined {
+  return leftoverSettlers.get(product);
 }

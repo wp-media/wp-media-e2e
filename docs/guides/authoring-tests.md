@@ -242,7 +242,9 @@ object (Pro's deep link, Free's upload); the command is
   `sudo` it refuses and the command does not run), puts it back exactly after the scenario, resets the
   database's default collation, and removes the scenario's own `--pre-backup` snapshot. A copy that
   could not go back stays, and BackWPup runs refuse that site until someone settles it (the message
-  says how).
+  says how) — or, once provably orphaned (used by no process, and holding none to put back or stamped
+  by another boot of the host), the auth setup or a worker settles it itself
+  (`support/content-copy-leftover.ts`).
 
 ## Tags
 

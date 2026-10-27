@@ -7,6 +7,7 @@ import { BACKWPUP_LOG_OPTIONS } from "../support/debug-log";
 import { BACKWPUP_SITE_DB_RESIDUE } from "../support/db-residue";
 import { BACKWPUP_SITE_RESIDUE } from "../support/residue";
 import { stopRunningJobs } from "../support/job-runs";
+import { assertNoContentCopyLeft } from "../support/content-copy-leftover";
 import { resolveRestoreWorkingDirs } from "../support/restore-dir";
 import type {
   ProductArtifacts,
@@ -115,5 +116,8 @@ export const backwpup: ProductConfig = {
   // A backup job runs in a web request of its own, so one a scenario left running would otherwise
   // outlive the plugin's removal.
   stopRunningWork: stopRunningJobs,
+  // A restore's copy of wp-content a reboot orphaned, settled before the preflight's gates: the
+  // damage it may undo can stop WordPress booting.
+  settleLeftovers: assertNoContentCopyLeft,
   services,
 };

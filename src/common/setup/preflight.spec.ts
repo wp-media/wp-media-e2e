@@ -130,6 +130,54 @@ test.beforeEach(() => {
   resetOwnershipCaches();
 });
 
+// What a killed run left can stop WordPress booting; the gates would then skip the fixtures settling it.
+test.describe("verifyPool — settling leftovers before the gates", () => {
+  test.beforeEach(() => {
+    delete process.env.WP_STUB_INFO;
+    delete process.env.WP_STUB_LOCALE;
+  });
+
+  test("settles every real site first, so a site it repairs passes the gates", async () => {
+    process.env.WP_STUB_INSTALLED = "no";
+    const settled: string[] = [];
+    await expect(
+      verifyPool(
+        [localSite(), localSite("https://p.example.test")],
+        "backwpup",
+        "local",
+        [],
+        undefined,
+        (site) => {
+          settled.push(site.baseURL);
+          process.env.WP_STUB_INSTALLED = "yes";
+          return Promise.resolve();
+        },
+      ),
+    ).resolves.toBeUndefined();
+    expect(settled).toEqual(["http://localhost:8100"]);
+  });
+
+  // The product's own checks refuse the site later, in their own words; the gates judge it as found.
+  test("warns about a site it could not settle, and checks it as found", async () => {
+    process.env.WP_STUB_INSTALLED = "yes";
+    const warnings: string[] = [];
+    const warn = console.warn;
+    console.warn = (message: string) => warnings.push(message);
+    try {
+      await expect(
+        verifyPool([localSite()], "backwpup", "local", [], undefined, () =>
+          Promise.reject(new Error("a copy is left")),
+        ),
+      ).resolves.toBeUndefined();
+    } finally {
+      console.warn = warn;
+    }
+    expect(warnings).toContain(
+      "[preflight] http://localhost:8100: left as found — a copy is left",
+    );
+  });
+});
+
 test.describe("verifyPool — admin locale gate", () => {
   test.beforeEach(() => {
     delete process.env.WP_STUB_INFO;
