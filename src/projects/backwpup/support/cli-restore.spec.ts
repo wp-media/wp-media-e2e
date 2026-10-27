@@ -13,6 +13,7 @@ import {
 import { FILE_MARKER_NAME } from "./markers";
 import type { RestorePreconditions, RestoreSite } from "./cli-restore";
 import type { SiteMarkers } from "./markers";
+import type { DatabaseDefaults } from "./database-defaults";
 
 /**
  * `wp backwpup restore`, run so a shared site is left as found: what each argv reaches, what must
@@ -202,6 +203,7 @@ function rig(
     readonly listings?: readonly (readonly string[])[];
     readonly holds?: Record<string, { file: boolean; database: boolean }>;
     readonly putBack?: () => Promise<void>;
+    readonly stamp?: () => Promise<void>;
   } = {},
 ): { calls: string[]; restore: CliRestore; site: RestoreSite } {
   const calls: string[] = [];
@@ -248,6 +250,14 @@ function rig(
       kept = true;
       return Promise.resolve();
     },
+    keepDatabaseDefaults: (defaults: DatabaseDefaults) => {
+      calls.push(`keep defaults ${defaults.collation}`);
+      return Promise.resolve();
+    },
+    stamp: () => {
+      calls.push("stamp");
+      return options.stamp?.() ?? Promise.resolve();
+    },
     putBack: async () => {
       calls.push("put back");
       await (options.putBack?.() ?? Promise.resolve());
@@ -282,7 +292,9 @@ test.describe("CliRestore — running", () => {
       "preconditions",
       "keep",
       "read defaults",
+      "keep defaults utf8mb4_general_ci",
       "list snapshots",
+      "stamp",
       "run restore /a.tar --yes",
       "list snapshots",
       "restore defaults",
@@ -293,10 +305,27 @@ test.describe("CliRestore — running", () => {
     const db = rig();
     await db.restore.run(["restore", "--type=db"]);
     expect(db.calls).not.toContain("keep");
+    expect(db.calls).toContain("keep defaults utf8mb4_general_ci");
     const files = rig();
     await files.restore.run(["restore", "--type=file"]);
     expect(files.calls).not.toContain("read defaults");
+    expect(files.calls.some((call) => call.startsWith("keep defaults"))).toBe(
+      false,
+    );
     expect(files.calls).not.toContain("restore defaults");
+  });
+
+  // Unstamped, a reboot during the command would leave a copy no later run could prove orphaned.
+  test("runs no command over a copy it could not stamp, and still puts the copy back", async () => {
+    const { calls, restore } = rig({
+      stamp: () => Promise.reject(new Error("could not stamp")),
+    });
+    await expect(restore.run(["restore", "/a.tar"])).rejects.toThrow(
+      "could not stamp",
+    );
+    expect(calls.some((call) => call.startsWith("run "))).toBe(false);
+    await restore.release();
+    expect(calls).toContain("put back");
   });
 
   test("refuses a site that would lose what the backup cannot bring back, running nothing", async () => {

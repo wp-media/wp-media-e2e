@@ -147,6 +147,22 @@ const OWN_A = "test-results/demo/a";
 const ALL_A = "test-results/demo/_all/a";
 const ALL_B = "test-results/demo/_all/b";
 
+// Functions cannot ride project metadata: the factory's registries are their only channel.
+test("registers the product's leftover settling for the preflight, in the building process", async () => {
+  const file = (path: string): string => importable(join(REPO_ROOT, path));
+  const registered = (await runInChildNode(
+    `
+    const { createProductConfig } = await import(${file("src/common/config/project.ts")});
+    const { getSettleLeftovers } = await import(${file("src/common/config/metadata.ts")});
+    const settle = async () => {};
+    createProductConfig({ ...${JSON.stringify(PRODUCT)}, settleLeftovers: settle });
+    console.log(JSON.stringify(getSettleLeftovers("demo") === settle));
+    `,
+    { cwd: elsewhere, env: { RUN_ID: "run-1" } },
+  )) as boolean;
+  expect(registered).toBe(true);
+});
+
 test.describe("createProductConfig — output folders by selection", () => {
   test("a run targeting a cell gives all three of its projects the cell's folder", async () => {
     expect((await build(["--project=a"])).outputDirs).toEqual({

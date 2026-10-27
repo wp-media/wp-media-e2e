@@ -300,7 +300,10 @@ export class CliRestore {
   constructor(
     private readonly site: RestoreSite,
     private readonly cli: Pick<CliSession, "run">,
-    private readonly content: Pick<ContentCopy, "keep" | "putBack" | "kept">,
+    private readonly content: Pick<
+      ContentCopy,
+      "keep" | "keepDatabaseDefaults" | "stamp" | "putBack" | "kept"
+    >,
     private readonly changed: Pick<ChangedMarkers, "values">,
     private readonly settleMs = RUN_SETTLE_MS,
   ) {}
@@ -344,8 +347,15 @@ export class CliRestore {
     const defaults = reach.database
       ? await this.site.readDatabaseDefaults()
       : undefined;
+    // Beside the copy, for a run settling it after a reboot cut this one off: no-op without a copy.
+    if (defaults !== undefined) {
+      await this.content.keepDatabaseDefaults(defaults);
+    }
     const before = await this.site.listSnapshots();
 
+    // Last before the command: a reboot during it then provably orphans the copy — and one since the
+    // copy was taken refuses the command.
+    await this.content.stamp();
     let failure: Error | undefined;
     try {
       await this.cli.run(argv);

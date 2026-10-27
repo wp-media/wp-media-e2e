@@ -297,11 +297,11 @@ JSON cannot hold), the paths it leaves on disk (`registerSiteResidue` / `getSite
 for runtime-named directory families), its database footprint (`registerSiteDbResidue` /
 `getSiteDbResidue` — would fit metadata, but one channel is easier to follow), how to ask its installed
 plugin for runtime-named data directories (`registerSiteDataDirResolver` / `getSiteDataDirResolver`)
-and how to stop work it may still run (`registerStopRunningWork` / `getStopRunningWork`) (functions: metadata could never carry them). Hooks read files, footprint and resolver together through `declaredResidue(product)`
+and how to stop work it may still run (`registerStopRunningWork` / `getStopRunningWork`) (functions: metadata could never carry them). The auth setup's preflight reads one more: how to settle what its killed runs left on a site (`registerSettleLeftovers` / `getSettleLeftovers`), run before the gates that damage could fail; the healthcheck never settles. Hooks read files, footprint and resolver together through `declaredResidue(product)`
 (`hooks/plugin-lifecycle.ts`), as does a product step reinstalling mid-scenario, so the two never
 prepare or sweep different things. Unlike `getPool`, none throws — declaring none is legitimate and
-costs no round-trip: residue getters return an empty value, `getStopRunningWork` and
-`getSiteDataDirResolver` return `undefined` ("nothing to ask").
+costs no round-trip: residue getters return an empty value, `getStopRunningWork`,
+`getSiteDataDirResolver` and `getSettleLeftovers` return `undefined` ("nothing to ask").
 
 ## Artifact directories & lifecycle
 
@@ -388,7 +388,7 @@ E2E_CELL=apache npm run test:wp-rocket
               ├─ E2E_CELL → holds apache alone (unknown pin / stray --project → fail)
               ├─ selectedCells() → ["apache"]  (fail fast if >1)
               ├─ global workers  = apache pool size
-              ├─ project setup:apache     → preflight + auth.setup.ts (end last session, login → storageState, site versions)
+              ├─ project setup:apache     → leftovers settled, preflight + auth.setup.ts (end last session, login → storageState, site versions)
               ├─ project artifacts:apache → resolve + verify plugin zips (→ .artifacts/…/resolution.json)
               └─ project apache → depends on BOTH setups → bddgen specs → run, each worker bound to one site
 ```

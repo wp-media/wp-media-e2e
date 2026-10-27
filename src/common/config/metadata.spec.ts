@@ -4,11 +4,13 @@ import {
   getDebugLogOptions,
   getPool,
   getSiteResidue,
+  getSettleLeftovers,
   getStopRunningWork,
   readRouting,
   registerDebugLogOptions,
   registerPool,
   registerSiteResidue,
+  registerSettleLeftovers,
   registerStopRunningWork,
   routingMetadata,
 } from "./metadata";
@@ -107,6 +109,20 @@ test.describe("debug-log preset registry", () => {
     registerDebugLogOptions("spec-product-b", b);
     expect(getDebugLogOptions("spec-product-a")).toBe(a);
     expect(getDebugLogOptions("spec-product-b")).toBe(b);
+  });
+});
+
+test.describe("leftover-settling registry", () => {
+  test("serves back the function a product declared", () => {
+    const settle = (): Promise<void> => Promise.resolve();
+    registerSettleLeftovers("spec-with-leftovers", settle);
+    expect(getSettleLeftovers("spec-with-leftovers")).toBe(settle);
+  });
+
+  test("is absent for a product that declares none", () => {
+    expect(getSettleLeftovers("spec-no-leftovers")).toBeUndefined();
+    registerSettleLeftovers("spec-undefined-leftovers", undefined);
+    expect(getSettleLeftovers("spec-undefined-leftovers")).toBeUndefined();
   });
 });
 

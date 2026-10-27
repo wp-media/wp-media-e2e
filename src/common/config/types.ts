@@ -196,6 +196,16 @@ export type StopRunningWork = (
 ) => Promise<string | undefined>;
 
 /**
+ * Settles what a product's earlier runs left on a site that only the product knows how to undo, and
+ * only once it is provably abandoned — see {@link ProductConfig.settleLeftovers}. Resolves once
+ * nothing is left or it was settled (saying so itself); rejects naming what is left and why it was
+ * not settled.
+ */
+export type SettleLeftovers = (
+  site: Pick<SiteConfig, "baseURL" | "transport">,
+) => Promise<void>;
+
+/**
  * Directories a plugin creates under one parent, each with a name it picks at runtime — see
  * {@link ProductConfig.siteResidue}.
  */
@@ -304,5 +314,13 @@ export interface ProductConfig {
    * mid-way rather than cancelled.
    */
   readonly stopRunningWork?: StopRunningWork;
+  /**
+   * Run by the auth setup's preflight on every real site **before its gates**: something a killed run
+   * left can stop WordPress booting, and the gates would then skip every scenario — and with them the
+   * product's own fixtures that settle it. Best-effort there: a refusal is a warning, left for the
+   * product's own checks to refuse. Never run by the healthcheck, which changes nothing. Must settle
+   * within `SETTLE_LEFTOVERS_ALLOWANCE_MS` (`setup/preflight.ts`).
+   */
+  readonly settleLeftovers?: SettleLeftovers;
   readonly services?: ServiceConfig;
 }

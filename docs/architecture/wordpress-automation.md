@@ -78,7 +78,9 @@ Limits:
   and the owner is by then known not to be us), yet decides before probing and skips both when the
   transport user already owns the install ([File ownership](#file-ownership-wpownershipts)). BackWPup's guard around `wp backwpup restore` (`support/content-copy.ts`) copies `wp-content` and
   puts it back as root from the start (only root reads every file and restores every owner), refusing
-  to run the command where it cannot.
+  to run the command where it cannot; so does settling a copy a reboot orphaned
+  (`support/content-copy-leftover.ts`). Root acts on the copy only inside its directory, once proved
+  root's, not a link and — for the run that made it — still holding its token (`IN_COPY_SCRIPT`).
 - **Never interactive**: `sudo -n` fails instead of waiting for a password; `--` stops sudo parsing
   the target's flags.
 - **Refusable per site** (`transport.elevate: false`), enforced by `execElevated` throwing. The probe

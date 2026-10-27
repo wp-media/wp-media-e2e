@@ -18,6 +18,7 @@ import { env, intEnv } from "./env";
 import {
   registerDebugLogOptions,
   registerPool,
+  registerSettleLeftovers,
   registerSiteDataDirResolver,
   registerSiteDbResidue,
   registerSiteResidue,
@@ -221,6 +222,10 @@ export function createProductConfig(
   // And for how to stop work it may still be doing on a site, which the shared teardown asks for
   // before it removes the plugin — a function, so this registry is its only possible channel.
   registerStopRunningWork(product.name, product.stopRunningWork);
+
+  // And for how to settle what its killed runs left, which the auth setup's preflight asks for
+  // before its gates — a function too.
+  registerSettleLeftovers(product.name, product.settleLeftovers);
 
   // A stop file the drain gate could never see fails the run here, as it starts — not every
   // scenario, and not silently, as a gate that never closes would; so does one already there, which

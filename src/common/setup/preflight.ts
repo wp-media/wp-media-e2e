@@ -27,11 +27,19 @@ import { maskSiteUrl } from "../text";
 import type {
   DockerTransport,
   LocalTransport,
+  SettleLeftovers,
   SiteConfig,
   SiteInput,
   SshTransport,
   Transport,
 } from "../config/types";
+
+/**
+ * What a product's `settleLeftovers` may take — added once to the auth setup's timeout (sites settle
+ * concurrently) and the bound of a product fixture running the same settling: putting a copy back
+ * rewrites a whole content directory.
+ */
+export const SETTLE_LEFTOVERS_ALLOWANCE_MS = 15 * 60 * 1000;
 
 /**
  * Pre-flight transport verification — runs before authentication and tests.
@@ -941,6 +949,8 @@ async function checkBootAndLocale(
  * @param cell - the cell, for the report.
  * @param slugs - the slug(s) the cell installs as, for {@link verifySite}.
  * @param heal - see {@link verifySite}.
+ * @param settle - the product's `settleLeftovers`, run on every site before its checks
+ * ({@link settleSiteLeftovers}); the healthcheck, calling {@link verifySite} alone, never settles.
  */
 export async function verifyPool(
   pool: readonly SiteConfig[],
@@ -948,12 +958,19 @@ export async function verifyPool(
   cell: string,
   slugs: readonly string[] = [],
   heal?: HealCellPlugin,
+  settle?: SettleLeftovers,
 ): Promise<void> {
   const real = pool
     .map((site, i) => ({ site, i }))
     .filter(({ site }) => !isPlaceholderSite(site));
 
   if (real.length === 0) return;
+
+  if (settle !== undefined) {
+    await Promise.all(
+      real.map(({ site }) => settleSiteLeftovers(site, settle)),
+    );
+  }
 
   const results = await Promise.all(
     real.map(({ site, i }) => verifySite(site, i, slugs, heal)),
@@ -975,6 +992,27 @@ export async function verifyPool(
   if (failed.length === 0) return;
 
   throw new Error(buildReport(failed, results.length, product, cell));
+}
+
+/**
+ * Settles what a product's killed runs left on one site, before the gates — which that damage could
+ * fail, skipping the very fixtures that settle it. Best-effort: a refusal or failure is a warning, and
+ * the gates and the product's own checks then judge the site as they find it.
+ *
+ * @param site - the site.
+ * @param settle - the product's `settleLeftovers`.
+ */
+export async function settleSiteLeftovers(
+  site: SiteInput,
+  settle: SettleLeftovers,
+): Promise<void> {
+  try {
+    await settle(site);
+  } catch (error) {
+    console.warn(
+      `[preflight] ${maskSiteUrl(site.baseURL)}: left as found — ${errorMessage(error)}`,
+    );
+  }
 }
 
 /**
