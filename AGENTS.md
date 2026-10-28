@@ -39,6 +39,7 @@ src/
 │   ├── guards.ts           # type guards for narrowing `unknown`
 │   ├── text.ts             # string helpers: escapeRegExp, escapeHtml, redactSecrets/maskValues (credentials), maskSiteUrl (a baseURL shown safely), plain
 │   ├── deadline.ts         # withinBudget: a time limit for a best-effort step
+│   ├── terminal/           # side-effect-free terminal output: capabilities.ts (colour/live/Unicode, one precedence; every input a parameter), palette.ts (semantic colours via styleText, symbols + ASCII fallback, a status's word unless a coloured terminal)
 │   ├── steps/              # generic step definitions
 │   ├── hooks/              # shared scenario hooks (*.hooks.ts) + their policy modules
 │   ├── pages/              # cross-product page objects (plugins, site-health) + secret-field.ts (typing a secret no report records)
