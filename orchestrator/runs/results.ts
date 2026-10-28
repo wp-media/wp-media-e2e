@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { parseResults } from "../../src/common/reporting/results-reader";
 import type {
+  ResultsEvent,
   RunEndEvent,
   ScenarioEndEvent,
 } from "../../src/common/reporting/results-schema";
@@ -148,46 +149,102 @@ export const MAX_LINE_LENGTH = 256 * 1024;
  * @returns what it held.
  */
 export function readRunResults(text: string): RunResults {
-  const kept = text
-    .split("\n")
-    .filter((line) => line.length <= MAX_LINE_LENGTH)
-    .join("\n");
-  const { events } = parseResults(kept.endsWith("\n") ? kept : `${kept}\n`);
-  let begin: RunBegin | undefined;
-  let end: RunEnd | undefined;
-  const setups = new Map<string, SetupResult>();
-  const scenarios = new Map<string, ScenarioResult>();
-  const runErrors: string[] = [];
-  for (const event of events) {
+  const fold = new RunResultsFold();
+  for (const event of resultLines(text).events) fold.apply(event);
+  return fold.results();
+}
+
+/** What {@link resultLines} found. */
+export interface ResultLines {
+  /** The events, in order. */
+  readonly events: readonly ResultsEvent[];
+  /** Lines that are not events (`parseResults`'s count), and lines over {@link MAX_LINE_LENGTH}. */
+  readonly skipped: number;
+}
+
+/**
+ * A stream's lines as events: each line over {@link MAX_LINE_LENGTH} UTF-16 units dropped unparsed,
+ * the rest through the suite's reader (`parseResults`). The one line rule of this reader and of the
+ * status table's tail, so both drop the same lines. A last line without its newline is read as whole.
+ *
+ * @param text - whole lines of the stream.
+ * @returns the events, and how many lines were skipped.
+ */
+export function resultLines(text: string): ResultLines {
+  const lines = text.split("\n");
+  const kept = lines.filter((line) => line.length <= MAX_LINE_LENGTH);
+  const joined = kept.join("\n");
+  const { events, skipped } = parseResults(
+    joined.endsWith("\n") ? joined : `${joined}\n`,
+  );
+  return { events, skipped: skipped + lines.length - kept.length };
+}
+
+/**
+ * Folds a stream's events, one at a time, into what {@link readRunResults} returns — the end-of-run
+ * reader's rules, also followed by the status table as a run goes (`status/progress.ts`), so a line
+ * one drops the other drops too. Holds one entry per test id.
+ */
+export class RunResultsFold {
+  /** The first `run.begin` of the right shape. */
+  private begin: RunBegin | undefined;
+  /** The last `run.end` of the right shape. */
+  private end: RunEnd | undefined;
+  /** Each setup's last end, by test id. */
+  private readonly setups = new Map<string, SetupResult>();
+  /** Each scenario's last end, by test id. */
+  private readonly scenarios = new Map<string, ScenarioResult>();
+  /** Every `run.error`'s message. */
+  private readonly runErrors: string[] = [];
+
+  /**
+   * Applies one event; a type this reader does not keep, or a line of the wrong shape, is ignored.
+   *
+   * @param event - the event, as the suite's reader parsed it.
+   * @returns `true` when it was kept.
+   */
+  apply(event: ResultsEvent): boolean {
     switch (event.type) {
-      case "run.begin":
-        begin ??= parsed(beginSchema, event);
-        break;
-      case "run.end":
-        end = parsed(endSchema, event) ?? end;
-        break;
+      case "run.begin": {
+        if (this.begin !== undefined) return false;
+        this.begin = parsed(beginSchema, event);
+        return this.begin !== undefined;
+      }
+      case "run.end": {
+        const end = parsed(endSchema, event);
+        if (end === undefined) return false;
+        this.end = end;
+        return true;
+      }
       case "setup.end":
-        keep(setups, parsed(setupSchema, event));
-        break;
+        return keep(this.setups, parsed(setupSchema, event));
       case "scenario.end":
-        keep(scenarios, parsed(scenarioSchema, event));
-        break;
+        return keep(this.scenarios, parsed(scenarioSchema, event));
       case "run.error": {
         const error = parsed(runErrorSchema, event);
-        if (error !== undefined) runErrors.push(error.message);
-        break;
+        if (error === undefined) return false;
+        this.runErrors.push(error.message);
+        return true;
       }
       default:
-        break;
+        return false;
     }
   }
-  return {
-    ...(begin === undefined ? {} : { begin }),
-    ...(end === undefined ? {} : { end }),
-    setups: [...setups.values()],
-    scenarios: [...scenarios.values()],
-    runErrors,
-  };
+
+  /**
+   * What the events so far held.
+   *
+   * @returns them, fresh arrays.
+   */
+  results(): RunResults {
+    return {
+      ...(this.begin === undefined ? {} : { begin: this.begin }),
+      ...(this.end === undefined ? {} : { end: this.end }),
+      setups: [...this.setups.values()],
+      scenarios: [...this.scenarios.values()],
+      runErrors: [...this.runErrors],
+    };
+  }
 }
 
 /**
@@ -211,12 +268,15 @@ function parsed<T extends z.ZodType>(
  *
  * @param ends - the ends so far, by test id.
  * @param end - this line's, when it was of the right shape.
+ * @returns whether it was kept.
  */
 function keep<T extends { readonly id: string }>(
   ends: Map<string, T>,
   end: T | undefined,
-): void {
-  if (end !== undefined) ends.set(end.id, end);
+): boolean {
+  if (end === undefined) return false;
+  ends.set(end.id, end);
+  return true;
 }
 
 /**

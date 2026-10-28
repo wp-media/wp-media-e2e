@@ -74,8 +74,12 @@ export const SYMBOLS = {
 /** A symbol's role. */
 export type SymbolName = keyof typeof SYMBOLS;
 
-/** A status, which always has a symbol, a word and a colour. */
-export type Status = "passed" | "failed" | "flaky" | "stopped" | "warning";
+/**
+ * A status, which always has a symbol, a word and a colour. `error` (a run that could not test) and
+ * `killed` (a run stopped by SIGKILL) are the orchestrator's run statuses.
+ */
+export type Status =
+  "passed" | "failed" | "flaky" | "stopped" | "warning" | "error" | "killed";
 
 /** How a status is shown. */
 interface StatusStyle {
@@ -95,6 +99,9 @@ export const STATUSES: Readonly<Record<Status, StatusStyle>> = {
   flaky: { symbol: "warning", token: "warn", markAlone: false },
   stopped: { symbol: "stopped", token: "stop", markAlone: true },
   warning: { symbol: "warning", token: "warn", markAlone: true },
+  // Each shares its mark and colour with another status: only the word tells them apart.
+  error: { symbol: "failed", token: "fail", markAlone: false },
+  killed: { symbol: "stopped", token: "stop", markAlone: false },
 };
 
 /** Styles and symbols for one stream, from its capabilities. */

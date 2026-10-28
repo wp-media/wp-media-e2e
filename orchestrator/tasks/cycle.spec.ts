@@ -21,6 +21,7 @@ import { RESULTS_FILE } from "../../src/common/reporting/results-schema";
 import type { RunFinishedEvent } from "../events/run-finished";
 import { datatorPayload } from "../notify/datator";
 import { runIdentity } from "../runs/identity";
+import type { TaskActivity } from "./activity";
 import {
   launchRun,
   type LaunchedRun,
@@ -527,14 +528,14 @@ test.describe("runOnce — runs to their end", () => {
 });
 
 test.describe("runOnce — stopped at each stage", () => {
-  test("tells onRunBegun each run's id as it begins, never one a stop kept from starting", async () => {
-    const begun: string[] = [];
+  test("tells onActivity each run's begin — id, report folder, start — never one a stop kept from starting", async () => {
+    const told: TaskActivity[] = [];
     const { deps } = harness(
       { exitCode: 1 },
       {},
       {
-        onRunBegun: (id) => {
-          begun.push(id);
+        onActivity: (activity) => {
+          told.push(activity);
         },
       },
     );
@@ -542,18 +543,30 @@ test.describe("runOnce — stopped at each stage", () => {
     const stopped = runOnce(TASK, deps);
     stopped.stop("drained", "stop");
     await stopped.done;
-    expect(begun).toEqual(["bpng-1"]);
+    const identity = identityOf(1);
+    expect(told.filter((a) => a.kind === "begun")).toEqual([
+      {
+        kind: "begun",
+        taskId: "bpng",
+        id: "bpng-1",
+        runId: identity.runId,
+        reportDir: identity.reportDir,
+        startedAt: new Date(START),
+      },
+    ]);
+    // A run that never began tells nothing at all: no begin, no stop, no end.
+    expect(told.map((a) => a.kind)).toEqual(["begun", "ended"]);
   });
 
-  test("onRunBegun fires before the launch", async () => {
+  test("the begin is told before the launch", async () => {
     const begun: string[] = [];
     const seenAtLaunch: string[][] = [];
     const { deps } = harness(
       {},
       {},
       {
-        onRunBegun: (id) => {
-          begun.push(id);
+        onActivity: (activity) => {
+          if (activity.kind === "begun") begun.push(activity.id);
         },
         launch: () => {
           seenAtLaunch.push([...begun]);
@@ -565,12 +578,12 @@ test.describe("runOnce — stopped at each stage", () => {
     expect(seenAtLaunch).toEqual([["bpng-1"]]);
   });
 
-  test("an onRunBegun that throws is a line, and the run goes on", async () => {
+  test("an onActivity that throws is a line per activity, and the run goes on", async () => {
     const { deps, seen } = harness(
       { exitCode: 1 },
       {},
       {
-        onRunBegun: () => {
+        onActivity: () => {
           throw new Error(`hook broke ${SECRET}`);
         },
       },
@@ -579,6 +592,145 @@ test.describe("runOnce — stopped at each stage", () => {
     expect(seen.lines).toContain(
       "bpng bpng-1: telling that it began failed: hook broke ***",
     );
+    expect(seen.lines).toContain(
+      "bpng bpng-1: telling that it ended failed: hook broke ***",
+    );
+  });
+
+  test("tells the end of a run with its status, end and scenarios — once, whichever way it ended", async () => {
+    const told: TaskActivity[] = [];
+    // A clock that moves at each reading: the end told is the run's, not the time it is told.
+    let tick = 0;
+    const { deps } = harness({ exitCode: 0 }, runnerWith("passed"), {
+      now: () => new Date(START + 1_000 * tick++),
+      onActivity: (activity) => {
+        told.push(activity);
+      },
+    });
+    const result = ended(await runOnce(TASK, deps).done);
+    const ends = told.filter((a) => a.kind === "ended");
+    expect(ends).toEqual([
+      {
+        kind: "ended",
+        taskId: "bpng",
+        id: "bpng-1",
+        status: result.status,
+        endedAt: result.endedAt,
+        scenarios: 1,
+      },
+    ]);
+    expect(result.status).toBe("passed");
+    expect(result.endedAt.getTime()).toBeLessThan(START + 1_000 * tick - 1_000);
+  });
+
+  test("a cycle that fails after the begin tells its end at once: error, ended now, no scenarios", async () => {
+    const told: TaskActivity[] = [];
+    const at = { ms: START };
+    const { deps, seen } = harness(
+      {},
+      {},
+      {
+        now: () => new Date(at.ms),
+        onActivity: (activity) => {
+          told.push(activity);
+          if (activity.kind === "begun") at.ms = START + 42_000;
+        },
+        // Throws outside every guard of the launch: the cycle itself fails.
+        recordWriter: () => {
+          throw new Error("no writer");
+        },
+      },
+    );
+    expect(await runOnce(TASK, deps).done).toEqual({
+      kind: "notStarted",
+      why: "failed",
+    });
+    expect(
+      seen.lines.some((l) => l.includes("the run failed: no writer")),
+    ).toBe(true);
+    expect(told.map((a) => a.kind)).toEqual(["begun", "ended"]);
+    expect(told[1]).toEqual({
+      kind: "ended",
+      taskId: "bpng",
+      id: "bpng-1",
+      status: "error",
+      endedAt: new Date(START + 42_000),
+    });
+  });
+
+  test("a stop's level told is the one in force: a lesser stop after a greater does not lower it", async () => {
+    const told: TaskActivity[] = [];
+    const { deps } = harness(
+      { runMs: 30_000 },
+      {},
+      {
+        onActivity: (activity) => {
+          told.push(activity);
+        },
+      },
+    );
+    const run = runOnce(TASK, deps);
+    await expect.poll(() => told.some((a) => a.kind === "begun")).toBe(true);
+    run.stop("interrupted", "first");
+    run.stop("drained", "lesser");
+    await run.done;
+    expect(
+      told.flatMap((a) => (a.kind === "stopping" ? [a.level] : [])),
+    ).toEqual(["interrupted", "interrupted"]);
+  });
+
+  test("an onActivity whose promise rejects is a line, never an unhandled rejection", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const { deps, seen } = harness(
+        { exitCode: 1 },
+        {},
+        {
+          onActivity: (() =>
+            Promise.reject(
+              new Error(`async hook broke ${SECRET}`),
+            )) as unknown as CycleDeps["onActivity"],
+        },
+      );
+      await runOnce(TASK, deps).done;
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(seen.lines).toContain(
+        "bpng bpng-1: telling that it began failed: async hook broke ***",
+      );
+      expect(seen.lines).toContain(
+        "bpng bpng-1: telling that it ended failed: async hook broke ***",
+      );
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  test("tells each stop that reaches a run that began, and none once it ended", async () => {
+    const told: TaskActivity[] = [];
+    const { deps } = harness(
+      { runMs: 30_000 },
+      {},
+      {
+        onActivity: (activity) => {
+          told.push(activity);
+        },
+      },
+    );
+    const run = runOnce(TASK, deps);
+    await expect.poll(() => told.some((a) => a.kind === "begun")).toBe(true);
+    run.stop("drained", "first");
+    run.stop("interrupted", "second");
+    await run.done;
+    run.stop("killed", "too late");
+    expect(
+      told.flatMap((a) => (a.kind === "stopping" ? [a.level] : [])),
+    ).toEqual(["drained", "interrupted"]);
+    expect(told.at(-1)?.kind).toBe("ended");
   });
 
   test("a stop asked as the handle is given starts nothing, not even a number", async () => {

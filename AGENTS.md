@@ -66,7 +66,7 @@ orchestrator/               # runs cells in loops. Layout and design: docs/plans
 │                           # parent.ts (the parent's PID at boot: command.ts's first import); start-lines.ts, dry-run.ts (pure); text.ts (masking, safeSiteUrl); log.ts (its terminal via src/common/terminal/stream.ts), files.ts, folders.ts, error-code.ts
 │                           # config/ (zod schema, parse, check, site-key, load, product-list, secrets) · runs/ (identity, environment, commands, launch, stop, shutdown, end, outcome, run.json record)
 │                           # state/ (atomic writes, orchestrator.lock, site locks, inspect, orphans, counter, run folders + retention) · events/ (bus, run.finished v1)
-│                           # tasks/ (cycle: one run; loop: cycle + cooldown, --once) · notify/ (bounded POST, Slack, Datator) · __fixtures__/ (fake suite, fake start, HTTP sink)
+│                           # tasks/ (cycle: one run; loop: cycle + cooldown, --once; activity: what they tell `onActivity`) · status/ (the status table: results.jsonl tail, progress, task board, plain table; built, not yet shown) · notify/ (bounded POST, Slack, Datator) · __fixtures__/ (fake suite, fake start, HTTP sink)
 │                           # soak.spec.ts (hundreds of runs over the fake suite; ORCHESTRATOR_SOAK=1, npm run orchestrator:soak)
 docker/                     # local WordPress for the `docker` transport
 docs/                       # architecture & guides (linked below)

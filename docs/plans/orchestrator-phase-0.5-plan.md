@@ -389,8 +389,10 @@ reaches the placeholder check, not "no cell".
   (`<id> not started: <why>`; no record, no `run.finished`); asked later but before `bddgen`'s
   starting record (while its site locks are named or during the launch), nothing is spawned and the
   run is recorded and published `stopped`. Its handle is `{ stop(level, why), done }`, `done` never
-  rejecting; `onRunBegun` tells the start each run's id and task as it begins (§4.5's give-up names
-  only those).
+  rejecting; `onActivity` (`tasks/activity.ts`) tells the start each run as it begins — id, task,
+  `RUN_ID`, report folder, start; §4.5's give-up names only those — then each stop that reaches it
+  (the level in force) and its end, and the loop each attempt that began no run, its cooldowns and
+  its own end (the status table's source). Synchronous; a listener that throws or rejects is a line.
 - Launch (`runs/launch.ts`), Phase 0's run contract unchanged: Node (`process.execPath`) runs
   `node_modules/playwright-bdd/dist/cli/index.js --config playwright.<product>.config.ts`, then, if
   it exited 0, `node_modules/@playwright/test/cli.js test --config playwright.<product>.config.ts`,
@@ -755,7 +757,8 @@ $XDG_STATE_HOME/wp-media-e2e/site-locks/   (else ~/.local/state/…) both 0700, 
   with the next. It stays open for the process's life, so a `logrotate` that renames it leaves the
   orchestrator writing to the renamed file: rotate with `copytruncate` (the copy may lose the lines
   written during it), or not at all. The terminal's lines are `HH:MM:SS <scope>  <text>`, styled on a
-  TTY by modernization Phase 7; the words and the file's line are unchanged.
+  TTY by modernization Phase 7; the words and the file's line are unchanged. A piped stdout stays
+  exactly these lines (Phase 7 never adds a table or colour to a pipe).
 - The orchestrator never reads `E2E_*` variables (parent §1); only its config and flags.
 
 ### 4.10 Secrets in output
@@ -798,7 +801,8 @@ $XDG_STATE_HOME/wp-media-e2e/site-locks/   (else ~/.local/state/…) both 0700, 
 
 The disk warning (0A.3) needs a remote `df` per run; a Slack test message, `status`, `logs` and
 `stop` commands need the API. All belong with Phase 1's service. Per-run terminal progress arrives
-earlier, from modernization Phase 7: a table tailing each run's `results.jsonl`.
+earlier, from modernization Phase 7: a table tailing each run's `results.jsonl` — its model is in
+`status/` (7.3a: built and tested, shown by nothing yet; 7.3b draws it on a TTY).
 
 ## 5. Code layout
 
@@ -811,7 +815,11 @@ orchestrator/
   config.example.json       the committed example (§4.2)
   suite-imports.json        the suite modules it may import (below)
   config/                   schema (zod), parse, json-keys, check, site-key, load, secrets, product-list, errors
-  tasks/                    cycle.ts (one run), loop.ts (cycle, cooldown, --once), run-lines.ts
+  tasks/                    cycle.ts (one run), loop.ts (cycle, cooldown, --once), run-lines.ts,
+                            activity.ts (what a loop and its runs tell: begun, stopping, ended,
+                            notStarted, cooling, loopEnded)
+  status/                   the status table: tail (results.jsonl), progress, board (task states),
+                            table (plain layout), view (capabilities), watch (the shell: polls, sink)
   runs/                     identity, environment, commands, launch, process-group, stream-end, stop,
                             shutdown, end, results, facts, outcome, record, leader
   events/                   bus, run-finished (types + builder)
@@ -845,7 +853,7 @@ real script, `cli.ts` and `command.ts` over it through `swap-start.mjs`.
   only what `suite-imports.json` lists: `src/common/artifacts/request.ts`, `config/run-env.ts`,
   `config/run-id.ts`, `config/sites.ts`, `reporting/results-reader.ts`,
   `reporting/results-schema.ts`, `reporting/retention.ts`, `src/common/terminal/capabilities.ts`,
-  `terminal/palette.ts`, `src/common/text.ts`, `src/projects/products.ts` — each admitted only once the boundary spec passes with it. Not
+  `terminal/layout.ts`, `terminal/live.ts`, `terminal/palette.ts`, `terminal/stream.ts`, `src/common/text.ts`, `src/projects/products.ts` — each admitted only once the boundary spec passes with it. Not
   `reporting/run-facts.ts`, which imports the reporter's whole summary: `runs/facts.ts` reads the
   file itself (a spec checks its name against the suite's). Enforced twice, since a lint rule sees
   only an import's spelling, not where it leads or what that module imports, and misses `import()`
@@ -950,7 +958,7 @@ For later phases or the deployment: §8's changes and §4.11; a systemd unit (§
 errors; a switch turning the suite's end-of-run pruning off (§8); the Slack next-run line (user's
 idea, §4.7); on the runner, §6 end to end and V121/V122 there (§9, D4); the first production Slack
 and Datator posts (D5, D6). Terminal rendering and the live table are modernization Phase 7, not
-Phase 1's service (§4.11).
+Phase 1's service (§4.11); 7.3a delivered the table's model (`status/`), 7.3b shows it.
 
 ### 7.2 Traps
 
