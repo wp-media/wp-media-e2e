@@ -196,10 +196,23 @@ test.describe("detectCapabilities — the live region", () => {
     ],
     ["0 columns", {}, { stream: { isTTY: true, columns: 0, rows: 24 } }, false],
     ["0 rows", {}, { stream: { isTTY: true, columns: 80, rows: 0 } }, false],
+    // Narrower than the layout's 20 columns, a live row would wrap.
     [
-      "1×1 is a size",
+      "1×1 is too narrow",
       {},
       { stream: { isTTY: true, columns: 1, rows: 1 } },
+      false,
+    ],
+    [
+      "19 columns is too narrow",
+      {},
+      { stream: { isTTY: true, columns: 19, rows: 24 } },
+      false,
+    ],
+    [
+      "20×1 is enough",
+      {},
+      { stream: { isTTY: true, columns: 20, rows: 1 } },
       true,
     ],
     [

@@ -208,10 +208,43 @@ const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g;
 const FORMAT = /\p{Cf}/gu;
 
 /**
- * A value as one line of plain text: escape sequences removed, every other control character a
- * space, invisible format characters dropped. What sites, setups and the environment report — Site
- * Health's text, an error, a run's name — is printed and shown in the reports, and none of it may move
- * the cursor, recolour the terminal, break a line or display as something it is not.
+ * The most combining marks (Unicode `M`: nonspacing, spacing and enclosing) kept in a row. Real
+ * text stays whole: Vietnamese stacks 2; cantillated Hebrew, Burmese syllables and Tibetan stacks
+ * 5. "Zalgo" text, whose dozens of stacked marks draw over the lines above and below and cost a
+ * renderer per mark, is cut to it.
+ */
+export const MAX_COMBINING_MARKS = 8;
+
+/** A run of combining marks longer than {@link MAX_COMBINING_MARKS}: its first ones, then the rest. */
+const EXCESS_MARKS = new RegExp(
+  `(\\p{M}{${String(MAX_COMBINING_MARKS)}})\\p{M}+`,
+  "gu",
+);
+
+/**
+ * `text` with nothing in it that drives a terminal: lone surrogates (half an emoji, cut by a byte
+ * limit) made U+FFFD, escape sequences removed, every other control character (a tab, a newline,
+ * an `ESC` or C1 left of a sequence Node does not recognise, such as DCS or an unterminated OSC) a
+ * space. Nothing else changes (no trim): spacing is kept. The first half of {@link plain}, and what
+ * the terminal layout runs on its input.
+ *
+ * @param text - any text.
+ * @example
+ * ```ts
+ * withoutControls("\u001b[31mred\u001b[0m\tnext"); // "red next"
+ * ```
+ */
+export function withoutControls(text: string): string {
+  return stripVTControlCharacters(text.toWellFormed()).replace(CONTROL, " ");
+}
+
+/**
+ * A value as one line of plain text: {@link withoutControls}, then invisible format characters
+ * dropped (the ZWJ of an emoji sequence too, which then shows as its parts), runs of combining marks
+ * capped at {@link MAX_COMBINING_MARKS}, and the ends trimmed. What sites, setups and the
+ * environment report — Site Health's text, an error, a run's name — is printed and shown in the
+ * reports, and none of it may move the cursor, recolour the terminal, break a line, spill over other
+ * lines or display as something it is not.
  *
  * @param text - the value.
  * @example
@@ -220,8 +253,8 @@ const FORMAT = /\p{Cf}/gu;
  * ```
  */
 export function plain(text: string): string {
-  return stripVTControlCharacters(text)
-    .replace(CONTROL, " ")
+  return withoutControls(text)
     .replace(FORMAT, "")
+    .replace(EXCESS_MARKS, "$1")
     .trim();
 }
