@@ -7,6 +7,7 @@
  */
 
 import { isNonEmptyString } from "../guards";
+import type { OutputMode } from "../terminal/capabilities";
 
 /** Returns an environment variable's value, or `fallback` when it is unset or blank. */
 export function env(name: string, fallback = ""): string {
@@ -85,5 +86,33 @@ export function boolEnv(
   if (value !== undefined) return value;
   throw new Error(
     `Environment variable "${name}" must be a boolean (true/false/1/0), got "${raw}".`,
+  );
+}
+
+/** How much styling a run's terminal output may use: `auto`, `plain` or `fancy`. */
+export const OUTPUT_ENV = "E2E_OUTPUT";
+
+/** The values {@link outputModeEnv} accepts, as an operator writes them. */
+const OUTPUT_MODES: readonly OutputMode[] = ["auto", "plain", "fancy"];
+
+/**
+ * The suite's terminal output mode, `E2E_OUTPUT`: `auto` (styled on a terminal, plain otherwise),
+ * `plain` (no colour, no cursor movement, ASCII) or `fancy` (as `auto`, and live even under `CI`).
+ * Case-insensitive, surrounding whitespace ignored; `auto` when unset or blank. Throws on anything
+ * else, so a typo fails the run as its config loads rather than silently styling it.
+ *
+ * @param source - Where to read it; `process.env` unless a caller (or a spec) holds another.
+ * @throws {@link Error} naming the variable and the values it takes.
+ */
+export function outputModeEnv(
+  source: NodeJS.ProcessEnv = process.env,
+): OutputMode {
+  const raw = source[OUTPUT_ENV];
+  if (!isNonEmptyString(raw)) return "auto";
+  const value = raw.trim().toLowerCase();
+  const mode = OUTPUT_MODES.find((candidate) => candidate === value);
+  if (mode !== undefined) return mode;
+  throw new Error(
+    `Environment variable "${OUTPUT_ENV}" must be one of ${OUTPUT_MODES.join("/")}, got "${raw}".`,
   );
 }

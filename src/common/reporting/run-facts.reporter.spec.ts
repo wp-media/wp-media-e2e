@@ -32,6 +32,7 @@ import {
   RUN_FACTS_FILE,
 } from "./run-facts";
 import RunFactsReporter, { setHtmlTitle } from "./run-facts.reporter";
+import { registerTerminalSink } from "./terminal-sink";
 
 /**
  * The run-facts reporter driven as Playwright drives it, on fakes, into a temporary report folder:
@@ -349,6 +350,29 @@ test.describe("RunFactsReporter — sits out, never throws", () => {
     // The metadata and the title need no file.
     expect(cfg.metadata).toHaveProperty("Status", "passed");
     expect(process.env.PLAYWRIGHT_HTML_TITLE).toMatch(/^backwpup · pro@nginx/);
+  });
+
+  test("its warning goes through the run's terminal sink when there is one, never stderr", () => {
+    const blocked = join(dir, "blocked-sink");
+    writeFileSync(blocked, "");
+    const printed: string[] = [];
+    const unregister = registerTerminalSink({
+      print: (text) => printed.push(text),
+    });
+    try {
+      const reporter = new RunFactsReporter(run(blocked));
+      const stderr = captureWrites(process.stderr, () => {
+        void passingRun(reporter, config());
+      });
+      expect(stderr).toEqual([]);
+      expect(printed).toEqual([
+        expect.stringMatching(
+          /^\[run-facts\] .*\. The reports may not say what the run tested\.$/,
+        ),
+      ]);
+    } finally {
+      unregister();
+    }
   });
 
   test("a Cucumber report cut short, or missing, gets no banner and one warning", () => {

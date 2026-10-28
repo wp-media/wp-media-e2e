@@ -139,6 +139,7 @@ accessors in [`env.ts`](../../src/common/config/env.ts) (`env`, `requireEnv`, `i
 | `E2E_LOAD_DOTENV`        | `true`                     | `false`/`0` in the environment skips `.env` (below).                            |
 | `E2E_RETRIES`            | `2`                        | Retries per failed scenario (0–10; below).                                      |
 | `E2E_REPORTS_KEEP`       | `20`                       | Reports a cell keeps (0–10000; below).                                          |
+| `E2E_OUTPUT`             | `auto`                     | Terminal output: `auto`, `plain` (no colour, ASCII marks) or `fancy`; else fails. |
 | `CI`                     | _(unset)_                  | Non-empty enables `forbidOnly`.                                                 |
 | `PRODUCT`                | `wp-rocket`                | Product for the bare `playwright.config.ts` (below).                            |
 | `REPORT_MODE`            | _(unset)_ → self-contained | `rich` → external attachments + embedded trace viewer (serve over http).        |

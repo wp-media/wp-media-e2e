@@ -34,6 +34,7 @@ import {
   type RunDescription,
 } from "./run-description";
 import { describePruning, pruneRunGroup, type PruneLine } from "./run-pruning";
+import { outputModeOption } from "./terminal-mode";
 import {
   parsePluginFacts,
   parseSiteFacts,
@@ -464,6 +465,9 @@ function errorLines(style: Styler, errors: readonly string[]): string[] {
 const terminalStyle: Styler = (format, text) =>
   styleText(format, text, { stream: process.stdout });
 
+/** No colour at all: `E2E_OUTPUT=plain`, whatever `FORCE_COLOR` says. */
+const plainStyle: Styler = (_format, text) => text;
+
 /** Prints {@link renderSummary} as the run's last word; see the module's description. */
 export default class RunSummaryReporter implements Reporter {
   /** What the config factory said about the run, or the field it forgot. */
@@ -478,11 +482,18 @@ export default class RunSummaryReporter implements Reporter {
   private readonly cells = new Map<string, CellFacts>();
   /** How the run ended; set by `onEnd`. */
   private ended: Pick<FullResult, "status" | "duration"> | undefined;
+  /** How the summary is coloured: never under `E2E_OUTPUT=plain`, else as the stream allows. */
+  private readonly style: Styler;
 
-  /** @param options - a {@link RunDescription}, plus what Playwright adds. */
+  /**
+   * @param options - a {@link RunDescription} and `output` (`E2E_OUTPUT`: `plain` drops colour),
+   *   plus what Playwright adds.
+   */
   constructor(options: unknown) {
     this.run = readRunDescription(options);
     this.mode = reporterMode(options);
+    this.style =
+      outputModeOption(options) === "plain" ? plainStyle : terminalStyle;
   }
 
   /**
@@ -560,7 +571,7 @@ export default class RunSummaryReporter implements Reporter {
           cells: this.cells,
           pruned: prune(this.run),
         },
-        terminalStyle,
+        this.style,
       );
       process.stdout.write(`\n${lines.join("\n")}\n`);
     });

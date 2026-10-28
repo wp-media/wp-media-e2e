@@ -5,7 +5,7 @@ import type { ReporterDescription } from "@playwright/test";
 import { cucumberReporter } from "playwright-bdd";
 
 import type { RunDescription } from "../reporting/run-description";
-import { env } from "./env";
+import { env, outputModeEnv } from "./env";
 
 /**
  * One of the suite's own reporters, by its file, absolute: Playwright resolves a relative reporter
@@ -21,11 +21,16 @@ function ownReporter(file: string): string {
  * The layered reporter stack for one run unit, written into `run.reportPath`:
  *
  *  - cell notice         — one line naming the run's cell and how it was chosen; first, so it
- *                          prints before `list`'s "Running …" (`reporting/cell-notice.ts`).
+ *                          prints before the terminal reporter's header (`reporting/cell-notice.ts`).
  *  - results stream      — every attempt and the totals as JSON lines, in `results.jsonl`, as they
  *                          happen; silent. Before the reports, so its last line lands before
  *                          their slow `onEnd` (`reporting/results-stream.ts`).
- *  - `list`              — concise terminal output.
+ *  - terminal            — the run on the terminal, in `list`'s place: a `[run]` header, a line per
+ *                          test and per retry, the workers' output made plain and masked, errors
+ *                          outside any test. The run's one writer: the cell notice and the other
+ *                          reporters' warnings print through it. Gets `output` (`E2E_OUTPUT`, read
+ *                          and validated here, so a bad value fails the run as it starts)
+ *                          (`reporting/terminal.reporter.ts`).
  *  - run facts           — what the run tested (plugin, SHA-256, site, verdict) up front in every
  *                          report: the HTML title and metadata, Allure's environment, a Cucumber
  *                          banner, `run-facts.json`. Before the reports: the HTML report reads, in
@@ -48,13 +53,14 @@ function ownReporter(file: string): string {
  *                          First it prunes the run's report group, once every report is written
  *                          (`reporting/run-pruning.ts`, `run.reportsKeep`).
  *
- * The suite's own reporters each receive `run` as their options.
+ * The suite's own reporters each receive `run` as their options. `--reporter` replaces this whole
+ * stack — stream, reports and summary included — not just the terminal reporter.
  *
  * @param run - what the config factory knows about the run. Its `reportPath` must be absolute:
  *   Playwright resolves its reporters' relative paths against the config's folder, but
  *   allure-playwright resolves `resultsDir` against the working directory, so a relative folder
  *   splits the report when a run starts anywhere but the repository root.
- * @throws {@link Error} when `run.reportPath` is relative.
+ * @throws {@link Error} when `run.reportPath` is relative, or `E2E_OUTPUT` is not a mode.
  */
 export function reporters(run: RunDescription): ReporterDescription[] {
   const reportDir = run.reportPath;
@@ -65,10 +71,11 @@ export function reporters(run: RunDescription): ReporterDescription[] {
     );
   }
   const rich = env("REPORT_MODE") === "rich";
+  const output = outputModeEnv();
   return [
     [ownReporter("cell-notice.ts"), run],
     [ownReporter("results-stream.ts"), run],
-    ["list"],
+    [ownReporter("terminal.reporter.ts"), { ...run, output }],
     [ownReporter("run-facts.reporter.ts"), run],
     ["html", { outputFolder: `${reportDir}/playwright`, open: "never" }],
     cucumberReporter("html", {
@@ -77,6 +84,6 @@ export function reporters(run: RunDescription): ReporterDescription[] {
       skipAttachments: rich ? false : ["application/zip"],
     }),
     ["allure-playwright", { resultsDir: `${reportDir}/allure-results` }],
-    [ownReporter("run-summary.ts"), run],
+    [ownReporter("run-summary.ts"), { ...run, output }],
   ];
 }
