@@ -13,11 +13,19 @@ import {
   assertWaitMs,
   drainTerminal,
   stdoutTerminal,
+  TERMINAL_BACKLOG_BYTES,
   type Terminal,
-} from "./terminal";
+} from "../src/common/terminal/stream";
 import { safeLine } from "./text";
 
-export type { Terminal } from "./terminal";
+export type { Terminal } from "../src/common/terminal/stream";
+/**
+ * The most bytes left waiting for the terminal before its lines are skipped (the shared bound, a live
+ * region's too): about 4,000 ordinary lines, so a slow terminal loses none, and a stalled one costs at
+ * most this much memory. Bytes indeed: the logger writes its lines UTF-8 encoded, which the stream
+ * counts by the byte (a string it would count by UTF-16 unit, a third of the bytes of a `✔`).
+ */
+export { TERMINAL_BACKLOG_BYTES };
 
 /**
  * The orchestrator's own log: one line per event, written to the terminal as `HH:MM:SS <scope>  <text>`
@@ -104,14 +112,6 @@ export const MAX_SCOPE_LENGTH = 40;
 
 /** The longest text a line shows, in code points: an outcome line with its report path fits. */
 export const MAX_TEXT_LENGTH = 2_000;
-
-/**
- * The most bytes left waiting for the terminal before its lines are skipped: about 4,000 ordinary
- * lines, so a slow terminal loses none, and a stalled one costs at most this much memory. Bytes indeed:
- * the logger writes its lines UTF-8 encoded, which the stream counts by the byte (a string it would
- * count by UTF-16 unit, a third of the bytes of a `✔`).
- */
-export const TERMINAL_BACKLOG_BYTES = 1024 * 1024;
 
 /** How long {@link Logger.flush} and {@link Logger.close} wait at most, by default. */
 export const DEFAULT_WAIT_MS = 5_000;

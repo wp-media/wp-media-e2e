@@ -40,13 +40,13 @@ src/
 │   ├── guards.ts           # type guards for narrowing `unknown`
 │   ├── text.ts             # string helpers: escapeRegExp, escapeHtml, redactSecrets/maskValues (credentials), maskSiteUrl (a baseURL shown safely), withoutControls (well-formed, no escape or control), plain (one line: + no Cf, combining marks capped at 8)
 │   ├── deadline.ts         # withinBudget: a time limit for a best-effort step
-│   ├── terminal/           # side-effect-free terminal output: capabilities.ts (colour/live/Unicode, one precedence; every input a parameter), palette.ts (semantic colours via styleText, symbols + ASCII fallback, a status's word unless a coloured terminal), layout.ts (plain text in: width 20–120, display width, grapheme-safe cutToWidth, padding, rules, 500-code-point capLine)
+│   ├── terminal/           # side-effect-free terminal output: capabilities.ts (colour/live/Unicode, one precedence; every input a parameter), palette.ts (semantic colours via styleText, symbols + ASCII fallback, a status's word unless a coloured terminal), layout.ts (plain text in: width 20–120, display width, grapheme-safe cutToWidth, padding, rules, 500-code-point capLine), stream.ts (unblockTerminal/stdoutTerminal: non-blocking TTY stdout; openLiveTerminal: that plus a no-op `error` listener, the only way to a live region; drainTerminal before exit; writeSafely, backlogBytes, TERMINAL_BACKLOG_BYTES), live.ts (the live region: byte-exact `\r\n` cursor contract, throttle, one repaint per print burst, SGR-only style, backlog bound, resize, close; dead after a failed write)
 │   ├── steps/              # generic step definitions
 │   ├── hooks/              # shared scenario hooks (*.hooks.ts) + their policy modules
 │   ├── pages/              # cross-product page objects (plugins, site-health) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm, pin)
-│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection
+│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), the live region's tmux driver (live-tmux*)
 │   └── wp/                 # WordPress over WP-CLI (exec, php, staging, plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
@@ -63,7 +63,7 @@ orchestrator/               # runs cells in loops. Layout and design: docs/plans
 │                           # cli.ts (entry: `exec node --import tsx`, never the `tsx` CLI; `process.exit(await runCommand(…))`)
 │                           # command.ts (commander `start [--config] [--task <id…>] [--once] [--dry-run]`; refuses options npm took)
 │                           # start.ts (config, lock, orphan check, site locks, every task's loop; signals or the parent ending stop it; prepareStart = --dry-run's seam)
-│                           # parent.ts (the parent's PID at boot: command.ts's first import); start-lines.ts, dry-run.ts (pure); text.ts (masking, safeSiteUrl); log.ts, terminal.ts (non-blocking stdout), files.ts, folders.ts, error-code.ts
+│                           # parent.ts (the parent's PID at boot: command.ts's first import); start-lines.ts, dry-run.ts (pure); text.ts (masking, safeSiteUrl); log.ts (its terminal via src/common/terminal/stream.ts), files.ts, folders.ts, error-code.ts
 │                           # config/ (zod schema, parse, check, site-key, load, product-list, secrets) · runs/ (identity, environment, commands, launch, stop, shutdown, end, outcome, run.json record)
 │                           # state/ (atomic writes, orchestrator.lock, site locks, inspect, orphans, counter, run folders + retention) · events/ (bus, run.finished v1)
 │                           # tasks/ (cycle: one run; loop: cycle + cooldown, --once) · notify/ (bounded POST, Slack, Datator) · __fixtures__/ (fake suite, fake start, HTTP sink)

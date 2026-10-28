@@ -818,11 +818,13 @@ orchestrator/
   notify/                   post, slack, datator — pure formatters, thin senders; subscribe
   state/                    atomic, read, errors, lock, lock-owner, pid-space, leftovers, cell-lock,
                             counter, orphans, inspect, run-folders, runs-folder, run-retention
-  log.ts, terminal.ts       a Logger (terminal + file now, pino behind it later); stdout non-blocking
+  log.ts                    a Logger (terminal + file now, pino behind it later); stdout non-blocking
+                            through src/common/terminal/stream.ts
   text.ts, files.ts, folders.ts, error-code.ts   masking and cuts; bounded reads; folder rules
   soak.spec.ts              the soak: the real start over the fake suite (ORCHESTRATOR_SOAK=1)
   __fixtures__/             fake-suite, fake-start + swap-start.mjs, http-sink, import-boundary,
-                            results, run-finished, file-handle, slow-reader, soak (+ its spec)
+                            results, run-finished, file-handle, soak (+ its spec); slow-reader moved to
+                            src/common/__fixtures__/
 ```
 
 Every module takes its clock, paths, `kill` and launch as arguments, so the fake suite (a `node -e`

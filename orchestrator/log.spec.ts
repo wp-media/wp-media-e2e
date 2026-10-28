@@ -38,7 +38,7 @@ import {
   type LogFile,
   type Terminal,
 } from "./log";
-import { runSlowlyRead } from "./__fixtures__/slow-reader";
+import { runSlowlyRead } from "../src/common/__fixtures__/slow-reader";
 
 /** A fixed local time, so a line's clock reads the same in every time zone: 10:15:30. */
 const AT = new Date(2026, 9, 13, 10, 15, 30);
