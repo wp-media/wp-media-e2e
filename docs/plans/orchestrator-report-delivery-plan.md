@@ -1,15 +1,16 @@
 # Orchestrator Report Delivery — prepared download bundles
 
-Status: planned; a Phase 1 slice, not scheduled. Parent: the
-[orchestrator plan](orchestrator-plan.md) (§2 Reports, §3 Planned). Phase 0.5 left Allure
-generation out; this plan adds the missing delivery piece: one prepared download per run.
+Status: planned; a Phase 1 slice, not scheduled; R3 waits for modernization Phase 7's renderer.
+Parent: the [orchestrator plan](orchestrator-plan.md) (§2 Reports, §3 Planned). Phase 0.5 left
+Allure generation out; this plan adds the missing delivery piece: one prepared download per run.
 
 ## TL;DR
 
 At each run's end the orchestrator generates Allure and assembles `<run>/report/` with only what a
 person opens — a landing page, the Playwright report folder, Cucumber and Allure — then packs it as
-`<run>/report.tar.gz`. Slack and the command point at that one file; the raw run folder stays
-untouched for debugging. Generation is bounded and best-effort: a failure never changes a run's
+`<run>/report.tar.gz`. Slack gives one paste-ready command that downloads it, unpacks it into a
+folder named after the run and deletes the archive; the raw run folder stays untouched for
+debugging. Generation is bounded (240 s) and best-effort: a failure never changes a run's
 verdict. Allure is generated from a copy with Playwright traces removed by default, because
 `singleFile` embeds every attachment as base64: 53.8 MB of traces became an 82.6 MB HTML in a
 measured failed run. Traces stay in the Playwright report. `reports.bundle.mode` chooses `archive`
@@ -51,14 +52,23 @@ measured failed run. Traces stay in the Playwright report. `reports.bundle.mode`
 
 ```text
 <run>/
-  report/                 # archive mode builds it, then removes it
+  report/                 # folder/both only (archive mode packs a temp copy)
     index.html            # landing: run facts, links, missing-report notes
     run-facts.json
     playwright/           # index.html + data/ + trace/ when present
     cucumber/             # index.html + data/ + trace/ in rich mode
     allure/               # index.html + awesome/ + dashboard/
-  report.tar.gz           # one scp target
+  report.tar.gz           # one scp target; unpacks to <name>/ (below)
   ... raw folders untouched ...
+```
+
+`<name>` is `<product>-<cell>-<RUN_ID>` (e.g. `backwpup-pro@nginx-2026-10-06T02-47-17-617Z-36442`):
+unique per run, so unpacking several runs side by side never mixes or overwrites them. Slack's
+`Report:` line, pasted in a POSIX shell (macOS, Linux, WSL), leaves `./<name>/index.html` and no
+archive:
+
+```sh
+scp auto-e2e:/path/to/wp-media-e2e/reports/backwpup/pro@nginx/2026-10-06T02-47-17-617Z-36442/report.tar.gz backwpup-pro@nginx-2026-10-06T02-47-17-617Z-36442.tar.gz && tar -xzf backwpup-pro@nginx-2026-10-06T02-47-17-617Z-36442.tar.gz && rm backwpup-pro@nginx-2026-10-06T02-47-17-617Z-36442.tar.gz
 ```
 
 `folder` keeps `report/` only; `both` keeps both; `none` builds neither. The archive contains no
@@ -66,9 +76,10 @@ measured failed run. Traces stay in the Playwright report. `reports.bundle.mode`
 
 ## Design
 
-- Pipeline: after the run's reporters finish and before `run.finished` is built, bounded (e.g.
-  120 s) and best-effort. The event gains `report.bundle` (absolute path or `null`). Any failure is
-  one log line and a `null` bundle; the run keeps its status.
+- Pipeline: after the run's reporters finish and before `run.finished` is built, bounded (240 s,
+  one budget for Allure, copy and tar together) and best-effort. The event gains `report.bundle`
+  (absolute path or `null`). Any failure is one log line and a `null` bundle; the run keeps its
+  status.
 - Allure: `allure generate <filtered results> -o <run>/allure -c allurerc.mjs --name "<facts title>"`,
   with `ALLURE_HISTORY=<cell>/allure-history.jsonl`; write to a temp directory and rename, never
   overwriting a good report on failure. `allurerc.mjs` keeps its `singleFile: true` default for
@@ -81,8 +92,11 @@ measured failed run. Traces stay in the Playwright report. `reports.bundle.mode`
   its `*-attachment.zip`. The raw results are never modified.
 - Bundle: a pure manifest chooses entries; copy with `fs.cp`; generate a no-JS landing page
   (escaped facts, links only, system light/dark, no external assets); pack with the system `tar`.
-  The archive holds the `report/` folder as its single top-level entry, so `tar -xzf` yields
-  `report/index.html`. `report/` is 0700 and `report.tar.gz` is 0600.
+  The archive's single top-level entry is `<name>/`, so `tar -xzf` yields `<name>/index.html`.
+  Build it as `<run>/.bundle-tmp/<name>/` and pack with `tar -czf … -C <run>/.bundle-tmp <name>`;
+  never `--transform`/`-s` (GNU and BSD tar differ). `folder`/`both` then rename it to
+  `<run>/report/`; the temp folder is always removed. `report/` is 0700 and `report.tar.gz` is
+  0600.
 - Config:
 
   ```json
@@ -94,13 +108,26 @@ measured failed run. Traces stay in the Playwright report. `reports.bundle.mode`
 
   The dry run names both choices. `run.finished`'s existing `report.dir` and `report.log` stay as
   they are.
-- Slack: `Report: scp <host>:<run>/report.tar.gz .`. On a missing or failed bundle, the current raw
-  folder hint. The command's end summary prints the archive and the raw folder.
+- Slack, `Report:` line — one command, built by a pure `bundleCommand(sshHost, archivePath, name)`:
+  `scp <host>:<archive> <name>.tar.gz && tar -xzf <name>.tar.gz && rm <name>.tar.gz`.
+  - `&&` chains it: a failed download or unpack stops there and keeps the archive; `rm` runs only
+    after a complete unpack. Plain `rm`, never `-f`/`-r`. Re-running it overwrites the same run's
+    folder with the same content.
+  - Every word goes through `shellWord` (the remote path as today; `<name>` too, though its
+    characters need no quoting). Never cut: `escapeCut` would leave a broken or partial command, so
+    a command over `MAX_SHOWN` falls back to the archive's path alone. Slack's escaping turns `&&`
+    into `&amp;&amp;` in the payload, which Slack shows as `&&`; a spec asserts the payload.
+  - No `sshHost`: the archive's absolute path, as today. `folder` mode: `scp -r <host>:<run>/report
+    <name>`. `none`, or a missing or failed bundle: today's raw-folder hint.
+  - The command's end summary prints the same command, the archive and the raw folder.
 - Retention: the bundle lives in the run folder, so 0F's per-run prune removes it; the cell-level
   `allure-history.jsonl` is outside and survives. Log the bundle's size; a heavy run is dominated
   by traces either way.
 - Security: the bundle is as sensitive as the raw folder (traces hold session cookies, 0D.4);
   never serve it without the dashboard's auth; no secrets in the landing page; no external assets.
+- Stopping: a stop during bundling aborts it (the Allure and `tar` children killed, temp output
+  removed) and the run gets the raw-folder hint; the 240 s budget must fit `runs/shutdown.ts`'s
+  stop budgets, or they grow by it — check both in R3.
 - Later dashboard: serves `report/index.html` when `folder` or `both` keeps it; this plan does not
   build it.
 
@@ -118,30 +145,37 @@ Goal: one reusable
   run; unit specs green.
 
 **R2 — Build and archive the bundle.** Depends: none. Parallel: R1. Effort: 1–2 days; medium.
-Goal: `buildReportBundle({ runDir, mode, traces })` → `report/` and/or `report.tar.gz`.
+Goal: `buildReportBundle({ runDir, name, mode, traces })` → `report/` and/or `report.tar.gz`.
 
 - Manifest, copy, landing page, tar, permissions, missing reports, size logging; no raw results.
-- Tests: manifest; rich Cucumber; missing Playwright `data/`/`trace/`; HTML escaping; archive
-  contents; no `allure-results`/`results.jsonl`; `none`/`folder`/`both`; permissions; a failure
-  leaves no partial output.
+- Tests: manifest; the archive's single top-level entry is `<name>/`; rich Cucumber; missing
+  Playwright `data/`/`trace/`; HTML escaping; archive contents; no `allure-results`/
+  `results.jsonl`; `none`/`folder`/`both`; permissions; a failure leaves no partial output.
 - Done: a fixture run yields a bundle whose `index.html` links every present report.
 
-**R3 — Wire into the run end.** Depends: R1, R2. Effort: 1 day; medium.
+**R3 — Wire into the run end.** Depends: R1, R2, modernization Phase 7's 7.1a–7.1b (the
+terminal renderer). Effort: 1 day; medium.
 Goal: every completed run with a folder prepares its bundle; `run.finished.report.bundle`;
 Slack, CLI, config, dry run and docs.
 
-- Call after the reporters, bounded; fallback to the raw path; no bundle for a run refused before
-  its folder; retention untouched. The end summary and the landing page reuse modernization Phase
-  7's renderer (`src/common/terminal`), never a second one.
-- Tests: integration with the fake suite; Slack's one-file message; archive failure → raw hint;
-  `none`; killed run; event schema; dry run.
-- Done: a real or fake run's Slack says one `scp`; the file unzips and opens.
+- Call after the reporters, bounded by 240 s; `bundleCommand`; fallback to the raw path; no
+  bundle for a run refused before its folder; retention untouched. The end summary's terminal
+  lines use modernization Phase 7's renderer (`src/common/terminal`), never a second one; the
+  landing page is static HTML and does not.
+- Tests: integration with the fake suite; `bundleCommand` (exact string, quoting of a path with a
+  space or `'`, over `MAX_SHOWN` → path, no `sshHost`, `folder` mode); executing the command
+  against a local `scp` stub leaves `<name>/index.html` and no archive, and a failing stub or a
+  corrupt archive leaves the archive and no `rm`; archive failure → raw hint; budget exceeded →
+  raw hint, no temp output; a stop mid-bundle; `none`; killed run; event schema; dry run.
+- Done: a real or fake run's Slack command, pasted in a shell, leaves `<name>/index.html` and no
+  archive; it opens.
 
 **R4 — Real-run verification and docs.** Depends: R3. Effort: 1 day; low–medium.
 Goal: prove sizes and both trace policies on a real failed run; update the guide.
 
 - Replay a real failed run with traces; verify `strip` (Allure small, Playwright traces intact) and
-  `keep` (folder mode); measure; document `reports.bundle`; no new dependency.
+  `keep` (folder mode); paste Slack's command on macOS (BSD tar) and Ubuntu (GNU tar) and open the
+  result; measure; document `reports.bundle`; no new dependency.
 - Done: both policies verified; `npm run typecheck`, `npm run lint`, `npm run format:check` and
   `npm run test:unit` green; guide updated.
 
@@ -149,8 +183,8 @@ Goal: prove sizes and both trace policies on a real failed run; update the guide
 
 - Each completed run with a report folder has `report.tar.gz` (unless `none`) containing only the
   viewable reports and `run-facts.json`; no `allure-results`, `results.jsonl`, logs or temp files.
-- One `scp` of the archive, unzipped, opens `report/index.html` and every linked report offline
-  (Cucumber rich mode notes the HTTP requirement).
+- Slack's one pasted command leaves `./<name>/index.html` and no archive; it and every linked
+  report open offline (Cucumber rich mode notes the HTTP requirement).
 - Allure is generated per run with its name and per-cell history; default strips traces; keep uses
   folder mode.
 - A missing or failed Allure, a missing report or a failed tar never changes the run's status; the
