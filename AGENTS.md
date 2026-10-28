@@ -33,7 +33,7 @@ End-to-end (E2E) tests for WP Media plugins: WP Rocket (performance), BackWPup (
 src/
 ├── common/                 # product-agnostic, shared by every product
 │   ├── config/             # env, sites loading, run-context, run-id.ts (RUN_ID, a run's report folder), run-env.ts (run-setting variable names), cell pin, drain, metadata, devices, file-owner rule, config factory
-│   ├── reporting/          # the suite's reporters (cell notice, results stream, run facts, summary), their pure parts, report retention (retention, report-tree, run-pruning, prune-command), page-loads.ts (a failed scenario's lost requests)
+│   ├── reporting/          # the suite's reporters (cell notice, results stream, terminal + its sink/lines/worker-output/mode, run facts, summary), their pure parts, report retention (retention, report-tree, run-pruning, prune-command), page-loads.ts (a failed scenario's lost requests)
 │   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ends a saved login)
 │   ├── setup/              # the auth setup's preflight (+ cell-plugin.ts: a broken copy of the cell's plugin), elevation/ownership banner, site info
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
@@ -94,8 +94,15 @@ Full detail: **[execution-model.md](docs/architecture/execution-model.md)**.
   scenario's first attempt as `stopped` (`drainGate`). Escalate with **one** SIGINT to the runner,
   then SIGKILL its process group — never SIGTERM, never a second SIGINT.
 - **Watching a run** — `<report dir>/results.jsonl` streams every event (schema v1,
-  `reporting/results-schema.ts`); no `run.end` means the runner died. The terminal ends with a
-  summary and verdict. Every credential a message quotes is masked by its shape (`redactSecrets`);
+  `reporting/results-schema.ts`); no `run.end` means the runner died. On the terminal,
+  `terminal.reporter.ts` replaces `list`: `[cell]`, a `[run]` header (a `━━` rule on a Unicode TTY),
+  one line per test at its final attempt plus a `↻` line per retry, worker output printed live, masked
+  whole then capped, in a `│` gutter under a `▸` line naming its source whenever it changes (a killed
+  run's log keeps the hung scenario's last lines); then the summary and verdict. It is the one writer:
+  other reporters print through its sink (`printLine`, `terminal-sink.ts`), never cut. `E2E_OUTPUT=
+auto|plain|fancy`; quiet for `--list`, `--ui` and `PW_TEST_REPORTER` (Playwright then adds its own);
+  watch mode prints; `--reporter` replaces the whole stack; `--add-reporter` doubles the lines (not
+  detected). A closed pipe (`| head`) never crashes the run. Every credential a message quotes is masked by its shape (`redactSecrets`);
   APVM's output also by value (`maskValues`, against `GITHUB_TOKEN`/`GH_TOKEN`).
 - **What a run tested** — one facts line as the reports' title/banner/name, every fact in
   `<report dir>/run-facts.json`. `captureGitInfo` is **off**: Playwright would turn it on under CI and

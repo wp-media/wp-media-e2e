@@ -1,6 +1,14 @@
 import { test, expect } from "@playwright/test";
 
-import { boolEnv, env, intEnv, parseBoolean, requireEnv } from "./env";
+import {
+  OUTPUT_ENV,
+  boolEnv,
+  env,
+  intEnv,
+  outputModeEnv,
+  parseBoolean,
+  requireEnv,
+} from "./env";
 
 /** The typed environment accessors: blank means unset, and a malformed value throws by name. */
 
@@ -86,5 +94,34 @@ test.describe("boolEnv", () => {
     process.env[NAME] = "true";
     expect(boolEnv(NAME, true, { [NAME]: "0" })).toBe(false);
     expect(boolEnv(NAME, false, {})).toBe(false);
+  });
+});
+
+test.describe("outputModeEnv", () => {
+  test("auto when unset or blank; the three modes in any case and spacing", () => {
+    expect(outputModeEnv({})).toBe("auto");
+    expect(outputModeEnv({ [OUTPUT_ENV]: "  " })).toBe("auto");
+    expect(outputModeEnv({ [OUTPUT_ENV]: "plain" })).toBe("plain");
+    expect(outputModeEnv({ [OUTPUT_ENV]: " FANCY\n" })).toBe("fancy");
+    expect(outputModeEnv({ [OUTPUT_ENV]: "Auto" })).toBe("auto");
+  });
+
+  test("throws on anything else, naming the variable, the modes and the value", () => {
+    for (const bad of ["pretty", "0", "plain,fancy", "no-color"]) {
+      expect(() => outputModeEnv({ [OUTPUT_ENV]: bad }), bad).toThrow(
+        `Environment variable "E2E_OUTPUT" must be one of auto/plain/fancy, got "${bad}".`,
+      );
+    }
+  });
+
+  test("reads process.env by default", () => {
+    const saved = process.env[OUTPUT_ENV];
+    try {
+      process.env[OUTPUT_ENV] = "plain";
+      expect(outputModeEnv()).toBe("plain");
+    } finally {
+      if (saved === undefined) Reflect.deleteProperty(process.env, OUTPUT_ENV);
+      else process.env[OUTPUT_ENV] = saved;
+    }
   });
 });

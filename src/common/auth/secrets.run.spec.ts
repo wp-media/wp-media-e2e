@@ -200,9 +200,14 @@ function errorContexts(): Map<string, string> {
 }
 
 test("the probe ran as designed: four forced failures, the first site of each pool saved", () => {
-  expect(run.output).toContain("4 failed");
+  // One `✘ failed` line per forced failure, from the terminal reporter (`list`'s "4 failed" before).
+  expect(run.output.match(/^✘ failed /gm)).toHaveLength(4);
   expect(run.output).toContain("Test timeout of 3000ms exceeded");
   expect(run.output).toContain("Test timeout of 5000ms exceeded");
+  // The terminal prints errors and worker output, never a step's title: no canary reaches it.
+  for (const canary of [PASSWORD, TOKEN, TIMEOUT_TOKEN, CONTROL]) {
+    expect(run.output).not.toContain(canary);
+  }
   expect(run.exitCode).toBe(1);
   // The session cookies were really set, so their absence from the reports is not for want of one.
   expect(readFileSync(join(work, "auth/site-0.json"), "utf8")).toContain(TOKEN);

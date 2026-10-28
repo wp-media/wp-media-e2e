@@ -430,8 +430,10 @@ Phase 7 — Terminal output (next; decided 2026-10-22). The suite and the orches
     bound, never a frozen event loop. A write that fails (`EPIPE`, `EIO`, a destroyed stream) turns
     the region off for good and is never thrown: a throwing reporter fails a run that passed.
     SIGTERM/SIGKILL can leave it; the guide says so.
-  - One writer: `terminal.reporter.ts` implements `onStdOut`/`onStdErr` (buffer to lines, flush at
-    the attempt's end, strip VT codes, mask, cap, print as permanent indented lines) and every suite
+  - One writer: `terminal.reporter.ts` implements `onStdOut`/`onStdErr` (cut into lines and print
+    each **as it comes** — a SIGKILLed run's `run.log` keeps the hung scenario's last lines — under a
+    `▸` begin line whenever the source differs from the last line's; strip VT codes, mask the whole
+    line, then cap; print as permanent indented lines) and every suite
     reporter that writes during a run goes through its sink (`cell-notice`, `results-stream`'s
     warnings, `run-facts`'s). This keeps the setup lines and warnings visible once `list` is gone,
     and keeps `run.log` plain: workers are started with `FORCE_COLOR=1`, so their `styleText` output
@@ -445,11 +447,12 @@ Phase 7 — Terminal output (next; decided 2026-10-22). The suite and the orches
     cut; the suite holds no secret values, so a typed value is never shown because it is never
     printed. A canary typed with `enterSecret` plus a failing assertion proves it, including a
     title, `E2E_RUN_NAME` and `REPORT_ROOT` carrying an escape.
-  - `--list`, `--ui` and `--watch`: `printsToStdio()` returns `mode !== "list"`; `--list` keeps
-    Playwright's listing. The live region and the reporter's own lines are inert under
-    `--ui`/`--watch`, whose stdio Playwright intercepts; `PW_TEST_REPORTER`, which appends a second
-    reporter, does the same. `--reporter` replaces the whole suite stack (stream, reports, summary),
-    not just this reporter; documented.
+  - `--list`, `--ui`, `PW_TEST_REPORTER`: the reporter is quiet and `printsToStdio()` returns
+    `false`, so Playwright adds its own (`--list` keeps its listing; `PW_TEST_REPORTER=junit|null` gets
+    `line`/`dot`, never a silent run). Watch mode does not intercept stdio (7V31): the reporter prints.
+    The live region is inert under `--ui`/watch. `--reporter` replaces the whole suite stack (stream,
+    reports, summary), not just this reporter; `--add-reporter` is not detected (an added printing
+    reporter doubles every line; an added `list` prints errors unmasked); both documented.
 - Suite (7.2a–7.2c):
   - 7.2a, the sink and plain output: replace `list` with `src/common/reporting/terminal.reporter.ts`;
     a `[run]` line after the unchanged `[cell]` notice (`product · cell (edition) · run id ·
@@ -457,12 +460,16 @@ Phase 7 — Terminal output (next; decided 2026-10-22). The suite and the orches
     scenario at its final attempt (`✔ 18.4s  Backups › …`, `✘ failed 8.1s  … attempt 2/2` when
     colour is off); a `↻` line per failed attempt due a retry; setup lines and the summary
     unchanged; no live block yet. Output stays bounded (one line per final scenario, one block per
-    final failure, a capped error) so the 64 KiB log tail a run's reason quotes keeps `bddgen`'s
-    cause.
+    final failure, a capped error, worker output 200 lines per attempt and stream) so the 64 KiB log
+    tail a run's reason quotes keeps `bddgen`'s cause. Worker output prints live everywhere, named by
+    `▸` begin lines (7V33); the summary honours `E2E_OUTPUT=plain` (no colour; its glyphs are 7.2c's).
   - 7.2b, the live block: bar, counts (`done/total · % · passed · flaky · failed · running ·
     elapsed`) and at most one current line per worker (`▸ feature › scenario · site · elapsed`),
     bottom-pinned through the cursor contract, starting with the first `scenario.begin` so a long
-    build shows setup lines, not a 0 % bar; nothing in plain.
+    build shows setup lines, not a 0 % bar; nothing in plain. While the block is shown, the runner's
+    own `process.stdout.write`/`process.stderr.write` are wrapped so every line — Playwright's
+    warnings, `emitWarning`, another reporter's `console.*` — is printed above the block through the
+    region; both are restored on close and on every stop path (user decision).
   - 7.2c, failures and the summary: on a final failure, a block with the scenario, the failed
     Gherkin step, the `feature:` file (no line — the reported location is the generated spec, 7V6),
     the first error line, screenshot/trace paths and a rerun command (`E2E_CELL=<cell>
@@ -557,8 +564,8 @@ Phase 7 — Terminal output (next; decided 2026-10-22). The suite and the orches
   | 7.1a | **Done.** `terminal/capabilities.ts` and `palette.ts`: the precedence above, semantic tokens, identity palette; unit specs.     | —        | 7.1b     | S, ½ d | Every branch tested with injected env/stream objects; the `styleText` precedence measured through a real pty (`script -q /dev/null`, `stty`), never a fake `isTTY`; `validateStream` pinned; no visible change.                                                                          |
   | 7.1b | **Done.** `terminal/layout.ts`: width, grapheme-safe cut, padding, rules, line cap; `plain` gains `toWellFormed`, a combining-mark cap and the shared `withoutControls`; live needs ≥ 20 columns; `string-width` (dev dependency). | —        | 7.1a     | S, ½ d | Property tests: emoji/ZWJ/flags (odd too)/keycaps/CJK/combining/tabs/lone surrogates/escapes, `width(cut(s, n)) <= n`, no control in any output; tmux-measured widths pinned; `npm run typecheck`/`lint` green.                                                                                                                                       |
   | 7.1c | **Done.** `terminal/live.ts` and `stream.ts` (`unblockTerminal`/`drainTerminal` moved out of `orchestrator/terminal.ts`; `openLiveTerminal`, `writeSafely`, `TERMINAL_BACKLOG_BYTES`): draw/clear, print batching, resize, backlog, drain. | 7.1a, 7.1b | —       | M, 1 d | Byte-exact fake-sink contract; tmux 40×10 and 80×24 (3.8 macOS, 3.4 CI) keep every permanent line over 4 phases with a tall block at each resize, residue only within 7V24's bound; a real closed pipe does not crash, a paused pty does not freeze the loop (`script`); non-TTY prints only. |
-  | 7.2a | Suite sink: `terminal.reporter.ts` replaces `list`; plain lines; `onStdOut`/`onStdErr`; `--list`/`--ui` guards; the other suite reporters' warnings through the sink. | 7.1a, 7.1b | 7.3a     | M, 1½ d | A real run on the Docker cell (`npm run env:up`) on a TTY and `\| cat` shows every setup line, warning and scenario once; `--list` lists; `results.jsonl` unchanged; a fake worker chunk with ANSI lands plain.                                                                          |
-  | 7.2b | The live block: bar, counts, per-worker current lines; starts at the first scenario. **Open decision (user):** while live, lines the runner process writes itself (`process.stdout/stderr.write`, `emitWarning`, another reporter's `console.*`) bypass the region: the next clear or resize erases or splits them, and stderr (sync) interleaves with stdout (non-blocking). Route them through the region while live (wrap both streams' `write`), or accept losing such lines.                                             | 7.1c, 7.2a | 7.3b     | M, 1½ d | A 40×10 tmux pane shows 20 draws with a 120-char title and a worker warning, no residue, no lost permanent line; resize mid-run; `NO_COLOR` keeps live but no colour.                                                                                                                    |
+  | 7.2a | **Done.** Suite sink: `terminal.reporter.ts` replaces `list` (pure parts `terminal-lines.ts`, `worker-output.ts`, `terminal-mode.ts`; `terminal-sink.ts` the one-writer registry); plain lines; `onStdOut`/`onStdErr` printed live with `▸` attribution, masked before any cut; `--list`/`--ui`/`PW_TEST_REPORTER` quiet with Playwright's fallback, watch active (7V30, 7V31); EPIPE-safe; the other suite reporters' lines through the sink, never cut; `E2E_OUTPUT` accessor (summary too). Audited twice (7V33–7V36). | 7.1a, 7.1b | 7.3a     | M, 1½ d | A real run on the Docker cell (`npm run env:up`) on a TTY and `\| cat` shows every setup line, warning and scenario once; `--list` lists; `results.jsonl` unchanged; a fake worker chunk with ANSI lands plain.                                                                          |
+  | 7.2b | The live block: bar, counts, per-worker current lines; starts at the first scenario. While live, the runner's `process.stdout.write`/`process.stderr.write` are wrapped: every line the runner writes itself (Playwright's warnings, `emitWarning`, another reporter's `console.*`) is printed above the block through the region (no clear or resize erases or splits it, stderr no longer interleaves); both are restored on close and on every stop path. Wraps after 7.2a's sink registers, so the suite's own lines keep going through the sink. | 7.1c, 7.2a | 7.3b     | M, 1½ d | A 40×10 tmux pane shows 20 draws with a 120-char title and a worker warning, no residue, no lost permanent line; resize mid-run; `NO_COLOR` keeps live but no colour.                                                                                                                    |
   | 7.2c | Failure blocks, retry/flaky/setup/timeout cases, rerun command; summary `Failed` list and width-aware rule. Adds `could-not-test`/`interrupted` to the palette's `Status` if the summary migrates them. | 7.2a     | 7.4a     | M, 1½ d | Each failure kind names the scenario and the failed Gherkin step (never an API step); the canary never appears; the summary lists failures, 10 then `and N more`; exact-output specs updated deliberately.                                                                                |
   | 7.3a | Orchestrator seam (`id`, `reportDir`, `startedAt`, stopping/ended), `results.jsonl` tailer, table plain; detects with `forceColorWithoutTty: false`. Adds `RunStatus`'s `error`/`killed` to the palette's `Status` (with 7.3b, wherever first shown). | 7.1a, 7.1b | 7.2a     | M, 1½ d | The fake suite renders `starting`/`setup`/`running`/`cooling`; a partial line, truncation, a missing file, a crash without `run.end` and `--once` are handled; no timer or fd leaks (soak).                                                                                              |
   | 7.3b | Table styling, lifecycle, backlog cap, stop paths; piped bytes unchanged. The logger's terminal write path (`log.ts` `toTerminal`/`writeTerminal`) still duplicates `writeSafely`/`backlogBytes` with other behaviour (a throwing `writableLength` throws there); move it onto them here (the constant is already shared).                                                       | 7.1c, 7.3a | 7.2b     | M, 1 d | TTY table and piped log on the fake suite; `SIGINT`/`SIGTERM`/`--once` clear it; `orchestrator.log`/`run.log` byte-plain; event, Slack and Datator payloads identical.                                                                                                                    |
@@ -609,17 +616,28 @@ Phase 7 — Terminal output (next; decided 2026-10-22). The suite and the orches
   | 7V27 | `\n` returns to column 0 on a cooked pty and under Node's `setRawMode(true)` (libuv keeps `ONLCR`), not after `stty -onlcr` (staircase): hence `\r\n` inside the live region; passthrough keeps `\n` so piped bytes are unchanged. | tmux 3.8 capture, 2026-10-28 |
   | 7V28 | A pipe closed after 20 bytes: without an `error` listener the process dies on `EPIPE` (unhandled `error`); with `openLiveTerminal` it prints on, the region dead, `onFailure` once. A pty nobody reads (`script`, its stdout unread) behind 4 MB: blocking, a 100 ms timer never fires in 8 s; via `openLiveTerminal`, it fires in ~0.3 s. | `stream.spec.ts`, macOS and Ubuntu 24.04, 2026-10-28 |
   | 7V29 | macOS: a process's first use of `process.stderr` reopens its tty by name (`uv_tty_init`), which blocks once the pty's master is gone, so the tmux driver's give-up path writes fd 2 with `writeSync`. With it, SIGINT or SIGKILL of the spec mid-phase leaves no driver, server or socket folder within 3 s (macOS and container, ×4 each). | `sample` of a stuck driver; interrupt probe (SIGINT/SIGKILL of the runner's process group), 2026-10-28 |
+  | 7V30 | `--ui` runs the config reporters (`createReporters`, `_mode: "test"`) in the CLI process (its `argv` holds `--ui*`) under a test server that replaced `process.stdout.write` with an own property of the stream (`_setInterceptStdio`); a plain run leaves it the prototype's. Driving `TestServerDispatcher` with `interceptStdio: true` on the Docker cell: the own property is set during `runTests`, the `[cell]` notice and summary reach the UI's stdio pane, the terminal reporter prints nothing. | `runner/index.js` (`runUIMode`, `createReporters`, `_setInterceptStdio`); in-process test-server probe, 2026-10-28 |
+  | 7V31 | 1.63 has no `--watch` flag: watch mode is `PWTEST_WATCH` (`cli/testActions.js`), config reporters on, stdio not intercepted. `PW_TEST_REPORTER` and `--add-reporter` both append to the configured stack; only the first is detected (`--add-reporter` with a printing reporter prints twice). `ListReporter.onError` was the only printer of errors outside tests: the terminal reporter prints them. | `cli/testActions.js`, `common/index.js` (`additionalReporters`), `runner/index.js`; `results-stream.run.spec.ts` |
+  | 7V32 | Docker cell (`wp-rocket/apache`), the terminal reporter on a pty (`script`, `stty cols 100 rows 30`) and piped: each of 11 `[auth]`/`[site]`/`[artifacts]`/APVM lines and the `[artifacts]` warning a `list` run printed appears exactly once (in the `│` gutter); `[cell]` once; 5 test lines; the TTY rule 100 columns; the pipe holds no `\x1b`. `results.jsonl` equals a `list` run's event for event once `at`, `durationMs` and `runId` are dropped (10 events). | real runs, 2026-10-28 |
+  | 7V33 | 7.2a audit, fixed: worker output held to the attempt's end was lost from a SIGKILLed run (the tail showed the previous scenario), and two setups running at once printed under one begin line. Now live, named per source: 8 workers interleaving 240 lines (half split over two writes) — every line once, under its own `▸` line (×3); SIGKILL of the group mid-run — each worker's lines a gap-free prefix, all named; the 2-setup fixture alternates `▸ auth` / `▸ artifacts` per line. A global timeout calls `onEnd` before the running tests' `onTestEnd` (`--global-timeout`): their open lines print with the late end. | fixtures (`p2`, 8-worker, `kill.mjs`, `--global-timeout`); `results-stream.run.spec.ts`, 2026-10-28 |
+  | 7V34 | 7.2a audit, fixed: raw lines were cut to 4,096 units **before** masking — `FORCE_COLOR` escapes inflate a line, so the cut fell inside `https://admin:…@` or a `ghp_` token and printed the head unmasked (real runner). Now a 64 KiB memory bound that drops the word the cut falls in, then `plain` → `redactSecrets` on the whole line → `capLine`; the same inputs print `https://***@…` and `token ***`. | `t6/leak.spec.ts` before/after; `worker-output.spec.ts` (every cut offset); run spec, 2026-10-28 |
+  | 7V35 | Playwright 1.63 adds `line` (`dot` under `CI`) only when no reporter `printsToStdio()`: a quiet reporter answering `true` left `PW_TEST_REPORTER=junit`/`null` runs silent but for `[cell]` and the summary. `printsToStdio()` is now `false` whenever quiet; both runs print `1 passed`. `--quiet` (`config.quiet`) made `list` drop worker output only: matched. | `createReporters` (`runner/index.js`); run spec, 2026-10-28 |
+  | 7V36 | A reader closing early (`… \| head -1`) crashed the runner with an unhandled `EPIPE` before `run.end` (as `list` did). With the reporter's `error` listener (kept after `onExit` once the stream failed, so the summary's writes fail silently too): exit 0 for a passing run, `run.end` written, no stderr. | fixture and run spec, 2026-10-28 |
 
 - Docs, by sub-phase: 7.1 — AGENTS' tree, `package.json`/lock, `suite-imports.json`, the boundary spec;
-  7.2a — `reporting.ts` and `cell-notice.ts` TSDoc, `execution-model.md` (reporters, the cell line),
-  AGENTS "Watching a run"; 7.2c — `run-summary.ts`'s example, README "Reporting"; 7.3 —
+  7.2a (done) — `reporting.ts` and `cell-notice.ts` TSDoc, `execution-model.md` (reporters, the cell
+  line, `[run]`, `E2E_OUTPUT`), AGENTS "Watching a run" and tree, `.env.example` and `configuration.md`'s
+  table row for `E2E_OUTPUT` (7.4b adds the prose); 7.2c — `run-summary.ts`'s example, README "Reporting"; 7.3 —
   `docs/guides/orchestrator.md` (TTY vs piped, the table), `log.ts` TSDoc, the 0.5 plan's §4.9/§4.11/
   §7.1, AGENTS' orchestrator entry; 7.4b — `configuration.md`, `.env.example`, README "Environment",
   AGENTS' env accessors, and that an orchestrator's runs are plain (its env allowlist carries no
   `E2E_OUTPUT`). Phase 11 rebases its `configuration.md`/`.env.example` edits on 7.4b.
 - Specs updated deliberately (never weakened): `src/common/config/reporting.spec.ts` (`list` →
-  terminal reporter), `run-summary.spec.ts` (the `Failed` list, width, palette), `results-stream.run.spec.ts`
-  (summary marker, `--list`), `orchestrator/log.spec.ts` (a TTY-formatter case, the file lines
+  terminal reporter; 7.2a: the summary gets `output` too), `auth/secrets.run.spec.ts` (7.2a: `list`'s "4 failed" → four `✘ failed` lines; the
+  canaries now also checked absent from the terminal), `run-summary.spec.ts` (the `Failed` list, width, palette), `results-stream.run.spec.ts`
+  (summary marker, `--list`; 7.2a adds the terminal lines, live worker output and its `▸` lines, masked
+  escape-inflated credentials, SIGKILL, `--global-timeout`, `PW_TEST_REPORTER` (`dot`, `junit`, `null`),
+  an early-closed pipe, `--reporter`, `FORCE_COLOR`, `E2E_OUTPUT`; `runCell` takes an options object), `orchestrator/log.spec.ts` (a TTY-formatter case, the file lines
   unchanged), `cycle.spec.ts`/`start.spec.ts` (the new seams), `elevation-report.spec.ts` (plain
   thrown text, styled print), `orchestrator/soak.spec.ts` (no leaked timer or fd).
 - Out: the dashboard's UI, a web progress view, log colouring, CI annotations, interactive prompts,
@@ -640,6 +658,9 @@ Phase 10 — Cleanup & validation (open).
 - No dependency on §5's drop list reappears.
 - `lint`, `typecheck` and `format:check` green; the reports generate.
 - Remove every mention of plan phases from code comments (AGENTS.md forbids citing plans in code).
+- Deferred: `src/common/wp/exec.ssh.spec.ts` is flaky (~0.7 % of runs): ssh2 1.17.0's
+  `generateKeyPairSync("ed25519")` yields a key its own `parseKey` rejects 0.34 % of the time
+  (68/20,000). Regenerate until `parseKey` accepts it, or commit fixed test keys.
 
 Phase 11 — Shared SSH server profiles (open; scheduled after Phase 7). Configuration and transport;
 depends on nothing (independent of Phase 6 and Phase 10; may run beside 7.2–7.4 or 6H). Stack:

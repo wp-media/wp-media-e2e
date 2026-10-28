@@ -25,10 +25,10 @@ import {
 } from "./results-schema";
 
 /**
- * The results stream and the end-of-run summary through the real `bddgen`, runner and reporter
- * stack — what the unit specs cannot reach: that the config lists the reporters, that Playwright
- * hands them what the specs assume (step trees, `_mode`, attachments), and what each way a run ends
- * leaves behind.
+ * The results stream, the terminal reporter's lines and the end-of-run summary through the real
+ * `bddgen`, runner and reporter stack — what the unit specs cannot reach: that the config lists the
+ * reporters, that Playwright hands them what the specs assume (step trees, `_mode`, attachments,
+ * worker output forced into colour), and what each way a run ends leaves behind.
  *
  * A synthetic product runs `__fixtures__/results/results.feature`. Cell `x` holds a placeholder site,
  * so its setups skip and nothing leaves the machine; cell `y` holds one that is not a placeholder, on
@@ -52,6 +52,10 @@ interface RunOutcome {
   readonly signal: NodeJS.Signals | null;
   /** The runner's stdout, colours stripped. */
   readonly stdout: string;
+  /** The runner's stdout as written: a pipe, so it must hold no escape. */
+  readonly rawStdout: string;
+  /** The runner's stderr. */
+  readonly stderr: string;
   /** The stream's text, or `undefined` when there is no file. */
   readonly stream: string | undefined;
 }
@@ -187,27 +191,41 @@ function readStream(cell: string, runId: string): string | undefined {
   return existsSync(path) ? readFileSync(path, "utf8") : undefined;
 }
 
+/** How a run is driven, beyond its arguments. */
+interface RunOptions {
+  /** The signal that stops the run, sent once {@link RunOptions.stopWhen} holds. */
+  readonly stop?: NodeJS.Signals;
+  /** Sends {@link RunOptions.stop} to the runner's whole process group, as the orchestrator's escalation does. */
+  readonly group?: boolean;
+  /** When to stop: once the hanging scenario has begun, by default. */
+  readonly stopWhen?: (stdout: string) => boolean;
+  /** What to do between `bddgen` and the runner. */
+  readonly beforeRun?: () => void;
+  /** Variables the runner gets on top of the run's own. */
+  readonly env?: NodeJS.ProcessEnv;
+  /** Closes the read end of the runner's stdout after its first chunk, as `… | head -1` does. */
+  readonly closeStdoutEarly?: boolean;
+}
+
 /**
  * Runs the cell as the orchestrator does — `bddgen`, then the runner in a process group of its own —
- * and, when `stop` is given, sends it that signal once the hanging scenario has begun. The group is
- * killed afterwards, whatever happened, so no worker outlives the spec.
+ * and, when `options.stop` is given, sends that signal once the run reached the point it names. The
+ * group is killed afterwards, whatever happened, so no worker outlives the spec.
  *
  * @param cell - the cell.
  * @param runId - the run's token, which names its report folder.
  * @param args - the runner's extra arguments.
- * @param stop - the signal to stop the run with.
- * @param beforeRun - what to do between `bddgen` and the runner.
+ * @param options - how the run is driven.
  */
 async function runCell(
   cell: string,
   runId: string,
   args: readonly string[],
-  stop?: NodeJS.Signals,
-  beforeRun?: () => void,
+  options: RunOptions = {},
 ): Promise<RunOutcome> {
   const env = runEnv(cell, runId);
   bddgen(env);
-  beforeRun?.();
+  options.beforeRun?.();
   const child = spawn(
     process.execPath,
     [
@@ -217,13 +235,22 @@ async function runCell(
       "playwright.config.ts",
       ...args,
     ],
-    { cwd: work, env, detached: true, stdio: ["ignore", "pipe", "pipe"] },
+    {
+      cwd: work,
+      env: { ...env, ...options.env },
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
   );
   let stdout = "";
+  let stderr = "";
   child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
     stdout += chunk;
+    if (options.closeStdoutEarly === true) child.stdout.destroy();
   });
-  child.stderr.resume();
+  child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+    stderr += chunk;
+  });
   const exited = new Promise<[number | null, NodeJS.Signals | null]>(
     (resolve) => {
       child.on("exit", (code, signal) => {
@@ -240,21 +267,44 @@ async function runCell(
   };
   const timer = setTimeout(killGroup, CHILD_TIMEOUT_MS);
   try {
-    if (stop !== undefined) {
-      await waitForHangingScenario(cell, runId);
-      child.kill(stop);
+    if (options.stop !== undefined) {
+      await (options.stopWhen === undefined
+        ? waitForHangingScenario(cell, runId)
+        : waitFor(() => options.stopWhen?.(stdout) === true));
+      if (options.group === true && child.pid !== undefined) {
+        process.kill(-child.pid, options.stop);
+      } else {
+        child.kill(options.stop);
+      }
     }
     const [exitCode, signal] = await exited;
     return {
       exitCode,
       signal,
       stdout: stripVTControlCharacters(stdout),
+      rawStdout: stdout,
+      stderr,
       stream: readStream(cell, runId),
     };
   } finally {
     clearTimeout(timer);
     killGroup();
   }
+}
+
+/**
+ * Polls until `done` holds.
+ *
+ * @param done - the condition.
+ * @throws {@link Error} when it does not hold within {@link BEGIN_TIMEOUT_MS}.
+ */
+async function waitFor(done: () => boolean): Promise<void> {
+  const deadline = Date.now() + BEGIN_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (done()) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("the run never reached the point to stop it at");
 }
 
 /** Polls the stream until the hanging scenario's attempt has begun. */
@@ -366,6 +416,20 @@ function ended(
   );
   if (found === undefined) throw new Error(`no scenario.end for "${prefix}…"`);
   return found;
+}
+
+/** How many of a run's stdout lines are exactly `line`. */
+function count(stdout: string, line: string): number {
+  return stdout.split("\n").filter((l) => l === line).length;
+}
+
+/** The lines of a run's stdout before its summary: the terminal reporter's, the cell notice's. */
+function runLines(stdout: string): string[] {
+  const lines = stdout.split("\n");
+  const summary = lines.findIndex((line) =>
+    line.startsWith(`━━ ${PRODUCT} · `),
+  );
+  return summary === -1 ? lines : lines.slice(0, summary);
 }
 
 /** The summary's header line in a run's stdout, and everything after it. */
@@ -490,10 +554,87 @@ test.describe("the results stream and the summary, through the real runner", () 
         line.includes("reports/resultsprobe/x/full/playwright"),
       ),
     ).toBe(true);
+
+    // The terminal reporter, in a pipe: the cell notice through it, then its header, then a line per
+    // final attempt and per retry — each once, in order, plain. (Begin lines name worker output.)
+    expect(outcome.rawStdout).not.toContain("\u001b");
+    expect(outcome.stream).not.toContain("\u001b");
+    const scenarios = "The results stream, end to end ›";
+    expect(runLines(outcome.stdout).filter((l) => /^[^\s▸]/.test(l))).toEqual([
+      expect.stringMatching(/^\[cell\] resultsprobe\/x, pinned by E2E_CELL/),
+      "[run] resultsprobe · x · full · 6 scenarios",
+      "— skipped 0.0s  src/common/auth/auth.setup.ts › authenticate site pool",
+      "— skipped 0.0s  src/common/artifacts/artifacts.setup.ts › resolve & verify plugin artifacts",
+      expect.stringMatching(
+        /^✔ passed \d+\.\ds {2}The results stream, end to end › A scenario that passes$/,
+      ),
+      expect.stringMatching(
+        new RegExp(
+          `^↻ retry \\d+\\.\\ds {2}${scenarios} A scenario that fails on its first attempt passes on its retry · attempt 1/2 · failed$`,
+        ),
+      ),
+      expect.stringMatching(/^⚠ flaky .* · attempt 2\/2$/),
+      expect.stringMatching(
+        /^↻ retry .* A scenario whose step fails on every attempt fails · attempt 1\/2 · failed$/,
+      ),
+      expect.stringMatching(
+        /^✘ failed .* A scenario whose step fails on every attempt fails · attempt 2\/2$/,
+      ),
+      expect.stringMatching(
+        /^↻ retry .* A scenario whose After hook fails fails in that hook · attempt 1\/2 · failed$/,
+      ),
+      expect.stringMatching(
+        /^✘ failed .* A scenario whose After hook fails fails in that hook · attempt 2\/2$/,
+      ),
+      expect.stringMatching(
+        /^✔ passed .* A scenario that asks the run to stop passes$/,
+      ),
+      expect.stringMatching(
+        /^■ stopped .* A scenario that begins after the run is asked to stop is drained$/,
+      ),
+    ]);
+    expect(count(outcome.stdout, "  Error: boom (attempt 2)")).toBe(1);
+    // The worker's coloured output — forced into colour by Playwright — lands plain and masked, once
+    // per attempt, as it comes: under a begin line naming the attempt, before the attempt's own
+    // line; the chunk with no line end too.
+    const lines = runLines(outcome.stdout);
+    const flakyTitle = `${scenarios} A scenario that fails on its first attempt passes on its retry`;
+    for (const attempt of [1, 2]) {
+      const probe = `  │ [probe] attempt ${String(attempt)} via https://***@x.example.test/`;
+      expect(count(outcome.stdout, probe)).toBe(1);
+      const named = lines.indexOf(
+        attempt === 1 ? `▸ ${flakyTitle}` : `▸ ${flakyTitle} · attempt 2/2`,
+      );
+      const own = lines.findIndex((l) =>
+        l.startsWith(attempt === 1 ? "↻ retry " : "⚠ flaky "),
+      );
+      expect(named).toBeGreaterThan(-1);
+      expect(lines.indexOf(probe)).toBe(named + 1);
+      expect(own).toBeGreaterThan(named);
+    }
+    expect(
+      count(outcome.stdout, "  │ [probe] a warning with no line end"),
+    ).toBe(2);
+    expect(outcome.rawStdout + outcome.stderr).not.toContain("hunter2");
+    // Credentials behind hundreds of escapes are masked whole: no fragment of either is printed.
+    expect(
+      count(
+        outcome.stdout,
+        `  │ ${".".repeat(369)} GET https://***@x.example.test/wp-admin/`,
+      ),
+    ).toBe(2);
+    expect(count(outcome.stdout, "  │ token ***")).toBe(2);
+    for (const fragment of ["S3cret", "admin:", "ghp_", "ABCDEFGH"]) {
+      expect(outcome.rawStdout + outcome.stderr).not.toContain(fragment);
+    }
+    // Nothing printed on stderr: every reporter writes through the terminal reporter.
+    expect(outcome.stderr).toBe("");
   });
 
   test("an interrupt (one SIGINT): the attempt in flight ends interrupted, run.end, INTERRUPTED", async () => {
-    const outcome = await runCell("x", "sigint", ["--grep", "@hang"], "SIGINT");
+    const outcome = await runCell("x", "sigint", ["--grep", "@hang"], {
+      stop: "SIGINT",
+    });
     const events = eventsOf(outcome);
     expect(ended(events, "A scenario that hangs")).toMatchObject({
       status: "interrupted",
@@ -507,16 +648,52 @@ test.describe("the results stream and the summary, through the real runner", () 
   });
 
   test("a SIGTERM: only complete lines, no run.end, no summary", async () => {
-    const outcome = await runCell(
-      "x",
-      "sigterm",
-      ["--grep", "@hang"],
-      "SIGTERM",
-    );
+    const outcome = await runCell("x", "sigterm", ["--grep", "@hang"], {
+      stop: "SIGTERM",
+    });
     const events = eventsOf(outcome);
     expect(events.map((e) => e.type)).toContain("scenario.begin");
     expect(events.some((e) => e.type === "run.end")).toBe(false);
     expect(summaryOf(outcome.stdout)).toEqual([]);
+  });
+
+  test("a SIGKILL of the run's group (the orchestrator's escalation): the hung scenario's whole lines are already out, named", async () => {
+    const outcome = await runCell("x", "sigkill", ["--grep", "@hang"], {
+      stop: "SIGKILL",
+      group: true,
+      stopWhen: (stdout) => stdout.includes("[probe] the scenario hangs\n"),
+    });
+    expect(outcome.signal).toBe("SIGKILL");
+    const lines = runLines(outcome.stdout);
+    const named = lines.indexOf(
+      "▸ The results stream, end to end › A scenario that hangs runs until the run is stopped",
+    );
+    expect(named).toBeGreaterThan(-1);
+    expect(lines[named + 1]).toBe("  │ [probe] the scenario hangs");
+    // Its open line never ended: lost with the runner, as Playwright never handed it over whole.
+    expect(outcome.stdout).not.toContain("still waiting");
+  });
+
+  test("a global timeout ends the run first: the running scenario's whole line before the error, its open line with its own late end", async () => {
+    const outcome = await runCell("x", "globaltimeout", [
+      "--grep",
+      "@hang",
+      "--global-timeout=10000",
+    ]);
+    expect(outcome.exitCode).toBe(1);
+    const lines = runLines(outcome.stdout);
+    const named =
+      "▸ The results stream, end to end › A scenario that hangs runs until the run is stopped";
+    const whole = lines.indexOf("  │ [probe] the scenario hangs");
+    const error = lines.findIndex((l) =>
+      l.startsWith("✘ error Timed out waiting 10s for the test suite to run"),
+    );
+    const open = lines.indexOf("  │ [probe] still waiting");
+    expect(lines[whole - 1]).toBe(named);
+    expect(whole).toBeLessThan(error);
+    expect(error).toBeLessThan(open);
+    expect(lines[open - 1]).toBe(named);
+    expect(lines[open + 1]).toMatch(/^■ interrupted .* A scenario that hangs/);
   });
 
   test("failed setups: each setup.end with its error, every scenario did not run, COULD NOT TEST", async () => {
@@ -542,6 +719,27 @@ test.describe("the results stream and the summary, through the real runner", () 
     // and nothing under the checkout, where joining the root onto it would have put it.
     expect(existsSync(join(work, "artifacts", PRODUCT, "y"))).toBe(true);
     expect(existsSync(join(REPO_ROOT, work))).toBe(false);
+
+    // The artifacts setup's own line, under a begin line, once; each setup's line and error once.
+    const zip = join(work, "missing.zip");
+    expect(
+      count(outcome.stdout, `  │ [artifacts] resolving "plugin" — zip ${zip}`),
+    ).toBe(1);
+    const lines = runLines(outcome.stdout);
+    const begun = lines.indexOf(
+      "▸ src/common/artifacts/artifacts.setup.ts › resolve & verify plugin artifacts",
+    );
+    expect(begun).toBeGreaterThan(-1);
+    expect(lines[begun + 1]).toContain("[artifacts] resolving");
+    for (const setup of [
+      "src/common/auth/auth.setup.ts › authenticate site pool",
+      "src/common/artifacts/artifacts.setup.ts › resolve & verify plugin artifacts",
+    ]) {
+      expect(
+        lines.filter((l) => l.startsWith("✘ failed ") && l.endsWith(setup)),
+      ).toHaveLength(1);
+    }
+    expect(outcome.rawStdout).not.toContain("\u001b");
 
     const summary = summaryOf(outcome.stdout);
     expect(summary[0]).toMatch(/✘ COULD NOT TEST/);
@@ -604,8 +802,13 @@ test.describe("the results stream and the summary, through the real runner", () 
       "x",
       "broken.feature.spec.js",
     );
-    const outcome = await runCell("x", "loaderror", [], undefined, () => {
-      writeFileSync(broken, 'throw new Error("a spec file does not load");\n');
+    const outcome = await runCell("x", "loaderror", [], {
+      beforeRun: () => {
+        writeFileSync(
+          broken,
+          'throw new Error("a spec file does not load");\n',
+        );
+      },
     });
     rmSync(broken, { force: true });
     expect(outcome.exitCode).toBe(1);
@@ -663,5 +866,129 @@ test.describe("the results stream and the summary, through the real runner", () 
       scenarios: { didNotRun: 8 },
     });
     expect(summaryOf(outcome.stdout)).toEqual([]);
+    // Playwright's own listing, the cell notice once, and none of the terminal reporter's lines.
+    expect(outcome.stdout).toContain("Listing tests:");
+    expect(outcome.stdout).toMatch(/^Total: 10 tests in 3 files$/m);
+    expect(outcome.stdout.match(/^\[cell\] /gm)).toHaveLength(1);
+    expect(outcome.stdout).not.toMatch(/^\[run\] /m);
+  });
+
+  test("PW_TEST_REPORTER: the terminal reporter stays quiet; the reporter it names prints, the stream is written", async () => {
+    const outcome = await runCell(
+      "x",
+      "envreporter",
+      ["--grep", "A scenario that passes"],
+      { env: { PW_TEST_REPORTER: "dot" } },
+    );
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.stdout).not.toMatch(/^\[run\] /m);
+    expect(outcome.stdout).not.toMatch(/^✔ passed /m);
+    // The cell notice prints as it would alone, and dot's progress follows.
+    expect(outcome.stdout.match(/^\[cell\] /gm)).toHaveLength(1);
+    expect(outcome.stdout).toMatch(/^ +1 passed/m);
+    expect(eventsOf(outcome).at(-1)).toMatchObject({ type: "run.end" });
+  });
+
+  test("PW_TEST_REPORTER naming a reporter that prints nothing (junit to a file, null): Playwright adds its own, so the run is never silent", async () => {
+    const junit = join(work, "junit.xml");
+    for (const [name, env] of [
+      ["junit", { PLAYWRIGHT_JUNIT_OUTPUT_NAME: junit }],
+      ["null", {}],
+    ] as const) {
+      const outcome = await runCell(
+        "x",
+        `env-${name}`,
+        ["--grep", "A scenario that passes"],
+        { env: { PW_TEST_REPORTER: name, ...env } },
+      );
+      expect(outcome.exitCode, name).toBe(0);
+      expect(outcome.stdout, name).not.toMatch(/^\[run\] /m);
+      // Playwright's fallback (`line`, outside CI): its count line.
+      expect(outcome.stdout, name).toMatch(/^ +1 passed/m);
+      expect(eventsOf(outcome).at(-1)).toMatchObject({ type: "run.end" });
+    }
+    expect(existsSync(junit)).toBe(true);
+  });
+
+  test("a reader that closes early (… | head -1): no crash — the run ends as it would, run.end written", async () => {
+    const outcome = await runCell(
+      "x",
+      "epipe",
+      ["--grep", "A scenario that passes"],
+      { closeStdoutEarly: true },
+    );
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.stderr).not.toMatch(/EPIPE|Unhandled 'error'/);
+    expect(eventsOf(outcome).at(-1)).toMatchObject({
+      type: "run.end",
+      status: "passed",
+    });
+    // The pipe was closed before the summary: its writes failed, silently.
+    expect(summaryOf(outcome.stdout)).toEqual([]);
+  });
+
+  test("--reporter replaces the whole stack: no cell notice, header, stream or summary", async () => {
+    const outcome = await runCell("x", "replaced", [
+      "--grep",
+      "A scenario that passes",
+      "--reporter=line",
+    ]);
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.stdout).not.toMatch(/^\[(?:cell|run)\] /m);
+    expect(outcome.stream).toBeUndefined();
+    expect(summaryOf(outcome.stdout)).toEqual([]);
+  });
+
+  test("FORCE_COLOR into a pipe: the suite honours it — styled marks, every word kept, the stream plain", async () => {
+    const outcome = await runCell(
+      "x",
+      "forced",
+      ["--grep", "A scenario that passes"],
+      { env: { FORCE_COLOR: "1" } },
+    );
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.rawStdout).toContain("\u001b[32m✔\u001b[39m passed ");
+    expect(outcome.stream).not.toContain("\u001b");
+  });
+
+  test("E2E_OUTPUT=plain: ASCII marks; a bad value fails the run as its config loads, naming it", async () => {
+    const plainRun = await runCell(
+      "x",
+      "plainmode",
+      ["--grep", "A scenario that passes"],
+      { env: { E2E_OUTPUT: "plain", FORCE_COLOR: "1" } },
+    );
+    expect(plainRun.exitCode).toBe(0);
+    expect(plainRun.rawStdout).toMatch(
+      /^OK passed \d+\.\ds {2}The results stream, end to end > A scenario that passes$/m,
+    );
+    // Up to the summary, which 7.2a leaves as it is (it still honours FORCE_COLOR on its own).
+    const beforeSummary = plainRun.rawStdout.slice(
+      0,
+      plainRun.rawStdout.lastIndexOf("\n", plainRun.rawStdout.indexOf("━━ ")),
+    );
+    expect(beforeSummary).toContain("[run] resultsprobe . x . plainmode");
+    expect(beforeSummary).not.toContain("\u001b");
+
+    const bad = spawnSync(
+      process.execPath,
+      [
+        cli("@playwright/test/cli.js"),
+        "test",
+        "-c",
+        "playwright.config.ts",
+        "--list",
+      ],
+      {
+        cwd: work,
+        env: { ...runEnv("x", "badmode"), E2E_OUTPUT: "pretty" },
+        encoding: "utf8",
+        timeout: CHILD_TIMEOUT_MS,
+      },
+    );
+    expect(bad.status).toBe(1);
+    expect(bad.stdout + bad.stderr).toContain(
+      'Environment variable "E2E_OUTPUT" must be one of auto/plain/fancy, got "pretty".',
+    );
   });
 });

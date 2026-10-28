@@ -723,6 +723,36 @@ test.describe("RunSummaryReporter", () => {
     ).toBe("");
     expect(reporter.printsToStdio()).toBe(false);
   });
+
+  test("E2E_OUTPUT=plain: no colour whatever FORCE_COLOR says; auto keeps the stream's colours", () => {
+    const saved = process.env.FORCE_COLOR;
+    process.env.FORCE_COLOR = "1";
+    try {
+      /** The raw text a reporter with `output` prints for a passed run. */
+      const printed = (output: string): string => {
+        const reporter = new RunSummaryReporter({ ...RUN, output });
+        reporter.onEnd({
+          status: "passed",
+          startTime: new Date(),
+          duration: 1,
+        });
+        return captureWrites(process.stdout, () => {
+          void reporter.onExit();
+        }).join("");
+      };
+      const plainText = printed("plain");
+      expect(plainText).toContain("NO TESTS");
+      expect(plainText).not.toContain("\u001b");
+      const auto = printed("auto");
+      expect(auto).toContain("\u001b[");
+      // The words are the same: only the colour goes.
+      expect(stripVTControlCharacters(auto)).toBe(plainText);
+    } finally {
+      if (saved === undefined)
+        Reflect.deleteProperty(process.env, "FORCE_COLOR");
+      else process.env.FORCE_COLOR = saved;
+    }
+  });
 });
 
 test.describe("the run's pruning, in the summary", () => {
