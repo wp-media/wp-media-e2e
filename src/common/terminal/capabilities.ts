@@ -13,6 +13,13 @@
  */
 
 /**
+ * The narrowest width the layout draws for: below it, rows would hold almost nothing. Here, not in
+ * the layout, because the live decision needs it too: a terminal narrower gets no live region, whose
+ * rows (laid out at least this wide) would wrap.
+ */
+export const MIN_WIDTH = 20;
+
+/**
  * How much styling the caller allows. `auto`: what the stream and environment support. `plain`: no
  * colour, no live region, ASCII — whatever else says. `fancy`: as `auto`, but `CI` no longer turns
  * the live region off; it never adds colour the precedence refuses, nor a live region without a
@@ -145,9 +152,9 @@ function colorEnabled(decision: Decision): boolean {
 }
 
 /**
- * Whether a live region may be drawn: this process owns a real terminal with a known size whose
- * `TERM` can move the cursor, and `CI` is off unless the mode is `fancy`. Colour plays no part:
- * `NO_COLOR` keeps the live region.
+ * Whether a live region may be drawn: this process owns a real terminal with a known size, at least
+ * {@link MIN_WIDTH} columns wide, whose `TERM` can move the cursor, and `CI` is off unless the mode
+ * is `fancy`. Colour plays no part: `NO_COLOR` keeps the live region.
  *
  * @param decision - the inputs, defaults applied.
  */
@@ -158,6 +165,7 @@ function liveEnabled(decision: Decision): boolean {
   if (!isPositiveInteger(stream.columns) || !isPositiveInteger(stream.rows)) {
     return false;
   }
+  if (stream.columns < MIN_WIDTH) return false;
   return mode === "fancy" || !isCi(env);
 }
 
@@ -246,6 +254,6 @@ function isOffValue(value: string): boolean {
  *
  * @param value - a stream's `columns` or `rows`.
  */
-function isPositiveInteger(value: number | undefined): boolean {
+function isPositiveInteger(value: number | undefined): value is number {
   return value !== undefined && Number.isInteger(value) && value > 0;
 }

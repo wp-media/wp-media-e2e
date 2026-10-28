@@ -22,6 +22,7 @@ End-to-end (E2E) tests for WP Media plugins: WP Rocket (performance), BackWPup (
 | BDD                | **Cucumber/Gherkin** via **`playwright-bdd`** (`bddgen` generates specs)                                                                                        |
 | WP-CLI transport   | **execa** (local/docker), **node-ssh** (ssh)                                                                                                                    |
 | Visual diff        | **pixelmatch** + **pngjs**                                                                                                                                      |
+| Terminal layout    | **string-width** (display width per grapheme, never below what a terminal draws; ambiguous width narrow)                                                        |
 | Orchestrator       | **zod 4** (its config), **commander 15** (its `start`)                                                                                                          |
 | Reporting          | Playwright HTML, Cucumber HTML, **Allure** (`allure`, `allure-playwright`)                                                                                      |
 | Quality            | **ESLint** (typescript-eslint, strict + type-checked), **Prettier**, **husky** + **lint-staged**                                                                |
@@ -37,9 +38,9 @@ src/
 │   ├── setup/              # the auth setup's preflight (+ cell-plugin.ts: a broken copy of the cell's plugin), elevation/ownership banner, site info
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
 │   ├── guards.ts           # type guards for narrowing `unknown`
-│   ├── text.ts             # string helpers: escapeRegExp, escapeHtml, redactSecrets/maskValues (credentials), maskSiteUrl (a baseURL shown safely), plain
+│   ├── text.ts             # string helpers: escapeRegExp, escapeHtml, redactSecrets/maskValues (credentials), maskSiteUrl (a baseURL shown safely), withoutControls (well-formed, no escape or control), plain (one line: + no Cf, combining marks capped at 8)
 │   ├── deadline.ts         # withinBudget: a time limit for a best-effort step
-│   ├── terminal/           # side-effect-free terminal output: capabilities.ts (colour/live/Unicode, one precedence; every input a parameter), palette.ts (semantic colours via styleText, symbols + ASCII fallback, a status's word unless a coloured terminal)
+│   ├── terminal/           # side-effect-free terminal output: capabilities.ts (colour/live/Unicode, one precedence; every input a parameter), palette.ts (semantic colours via styleText, symbols + ASCII fallback, a status's word unless a coloured terminal), layout.ts (plain text in: width 20–120, display width, grapheme-safe cutToWidth, padding, rules, 500-code-point capLine)
 │   ├── steps/              # generic step definitions
 │   ├── hooks/              # shared scenario hooks (*.hooks.ts) + their policy modules
 │   ├── pages/              # cross-product page objects (plugins, site-health) + secret-field.ts (typing a secret no report records)

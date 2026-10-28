@@ -349,8 +349,11 @@ Phase 7 — Terminal output (next; decided 2026-10-22). The suite and the orches
     timer at import: every capability is a parameter.
   - Style is a sink, never data: build strings once on plain text, then style. Every external string
     (title parts, error messages, paths, URLs, log chunks) goes through `plain` → masking → width
-    cut. `plain` strips VT/C0/C1/Cf but keeps lone surrogates; run `toWellFormed()` first and cap
-    combining marks. The file sinks (`orchestrator.log`, `run.log`, `results.jsonl`, reports) stay
+    cut. `plain` = `withoutControls` (`toWellFormed()`, VT sequences stripped, other C0/C1 a space)
+    then Cf dropped (an emoji's ZWJ too: the sequence shows as its parts), runs of combining marks
+    (Mn/Mc/Me) capped at 8 (real text has ≤ 5) and a trim. The layout takes plain text only: each
+    function runs `withoutControls` first (never preserves an escape, never throws) and its output
+    is styled after. The file sinks (`orchestrator.log`, `run.log`, `results.jsonl`, reports) stay
     byte-plain; tests assert no `\x1b` in them and no control characters in parsed values (`JSON`
     escapes `\u001b`).
   - Colour: `styleText` is the emitter, never the decision-maker. `detectCapabilities({ env, stream,
@@ -384,24 +387,31 @@ Phase 7 — Terminal output (next; decided 2026-10-22). The suite and the orches
     UTF-8; a codeset decides (`*.UTF-8`/`utf8`); a name without one (`C`, `POSIX`, `en_US`, `c`) is
     ASCII, except a bare `UTF-8` (7V16). A C/POSIX locale changes only the symbols, never colour or
     live. ASCII spellings can be wider (`OK`, `->`, `...`): layout measures the glyph.
-  - Width: `stream.columns` when a finite integer > 0, else `COLUMNS` when valid, else 80; clamped
-    20–120. Live rows are hard-cut to the width (grapheme-safe: `string-width` with
-    `ambiguousIsNarrow: false`, `Intl.Segmenter` for the cut); permanent lines are never truncated
-    except a 500-code-point safety cap, and commands and paths are never cut. `columns`/`rows` of 0
-    (BSD `script`) means no live region, not width 0.
-  - Live region: only on a TTY, `rows`/`columns` > 0, not `CI` (unless `fancy`), not `--ui`/`--watch`,
-    not `--list`; at most 2 redraws/s, height-capped at `rows - 1`; one writer owns the run's stdout
-    and stderr. Cursor contract, byte-tested: after a draw the cursor is on the block's last row,
-    column 0, with no trailing newline; clearing N rows writes `\r\x1b[2K` then
-    `\x1b[1A\r\x1b[2K` × (N-1), ending on the block's first row, column 0; the permanent line is
-    printed there, then `\n`, then the block is redrawn below. A resize resets the model to height 0
-    and redraws after a newline; the cursor is never hidden; the region is closed in `onEnd` (before
-    the HTML hint and the summary) and on every stop path. The suite makes its TTY stdout
-    non-blocking while live is on (`unblockTerminal`, moved into `terminal/stream.ts`), bounds the
-    queue and drains before exit: a paused terminal costs the drain bound, never a frozen event
-    loop. A write that fails (`EPIPE`, `EIO`, a destroyed stream) turns the region off for good and
-    is never thrown: a throwing reporter fails a run that passed. SIGTERM/SIGKILL can leave it; the
-    guide says so.
+  - Width: `stream.columns` when a finite integer > 0, else `COLUMNS` when digits only and > 0, else
+    80; clamped 20–120. A TTY keeps its columns under `TERM=dumb`, a C locale or `plain`. Measure,
+    per grapheme (`Intl.Segmenter`): max(`string-width` of the cluster, Σ `string-width` of its code
+    points), ambiguous width narrow (`string-width`'s default; user decision 2026-10-27): never
+    below what tmux draws, wider only for clusters a terminal draws narrower than their code points
+    (an emoji with a skin tone counts 4, a ZWJ sequence its parts; 7V20, 7V21). Live rows are
+    hard-cut to the width (`cutToWidth`: whole graphemes, the palette's ellipsis measured, shown
+    only after at least one grapheme, else what fits bare); permanent lines are never truncated
+    except a 500-code-point safety cap (`capLine`: whole graphemes, a longer-than-a-line grapheme
+    cut by code point, the ellipsis itself capped), and commands and paths are never cut. A rule's
+    title is never cut. A width argument is sanitised once: non-finite or negative 0, floored,
+    capped at 500. `columns`/`rows` of 0 (BSD `script`) means no live region, not width 0.
+  - Live region: only on a TTY, `rows` > 0 and `columns` ≥ 20 (the layout's minimum: narrower, a
+    live row would wrap), not `CI` (unless `fancy`), not `--ui`/`--watch`, not `--list`; at most 2
+    redraws/s, height-capped at `rows - 1`; one writer owns the run's stdout and stderr. Cursor
+    contract, byte-tested: after a draw the cursor is on the block's last row, column 0, with no
+    trailing newline; clearing N rows writes `\r\x1b[2K` then `\x1b[1A\r\x1b[2K` × (N-1), ending on
+    the block's first row, column 0; the permanent line is printed there, then `\n`, then the block
+    is redrawn below. A resize resets the model to height 0 and redraws after a newline; the cursor
+    is never hidden; the region is closed in `onEnd` (before the HTML hint and the summary) and on
+    every stop path. The suite makes its TTY stdout non-blocking while live is on
+    (`unblockTerminal`, moved into `terminal/stream.ts`), bounds the queue and drains before exit: a
+    paused terminal costs the drain bound, never a frozen event loop. A write that fails (`EPIPE`,
+    `EIO`, a destroyed stream) turns the region off for good and is never thrown: a throwing
+    reporter fails a run that passed. SIGTERM/SIGKILL can leave it; the guide says so.
   - One writer: `terminal.reporter.ts` implements `onStdOut`/`onStdErr` (buffer to lines, flush at
     the attempt's end, strip VT codes, mask, cap, print as permanent indented lines) and every suite
     reporter that writes during a run goes through its sink (`cell-notice`, `results-stream`'s
@@ -435,16 +445,19 @@ Phase 7 — Terminal output (next; decided 2026-10-22). The suite and the orches
     elapsed`) and at most one current line per worker (`▸ feature › scenario · site · elapsed`),
     bottom-pinned through the cursor contract, starting with the first `scenario.begin` so a long
     build shows setup lines, not a 0 % bar; nothing in plain.
-  - 7.2c, failures and the summary: on a final failure, a block with the scenario, the failed Gherkin
-    step, the `feature:` file (no line — the reported location is the generated spec, 7V6), the
-    first error line, screenshot/trace paths and a rerun command
-    (`E2E_CELL=<cell> [E2E_PLUGIN_REF=<commit>|E2E_PLUGIN_ZIP=<zip>] npm run test:<product> --
-    --grep=<escaped title>`, `shellWord`-quoted; a cell-less run omits `E2E_CELL`; duplicate titles
-    run more than one test). Setup failures get their own block. The summary keeps its facts, gains
-    a capped `Failed` list (scenario — failed step, 10 then `and N more`), a width-aware rule and the
-    shared palette; its `Styler` becomes token-based (the specs' identity styler keeps working), its
-    leading blank line stays and no trailing blank line is added, so the shell prompt follows the
-    last line.
+  - 7.2c, failures and the summary: on a final failure, a block with the scenario, the failed
+    Gherkin step, the `feature:` file (no line — the reported location is the generated spec, 7V6),
+    the first error line, screenshot/trace paths and a rerun command (`E2E_CELL=<cell>
+    [E2E_PLUGIN_REF=<commit>|E2E_PLUGIN_ZIP=<zip>] npm run test:<product> -- --grep=<escaped
+    title>`, `shellWord`-quoted; a cell-less run omits `E2E_CELL`; duplicate titles run more than
+    one test). The `--grep` is built from the raw title (escaped, `shellWord`-quoted), never from
+    `plain` or cut output (`plain` is lossy: Cf dropped, marks capped, controls a space, trimmed —
+    7.1b audit A-D7), and `capLine` never applies to the command; how a command holding control
+    characters from a raw title is printed safely is 7.2c's to decide. Setup failures get their own
+    block. The summary keeps its facts, gains a capped `Failed` list (scenario — failed step, 10
+    then `and N more`), a width-aware rule and the shared palette; its `Styler` becomes token-based
+    (the specs' identity styler keeps working), its leading blank line stays and no trailing blank
+    line is added, so the shell prompt follows the last line.
   - Header contents: product/cell, run id, requested ref, planned scenario count — what `onBegin`
     knows. Plugin and site facts stay in the `[artifacts]`/`[site]` lines they already print and in
     the summary; they do not exist yet at `onBegin` and are not printed twice.
@@ -505,14 +518,14 @@ Phase 7 — Terminal output (next; decided 2026-10-22). The suite and the orches
 
   | Sink / env                        | Colour                                                                            | Live              | Symbols          | Width                       |
   | --------------------------------- | --------------------------------------------------------------------------------- | ----------------- | ---------------- | --------------------------- |
-  | TTY, UTF-8, no `CI`               | unless `NO_COLOR`/`NODE_DISABLE_COLORS`/`FORCE_COLOR=0`                           | yes               | Unicode          | `columns`                   |
-  | TTY, `CI`                         | as the precedence says                                                            | no (`fancy`: yes) | Unicode          | `columns`                   |
-  | TTY, `NO_COLOR`                   | no                                                                                | yes               | Unicode          | `columns`                   |
-  | TTY, `TERM=dumb`                  | no, unless `FORCE_COLOR`                                                          | no                | ASCII            | `columns`                   |
-  | TTY, `TERM` unset or empty        | no, unless `FORCE_COLOR`                                                          | no                | by locale        | `columns`                   |
-  | TTY, `C`/`POSIX`/non-UTF-8 locale | as the precedence says                                                            | as the rows above | ASCII            | `columns`                   |
-  | Pipe/file (`fancy` too)           | no, unless `FORCE_COLOR` and the caller allows it (suite yes, orchestrator never) | no                | Unicode if UTF-8 | 80 (permanent lines)        |
-  | `plain`                           | no                                                                                | no                | ASCII            | `columns` on a TTY, else 80 |
+  | TTY, UTF-8, no `CI`               | unless `NO_COLOR`/`NODE_DISABLE_COLORS`/`FORCE_COLOR=0`                           | yes               | Unicode          | `columns`, else `COLUMNS`, else 80 |
+  | TTY, `CI`                         | as the precedence says                                                            | no (`fancy`: yes) | Unicode          | `columns`, else `COLUMNS`, else 80 |
+  | TTY, `NO_COLOR`                   | no                                                                                | yes               | Unicode          | `columns`, else `COLUMNS`, else 80 |
+  | TTY, `TERM=dumb`                  | no, unless `FORCE_COLOR`                                                          | no                | ASCII            | `columns`, else `COLUMNS`, else 80 |
+  | TTY, `TERM` unset or empty        | no, unless `FORCE_COLOR`                                                          | no                | by locale        | `columns`, else `COLUMNS`, else 80 |
+  | TTY, `C`/`POSIX`/non-UTF-8 locale | as the precedence says                                                            | as the rows above | ASCII            | `columns`, else `COLUMNS`, else 80 |
+  | Pipe/file (`fancy` too)           | no, unless `FORCE_COLOR` and the caller allows it (suite yes, orchestrator never) | no                | Unicode if UTF-8 | `columns`, else `COLUMNS`, else 80 |
+  | `plain`                           | no                                                                                | no                | ASCII            | `columns`, else `COLUMNS`, else 80 |
 
   `NO_COLOR` follows no-color.org (present and not empty); `FORCE_COLOR=0`/`false` disables, any other
   value enables and wins over `NO_COLOR` (Node then warns once on stderr; no palette option avoids it,
@@ -524,7 +537,7 @@ Phase 7 — Terminal output (next; decided 2026-10-22). The suite and the orches
   | #   | Delivers                                                                                                                        | Depends  | Parallel | Effort | Done when                                                                                                                                                                                                                                                                              |
   | --- | ------------------------------------------------------------------------------------------------------------------------------- | -------- | -------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
   | 7.1a | **Done.** `terminal/capabilities.ts` and `palette.ts`: the precedence above, semantic tokens, identity palette; unit specs.     | —        | 7.1b     | S, ½ d | Every branch tested with injected env/stream objects; the `styleText` precedence measured through a real pty (`script -q /dev/null`, `stty`), never a fake `isTTY`; `validateStream` pinned; no visible change.                                                                          |
-  | 7.1b | `terminal/layout.ts`: width, grapheme-safe cut, padding, rules; `plain` gains `toWellFormed` and a combining-mark cap; `string-width` (dev dependency). | —        | 7.1a     | S, ½ d | Property tests: emoji/ZWJ/flags/CJK/combining/tabs/lone surrogates, `width(cut(s, n)) <= n`, no split escapes; `npm run typecheck`/`lint` green.                                                                                                                                       |
+  | 7.1b | **Done.** `terminal/layout.ts`: width, grapheme-safe cut, padding, rules, line cap; `plain` gains `toWellFormed`, a combining-mark cap and the shared `withoutControls`; live needs ≥ 20 columns; `string-width` (dev dependency). | —        | 7.1a     | S, ½ d | Property tests: emoji/ZWJ/flags (odd too)/keycaps/CJK/combining/tabs/lone surrogates/escapes, `width(cut(s, n)) <= n`, no control in any output; tmux-measured widths pinned; `npm run typecheck`/`lint` green.                                                                                                                                       |
   | 7.1c | `terminal/live.ts` and `stream.ts` (`unblockTerminal`/`drainTerminal` moved out of `orchestrator/terminal.ts`): draw/clear, resize, backlog, drain. | 7.1a, 7.1b | —       | M, 1 d | Byte-exact fake-sink contract; tmux 40×10 and 80×24 leave no residue over 20 cycles; resize and a stalled stream bounded; non-TTY is a no-op.                                                                                                                                         |
   | 7.2a | Suite sink: `terminal.reporter.ts` replaces `list`; plain lines; `onStdOut`/`onStdErr`; `--list`/`--ui` guards; the other suite reporters' warnings through the sink. | 7.1a, 7.1b | 7.3a     | M, 1½ d | A real run on the Docker cell (`npm run env:up`) on a TTY and `\| cat` shows every setup line, warning and scenario once; `--list` lists; `results.jsonl` unchanged; a fake worker chunk with ANSI lands plain.                                                                          |
   | 7.2b | The live block: bar, counts, per-worker current lines; starts at the first scenario.                                             | 7.1c, 7.2a | 7.3b     | M, 1½ d | A 40×10 tmux pane shows 20 draws with a 120-char title and a worker warning, no residue, no lost permanent line; resize mid-run; `NO_COLOR` keeps live but no colour.                                                                                                                    |
@@ -566,6 +579,9 @@ Phase 7 — Terminal output (next; decided 2026-10-22). The suite and the orches
   | 7V16 | Codeset-less locales: Ubuntu 24.04 gives `en_US`, `c`, `UTF-8`, `c.utf8` (and every uninstalled locale) the charmap `ANSI_X3.4-1968`; macOS reports none for `en_US`/`de_DE` (their `LC_CTYPE` links `C.UTF-8`'s; `nl_langinfo` fails) and `UTF-8` for `LC_CTYPE=UTF-8`. Hence by name: codeset-less is ASCII except bare `UTF-8`. | `locale charmap`, Python `nl_langinfo`, 2026-10-27                                                            |
   | 7V17 | Node's "NO_COLOR is ignored due to FORCE_COLOR" warning fires once, when anything loads Node's colour helpers — the ESM or tsx loader at start-up already does — so `validateStream: false` cannot keep it off stderr; a bare CommonJS bypass call does not warn. | `node --trace-warnings`, 2026-10-27; pinned in `terminal.pty.spec.ts`                                         |
   | 7V18 | Playwright's workers inherit `FORCE_COLOR=1`, so an in-process palette spec passes even without `validateStream: false` unless it removes `FORCE_COLOR` and sets `NO_COLOR`/`CI`/`TERM=dumb`; `palette.spec.ts` does, per test. | mutation run, 2026-10-27                                                                                      |
+  | 7V19 | `string-width` 8.3.0 (2026-09-24; deps `strip-ansi`, `get-east-asian-width`; Node ≥ 20): `ambiguousIsNarrow` default `true`; a cluster counts its first visible code point's width (plus spacing marks), RGI emoji, ZWJ sequences and keycaps 2, a tab and a lone surrogate 0. Node's `stripVTControlCharacters` leaves DCS/APC/PM/SOS and C1 OSC bodies (their `ESC`/C1 then become spaces), so payload text may show but no control passes. | `node_modules/string-width/index.js`; Node 24.21 probe, 2026-10-27 |
+  | 7V20 | tmux 3.8 (macOS, `en_US.UTF-8`; cursor column after printing): every palette Unicode symbol 1 column (ambiguous drawn narrow); Thai KO KAI+SARA AM ×4 8, Devanagari KSSA ×3 6, `a` + 5 / 30 skin-tone modifiers 11 / 61, 3 regional indicators 3 (a lone one 1), keycap+VS16 2, CJK 2 each, `é`/`e`+U+0301/`±` 1. `string-width` alone gives 4, 3 and 1 for those three: a live row would wrap, hence the per-code-point sum. | `layout.spec.ts` table (both columns), 2026-10-27 |
+  | 7V21 | Where tmux 3.8 draws less than the measure (pads short, never wraps): ZWJ family 2 vs 6, rainbow flag 2 vs 3, emoji+modifier 2 vs 4, keycap without VS16 1 vs 2, Hangul L+V jamo 2 vs 3, Devanagari consonant+spacing mark 1 vs 2, a Burmese syllable 1 vs 4. Real text with 5 marks (cantillated Hebrew, Burmese, a Tibetan stack) draws 1 column. | tmux probe, 2026-10-27 |
 
 - Docs, by sub-phase: 7.1 — AGENTS' tree, `package.json`/lock, `suite-imports.json`, the boundary spec;
   7.2a — `reporting.ts` and `cell-notice.ts` TSDoc, `execution-model.md` (reporters, the cell line),

@@ -6,6 +6,7 @@ import {
   maskSiteUrl,
   maskValues,
   NOT_A_SITE_URL,
+  MAX_COMBINING_MARKS,
   plain,
   redactSecrets,
 } from "./text";
@@ -262,6 +263,59 @@ test.describe("plain", () => {
     // U+202E shows what follows right to left: "nightly‮gnp.exe" reads as "nightlyexe.png".
     expect(plain("nightly\u202egnp.exe")).toBe("nightlygnp.exe");
     expect(plain("zero\u200bwidth\ufeff")).toBe("zerowidth");
+  });
+
+  test("replaces lone surrogates, keeps pairs", () => {
+    expect(plain("a\ud83d")).toBe("a\ufffd");
+    expect(plain("\ude00b")).toBe("\ufffdb");
+    expect(plain("\ud83d\ude00")).toBe("\ud83d\ude00");
+    expect(plain("x\ud83d\u001b[31m\ude00").isWellFormed()).toBe(true);
+  });
+
+  test("the combining-mark cap is 8", () => {
+    expect(MAX_COMBINING_MARKS).toBe(8);
+  });
+
+  test("caps each run of combining marks at the cap: Zalgo text", () => {
+    const marks = "\u0301\u0302\u0303\u0304\u0305\u0306\u0307\u0308";
+    expect(plain(`e${marks}\u0309`)).toBe(`e${marks}`);
+    expect(plain(`e${marks}\u0309a${marks}\u030a`)).toBe(`e${marks}a${marks}`);
+    expect(plain(`e${marks.repeat(1000)}`)).toBe(`e${marks}`);
+    expect(plain(`e${marks}`)).toBe(`e${marks}`);
+    // Spacing (Mc) and enclosing (Me) marks count too; a joiner between marks does not split a run.
+    expect(plain(`a${"\u093e".repeat(9)}`)).toBe(`a${"\u093e".repeat(8)}`);
+    expect(plain(`a${"\u20dd".repeat(9)}`)).toBe(`a${"\u20dd".repeat(8)}`);
+    expect(plain(`e${marks.slice(0, 3)}\u200d${marks.slice(3)}\u0309`)).toBe(
+      `e${marks}`,
+    );
+  });
+
+  /** Real text with its longest runs of marks, which must survive whole. */
+  const scripts: readonly (readonly [string, string])[] = [
+    ["Vietnamese", "Vi\u1ec7t e\u0323\u0302\u0301"],
+    [
+      "Burmese \u1019\u103b\u103e\u1031\u102c\u103a (5 marks)",
+      "\u1019\u103b\u103e\u1031\u102c\u103a",
+    ],
+    [
+      "Burmese \u101c\u103b\u103e\u1031\u102c\u1037 (5 marks)",
+      "\u101c\u103b\u103e\u1031\u102c\u1037",
+    ],
+    ["cantillated Hebrew (5 marks)", "\u05e9\u05c1\u05bc\u05b8\u05bd\u0591"],
+    ["a Tibetan stack (5 marks)", "\u0f67\u0fb9\u0fa8\u0fb3\u0fba\u0fbc"],
+    [
+      "Devanagari, with a spacing mark",
+      "\u0915\u094d\u0937\u093f\u0924\u094d\u0930\u093f\u092f",
+    ],
+  ];
+  for (const [name, text] of scripts) {
+    test(`keeps every mark of real text: ${name}`, () => {
+      expect(plain(text)).toBe(text);
+    });
+  }
+
+  test("drops the joiner of an emoji sequence, which then shows as its parts", () => {
+    expect(plain("\u{1f468}\u200d\u{1f469}")).toBe("\u{1f468}\u{1f469}");
   });
 });
 
