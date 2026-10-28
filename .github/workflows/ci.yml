@@ -46,6 +46,19 @@ jobs:
       # A stalled download fails here, not at the job's limit.
       - uses: ./.github/actions/setup-chromium
         timeout-minutes: 5
+      # tmux is not on the runner image; live.tmux.spec.ts fails under CI without it. Waits for the
+      # dpkg lock (an image's own apt job may hold it) and retries once.
+      - name: Install tmux
+        timeout-minutes: 3
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          install_tmux() {
+            sudo -E apt-get -o DPkg::Lock::Timeout=60 update -qq &&
+              sudo -E apt-get -o DPkg::Lock::Timeout=60 install -y -qq --no-install-recommends tmux
+          }
+          install_tmux || { sleep 10; install_tmux; }
+          tmux -V
       - run: npm run test:unit -- --shard=1/2
       - name: Upload report on failure
         if: ${{ failure() }}
@@ -65,6 +78,19 @@ jobs:
       # A stalled download fails here, not at the job's limit.
       - uses: ./.github/actions/setup-chromium
         timeout-minutes: 5
+      # tmux is not on the runner image; live.tmux.spec.ts fails under CI without it. Waits for the
+      # dpkg lock (an image's own apt job may hold it) and retries once.
+      - name: Install tmux
+        timeout-minutes: 3
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          install_tmux() {
+            sudo -E apt-get -o DPkg::Lock::Timeout=60 update -qq &&
+              sudo -E apt-get -o DPkg::Lock::Timeout=60 install -y -qq --no-install-recommends tmux
+          }
+          install_tmux || { sleep 10; install_tmux; }
+          tmux -V
       - run: npm run test:unit -- --shard=2/2
       - name: Upload report on failure
         if: ${{ failure() }}

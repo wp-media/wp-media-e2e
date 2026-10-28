@@ -71,7 +71,7 @@ import {
   type DrainableTerminal,
   type Terminal,
   type TerminalStream,
-} from "./terminal";
+} from "../src/common/terminal/stream";
 import { failureLine, safeBlock, safeLine, textOf } from "./text";
 
 /**
