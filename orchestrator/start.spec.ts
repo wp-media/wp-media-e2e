@@ -39,6 +39,7 @@ import type { KillFn } from "./runs/process-group";
 import { runningRecord, writeRunRecord } from "./runs/record";
 import type { ShutdownSignal, ShutdownTimers } from "./runs/shutdown";
 import { acquireLock } from "./state/lock";
+import { readTail } from "./status/tail";
 import { siteLockPath } from "./state/cell-lock";
 import { formatOwner, parseOwner } from "./state/lock-owner";
 import { readPidSpace } from "./state/pid-space";
@@ -2174,7 +2175,14 @@ test.describe("start — the runs it names when it gives up", () => {
       loop: {
         runOnce: (task, deps) => {
           for (let n = 1; n <= 10_000; n += 1)
-            deps.onRunBegun?.(`bpng-${String(n)}`, task.id);
+            deps.onActivity?.({
+              kind: "begun",
+              taskId: task.id,
+              id: `bpng-${String(n)}`,
+              runId: `RID-${String(n)}`,
+              reportDir: "/r",
+              startedAt: T0,
+            });
           return { stop: () => undefined, done: new Promise(() => undefined) };
         },
       },
@@ -2203,6 +2211,83 @@ test.describe("start — the runs it names when it gives up", () => {
     const log = await logText();
     expect(log).toContain("bpng  bpng-10000 left nothing to kill");
     expect(log).not.toMatch(/bpng {2}bpng-1 /);
+    await expectCleanEnd(r.proc);
+  });
+});
+
+test.describe("start — the status table's watch", () => {
+  /**
+   * A status sink that counts what it is shown and what it reads.
+   *
+   * @returns the deps' `status`, and the counts.
+   */
+  function counting(): {
+    status: NonNullable<StartDeps["status"]>;
+    counts: { shows: number; reads: number };
+  } {
+    const counts = { shows: 0, reads: 0 };
+    return {
+      counts,
+      status: {
+        pollMs: 10,
+        show: () => {
+          counts.shows += 1;
+        },
+        read: (path, state) => {
+          counts.reads += 1;
+          return readTail(path, state);
+        },
+      },
+    };
+  }
+
+  test("is stopped when start gives up on a stuck run: nothing is read or shown after it returns", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const { status, counts } = counting();
+    const reportDir = join(checkout, "reports", "stuck");
+    await mkdir(reportDir, { recursive: true });
+    await writeFile(join(reportDir, RESULTS_FILE), streamOf([runBegin(2)]));
+    const r = rig(undefined, {
+      killSettleMs: 100,
+      status,
+      loop: {
+        runOnce: (task, deps) => {
+          deps.onActivity?.({
+            kind: "begun",
+            taskId: task.id,
+            id: "bpng-1",
+            runId: "RID-1",
+            reportDir,
+            startedAt: T0,
+          });
+          return { stop: () => undefined, done: new Promise(() => undefined) };
+        },
+      },
+    });
+    const started = start({ config }, r.deps);
+    // The run in flight is followed.
+    await expect.poll(() => counts.reads).toBeGreaterThan(2);
+    for (const _ of [1, 2, 3]) {
+      r.proc.emit("SIGINT");
+      r.clock.ms += 2_000;
+    }
+    expect(await started).toBe(130);
+    expect(await logText()).toContain("stopped waiting");
+    const atReturn = { ...counts };
+    await delay(100);
+    expect(counts).toEqual(atReturn);
+    await expectCleanEnd(r.proc);
+  });
+
+  test("is stopped when every loop ended: a --once start shows its last table, then nothing", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const { status, counts } = counting();
+    const r = rig(() => runner("bpng", 1, "passed"), { status });
+    expect(await start({ config, once: true }, r.deps)).toBe(0);
+    expect(counts.shows).toBeGreaterThan(2);
+    const atReturn = { ...counts };
+    await delay(100);
+    expect(counts).toEqual(atReturn);
     await expectCleanEnd(r.proc);
   });
 });

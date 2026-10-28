@@ -8,6 +8,11 @@ import {
   type RunFinishedInput,
 } from "../events/run-finished";
 import type { Logger } from "../log";
+import {
+  tellActivity,
+  type ActivityListener,
+  type TaskActivity,
+} from "./activity";
 import type { DatatorPayload } from "../notify/datator";
 import type { RunCommands } from "../runs/commands";
 import { endRun, type RunEnd, type RunEndInput } from "../runs/end";
@@ -163,10 +168,12 @@ export interface CycleDeps {
   /** Writes a file kept beside the record, atomically and `0600`; `writeJsonAtomic` by default. */
   readonly writeJson?: (path: string, value: unknown) => Promise<void>;
   /**
-   * Told each run's id, and its task's, as it begins — numbered, not stopped, about to launch: so the
-   * process knows which runs are its own. A throw is a line, never the run's.
+   * Told what the task's runs do ({@link TaskActivity}): each run as it begins — numbered, not stopped,
+   * about to launch, with its report folder and start, so the process knows which runs are its own —,
+   * each stop that reaches it, and its end; the loop adds its cooldowns and its own end. A throw is a
+   * line, never the run's.
    */
-  readonly onRunBegun?: (id: string, taskId: string) => void;
+  readonly onActivity?: ActivityListener;
   /**
    * Names the run in its cell's site locks (`HeldCell.setRun`), which its loop holds, just before its
    * launch: `undefined` once named; otherwise why not, in words — or a throw — which ends the run
@@ -220,6 +227,8 @@ class Cycle {
   private launched: LaunchedRun | undefined;
   /** The clock: `deps.now`, else the system's. */
   private readonly now: () => Date;
+  /** The run's id once it has begun and until its end is told: only then is a stop told. */
+  private begunId: string | undefined;
 
   /**
    * @param task - the task.
@@ -244,6 +253,13 @@ class Cycle {
     const safe = safeLine(why, MAX_REASON_LENGTH, this.deps.secrets);
     this.asked = furtherStop(this.asked, { level, why: safe });
     this.forward();
+    const id = this.begunId;
+    if (id !== undefined)
+      this.tell(
+        // The level in force: a lesser stop after a greater one does not lower it.
+        { kind: "stopping", taskId: this.task.id, id, level: this.asked.level },
+        "is stopping",
+      );
   }
 
   /**
@@ -252,12 +268,40 @@ class Cycle {
    * @returns how it ended.
    */
   async run(): Promise<RunResult> {
+    let result: RunResult;
     try {
-      return await this.cycle();
+      result = await this.cycle();
     } catch (error) {
       this.say(`the run failed: ${this.failure(error)}`);
-      return { kind: "notStarted", why: "failed" };
+      result = { kind: "notStarted", why: "failed" };
     }
+    this.tellEnded(result);
+    return result;
+  }
+
+  /**
+   * Tells the end of a run that had begun — every way it can end, an unexpected failure (`error`)
+   * included —, once; a run that never began has none to tell.
+   *
+   * @param result - how it ended.
+   */
+  private tellEnded(result: RunResult): void {
+    const id = this.begunId;
+    if (id === undefined) return;
+    this.begunId = undefined;
+    const scenarios =
+      result.kind === "ended" ? result.event?.counts.total : undefined;
+    this.tell(
+      {
+        kind: "ended",
+        taskId: this.task.id,
+        id,
+        status: result.kind === "ended" ? result.status : "error",
+        endedAt: result.kind === "ended" ? result.endedAt : this.now(),
+        ...(scenarios === undefined ? {} : { scenarios }),
+      },
+      "ended",
+    );
   }
 
   /**
@@ -276,7 +320,7 @@ class Cycle {
       this.say(`${identity.id} not started: ${asked.why}`);
       return { kind: "notStarted", why: "stopped" };
     }
-    this.begun(identity.id);
+    this.begun(identity);
     const refusal = await this.claimCell(identity);
     if (refusal !== undefined) return this.cellRefused(identity, refusal);
     return this.launchAndEnd(identity);
@@ -799,16 +843,40 @@ class Cycle {
   }
 
   /**
-   * Tells `onRunBegun` the run's id; a hook that throws is a line.
+   * Tells that the run began: its id, report folder and start.
    *
-   * @param id - the run's id.
+   * @param identity - the run.
    */
-  private begun(id: string): void {
-    try {
-      this.deps.onRunBegun?.(id, this.task.id);
-    } catch (error) {
-      this.say(`${id}: telling that it began failed: ${this.failure(error)}`);
-    }
+  private begun(identity: RunIdentity): void {
+    this.begunId = identity.id;
+    this.tell(
+      {
+        kind: "begun",
+        taskId: this.task.id,
+        id: identity.id,
+        runId: identity.runId,
+        reportDir: identity.reportDir,
+        startedAt: identity.startedAt,
+      },
+      "began",
+    );
+  }
+
+  /**
+   * Tells `onActivity` what the run did; a listener that throws, or rejects, is a line.
+   *
+   * @param activity - what it did.
+   * @param verb - how the line words it: `began`, `is stopping`, `ended`.
+   */
+  private tell(
+    activity: TaskActivity & { readonly id: string },
+    verb: string,
+  ): void {
+    tellActivity(this.deps.onActivity, activity, (error) => {
+      this.say(
+        `${activity.id}: telling that it ${verb} failed: ${this.failure(error)}`,
+      );
+    });
   }
 
   /**

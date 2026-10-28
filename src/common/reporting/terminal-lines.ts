@@ -32,11 +32,11 @@ interface MarkStyle {
 }
 
 /**
- * What a line says happened, beyond the palette's {@link Status}es: a skip the run itself chose
- * (`skipped`), an attempt the run was interrupted in, an attempt due a retry, an error outside any
- * test.
+ * What a line says happened: the palette's {@link Status}es (its `error` is an error outside any
+ * test here), and beyond them a skip the run itself chose (`skipped`), an attempt the run was
+ * interrupted in, an attempt due a retry.
  */
-export type Verdict = Status | "skipped" | "interrupted" | "retry" | "error";
+export type Verdict = Status | "skipped" | "interrupted" | "retry";
 
 /** The marks the palette has no {@link Status} for; each word is the verdict's name. */
 const EXTRA_MARKS: Readonly<Record<Exclude<Verdict, Status>, MarkStyle>> = {
@@ -44,8 +44,6 @@ const EXTRA_MARKS: Readonly<Record<Exclude<Verdict, Status>, MarkStyle>> = {
   interrupted: { symbol: "stopped", token: "stop", markAlone: false },
   skipped: { symbol: "dash", token: "dim", markAlone: false },
   retry: { symbol: "retry", token: "warn", markAlone: true },
-  // `✘` is a failed scenario's too.
-  error: { symbol: "failed", token: "fail", markAlone: false },
 };
 
 /** The indent of a line that belongs to the line it follows or precedes. */

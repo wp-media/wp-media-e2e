@@ -13,7 +13,7 @@ import type { Command } from "../runs/commands";
 
 /** How the fake behaves. */
 export interface FakeBehaviour {
-  /** Exits at once with this code. */
+  /** Exits at once with this code — before any of {@link FakeBehaviour.appends} is made. */
   readonly exitCode?: number;
   /** Otherwise exits `0` after this long, in milliseconds; 60 s by default. */
   readonly runMs?: number;
@@ -32,6 +32,24 @@ export interface FakeBehaviour {
    * exits or waits.
    */
   readonly writes?: readonly { readonly path: string; readonly text: string }[];
+  /**
+   * Text appended to files, in order, their folders made — a results stream written as a run goes, a
+   * line in two pieces —: each once `afterMs` has passed since it started and the one before it was
+   * made, and, with {@link FakeBehaviour.gateDir}, once its gate is open. Never with `exitCode`,
+   * which exits first: end the fake with `runMs` or {@link FakeBehaviour.exitAfterAppends}.
+   */
+  readonly appends?: readonly {
+    readonly afterMs: number;
+    readonly path: string;
+    readonly text: string;
+  }[];
+  /**
+   * A handshake for the appends: append `i` waits for the file `go-<i>` here, and once made writes
+   * `done-<i>` — so a test decides when each lands, whatever the machine's load.
+   */
+  readonly gateDir?: string;
+  /** Exits `0` once the last append is made. */
+  readonly exitAfterAppends?: boolean;
 }
 
 /** What the fake writes. */
@@ -52,6 +70,26 @@ for (const w of b.writes ?? []) {
   fs.mkdirSync(require("node:path").dirname(w.path), { recursive: true });
   fs.writeFileSync(w.path, w.text);
 }
+const startedAt = Date.now();
+const appendFrom = (i) => {
+  const appends = b.appends ?? [];
+  const a = appends[i];
+  if (a === undefined) { if (b.exitAfterAppends && appends.length > 0) process.exit(0); return; }
+  const path = require("node:path");
+  const make = () => {
+    fs.mkdirSync(path.dirname(a.path), { recursive: true });
+    fs.appendFileSync(a.path, a.text);
+    if (b.gateDir) fs.writeFileSync(path.join(b.gateDir, "done-" + i), "");
+    appendFrom(i + 1);
+  };
+  const gated = () => {
+    if (!b.gateDir) return make();
+    const gate = path.join(b.gateDir, "go-" + i);
+    const wait = setInterval(() => { if (fs.existsSync(gate)) { clearInterval(wait); make(); } }, 5);
+  };
+  setTimeout(gated, Math.max(0, a.afterMs - (Date.now() - startedAt)));
+};
+appendFrom(0);
 if (b.exitCode !== undefined) process.exit(b.exitCode);
 process.on("SIGINT", () => {
   say("got " + "SIGINT");

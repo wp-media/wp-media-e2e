@@ -148,6 +148,16 @@ shows `✗` with the status or our reason (`✗ 404 no_service`, `✗ no answer 
 Outcomes: `✔` passed, `⚠` flaky, `✘` failed or error (could not test — [What a run is](#what-a-run-is)), `■` stopped or killed. A run that could not test gives its
 reason and log. A failing run never stops its loop: it fails, and says so, every cycle.
 
+These lines are all it prints, on a terminal and piped alike. A per-task status table (`TASK RUN
+CELL PROGRESS ELAPSED STATE`) is built from the loops and each run's `results.jsonl`
+(`orchestrator/status/`), counted as `run.finished` counts, but not shown yet; once it is, only on a
+terminal: a pipe never gets the table or colour, even under `FORCE_COLOR`. STATE: `starting` (no
+run yet, or launched with no `run.begin` read), `setup n/m`, `running` (also once `run.end` is read),
+`stopping`, `ended` (recorded and announced, cooldown not armed), `next HH:MM:SS` (PROGRESS: the
+last outcome, or `not started · failed|stopped` for an attempt that began no run), then `done`
+(`--once`), `stopped` or `loop failed`. A stream past 8 MiB (the cap `run.finished` reads) shows
+`unknown` and is no longer read.
+
 ## The command
 
 ```text
@@ -313,6 +323,6 @@ the checkout under a running orchestrator: a run reads its files as it goes.
 - `npm run test:unit -- --project=orchestrator` runs its specs alone: real processes and signals over
   a fake suite, no site.
 - `npm run orchestrator:soak` runs the real `start` for hundreds of runs over the fake suite (a few
-  minutes; `ORCHESTRATOR_SOAK_RUNS` sets how many). It fails if listeners, handles, timers or file
-  descriptors grow, if pruning lets run folders pass the cap, or if pruning costs 1 ms a folder or
+  minutes; `ORCHESTRATOR_SOAK_RUNS` sets how many), the status table followed throughout. It fails if
+  listeners, handles, timers or file descriptors grow, if pruning lets run folders pass the cap, or if pruning costs 1 ms a folder or
   more.

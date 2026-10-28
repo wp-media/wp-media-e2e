@@ -115,6 +115,16 @@ const SHOWN: Readonly<
     pipeColour: "\x1b[33m⚠\x1b[39m warning",
     colourless: ["⚠ warning", "! warning"],
   },
+  error: {
+    ttyColour: ["\x1b[31m✘\x1b[39m error", "\x1b[31mx\x1b[39m error"],
+    pipeColour: "\x1b[31m✘\x1b[39m error",
+    colourless: ["✘ error", "x error"],
+  },
+  killed: {
+    ttyColour: ["\x1b[33m■\x1b[39m killed", "\x1b[33m#\x1b[39m killed"],
+    pipeColour: "\x1b[33m■\x1b[39m killed",
+    colourless: ["■ killed", "# killed"],
+  },
 };
 
 /** Every status. */
@@ -228,6 +238,12 @@ test.describe("status", () => {
   test("a coloured terminal tells flaky from warning by its word", () => {
     const palette = createPalette({ tty: true, color: true, unicode: true });
     expect(palette.status("flaky")).not.toBe(palette.status("warning"));
+  });
+
+  test("a coloured terminal tells error from failed, and killed from stopped, by their word", () => {
+    const palette = createPalette({ tty: true, color: true, unicode: true });
+    expect(palette.status("error")).not.toBe(palette.status("failed"));
+    expect(palette.status("killed")).not.toBe(palette.status("stopped"));
   });
 
   test("colour off emits no escape anywhere", () => {

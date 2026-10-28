@@ -36,18 +36,25 @@ export function counts(
   };
 }
 
+/** The `RUN_ID` {@link runBegin} names by default. */
+export const FIXTURE_RUN_ID = "2026-10-13T10-15-31-042Z-bpng-12";
+
 /**
  * `run.begin` for `scenarios` planned scenarios.
  *
  * @param scenarios - how many scenarios the run planned.
+ * @param extra - fields replacing the defaults: another `runId`, say.
  * @returns a `pro@nginx` run's begin, two setups, two retries.
  */
-export function runBegin(scenarios: number): RunBeginEvent {
+export function runBegin(
+  scenarios: number,
+  extra: Partial<RunBeginEvent> = {},
+): RunBeginEvent {
   return {
     v: 1,
     type: "run.begin",
     at: AT,
-    runId: "2026-10-13T10-15-31-042Z-bpng-12",
+    runId: FIXTURE_RUN_ID,
     product: "backwpup",
     cell: "pro@nginx",
     edition: "pro",
@@ -56,6 +63,7 @@ export function runBegin(scenarios: number): RunBeginEvent {
     setups: 2,
     retries: 2,
     workers: 1,
+    ...extra,
   };
 }
 

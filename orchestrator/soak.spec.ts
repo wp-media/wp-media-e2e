@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { readdirSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { fakeCommand } from "./__fixtures__/fake-suite";
@@ -78,12 +78,22 @@ const TASK_ID = "bsak";
 /** A cell no sites file has: the product list is a stand-in, so nothing can reach a real site. */
 const CELL = "soak@cell";
 
-/** A results stream of one passed scenario: each run passes, so Datator is posted to every time. */
-const PASSED = streamOf([
-  runBegin(1),
-  scenarioEnd("a", "passed"),
-  runEnd("passed", { total: 1, passed: 1 }),
-]);
+/**
+ * A results stream of one passed scenario: each run passes, so Datator is posted to every time.
+ *
+ * @param runId - the run's `RUN_ID`, which its `run.begin` names: the status table counts only its own.
+ * @returns the stream.
+ */
+function passedStream(runId: string): string {
+  return streamOf([
+    runBegin(1, { runId }),
+    scenarioEnd("a", "passed"),
+    runEnd("passed", { total: 1, passed: 1 }),
+  ]);
+}
+
+/** How long each fake run lasts: a few of the status table's 20 ms polls, so its tail is read. */
+const RUN_MS = 60;
 
 /** The stand-in product list: BackWPup, with the one cell. */
 const PRODUCT_LIST = {
@@ -152,6 +162,12 @@ interface SoakResult {
   readonly kept: number[];
   readonly log: string;
   readonly requests: number;
+  /** How many tables the status sink was handed. */
+  readonly shows: number;
+  /** The task's phase in the last one. */
+  readonly lastPhase: string;
+  /** The most scenarios a run in flight was shown done: above 0 only if its stream was read. */
+  readonly mostDone: number;
 }
 
 let root = "";
@@ -222,6 +238,9 @@ async function soak(runs: number, reportsKeep?: number): Promise<SoakResult> {
     { mode: 0o600 },
   );
   const proc = new SoakProcess();
+  let shows = 0;
+  let lastPhase = "";
+  let mostDone = 0;
   const samples: Sample[] = [];
   const timings: PruneTiming[] = [];
   const kept: number[] = [];
@@ -230,8 +249,13 @@ async function soak(runs: number, reportsKeep?: number): Promise<SoakResult> {
   const commands = (reportDir: string): RunCommands => ({
     bddgen: fakeCommand({ exitCode: 0 }),
     playwright: fakeCommand({
-      exitCode: 0,
-      writes: [{ path: join(reportDir, RESULTS_FILE), text: PASSED }],
+      runMs: RUN_MS,
+      writes: [
+        {
+          path: join(reportDir, RESULTS_FILE),
+          text: passedStream(basename(reportDir)),
+        },
+      ],
     }),
   });
   const code = await start(
@@ -242,6 +266,17 @@ async function soak(runs: number, reportsKeep?: number): Promise<SoakResult> {
       loadProductList: () => Promise.resolve(PRODUCT_LIST),
       cellLocks: join(root, "site-locks"),
       exitWaitMs: 1_000,
+      // The status table, followed the whole time: its tails and its poll timer must leak nothing.
+      status: {
+        pollMs: 20,
+        show: (board) => {
+          shows += 1;
+          const phase = board[0]?.phase;
+          lastPhase = phase?.kind ?? "";
+          if (phase?.kind === "run")
+            mostDone = Math.max(mostDone, phase.run.progress.done);
+        },
+      },
       notifications: {
         // Every request to the sink, over a real socket, by the real `fetch`.
         fetch: (input, init) =>
@@ -290,6 +325,9 @@ async function soak(runs: number, reportsKeep?: number): Promise<SoakResult> {
     kept,
     log,
     requests: target.requests.length,
+    shows,
+    lastPhase,
+    mostDone,
   };
 }
 
@@ -327,6 +365,11 @@ function expectEveryRunAnnounced(result: SoakResult, runs: number): void {
   expect(count("slack ✓ · datator ✓ 201")).toBe(runs);
   expect(result.log).not.toContain("✗");
   expect(result.requests).toBe(2 * runs);
+  // Each run is shown at least begun, ended and cooling; the loop's end last.
+  expect(result.shows).toBeGreaterThanOrEqual(3 * runs);
+  expect(result.lastPhase).toBe("over");
+  // The poller worked: a run's stream was read, not only the loops' activity shown.
+  expect(result.mostDone).toBeGreaterThanOrEqual(1);
 }
 
 /**

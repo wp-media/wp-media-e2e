@@ -56,6 +56,11 @@ import {
   startedLine,
   type ExitCode,
 } from "./start-lines";
+import {
+  createStatusWatch,
+  type StatusWatch,
+  type StatusWatchOptions,
+} from "./status/watch";
 import { showPath } from "./tasks/run-lines";
 import {
   NODE_COOLDOWN_TIMERS,
@@ -238,6 +243,16 @@ export interface StartDeps {
    * second (`parent.ts`), by default.
    */
   readonly parentWatch?: ParentWatch;
+  /**
+   * The status table's sink (`status/watch.ts`): given, the start keeps each task's state and its
+   * run's progress from the loops' activity and the runs' results streams, and hands the table to
+   * `show` at each change, from the loops' start to their end. Without it — production, so far — no
+   * table is kept and no stream is read: nothing shows one.
+   */
+  readonly status?: Pick<
+    StatusWatchOptions,
+    "show" | "pollMs" | "timers" | "read"
+  >;
 }
 
 /** What `start` begins with: the product list, the config, and the tasks selected. */
@@ -354,6 +369,8 @@ class Orchestrator {
   private readonly launched = new Map<string, string>();
   /** The state directory's lock, once taken: released once the log is closed. */
   private lock: HeldLock | undefined;
+  /** The status table's source, while the loops run and a sink was given. */
+  private status: StatusWatch | undefined;
 
   /**
    * @param options - the command line's options.
@@ -672,6 +689,11 @@ class Orchestrator {
     const deps = this.loopDeps(prepared, checkout, logger, bus, (event) =>
       notifications.datatorPayload(event),
     );
+    if (this.deps.status !== undefined)
+      this.status = createStatusWatch({
+        ...this.deps.status,
+        tasks: selected.map(({ task }) => ({ id: task.id, cell: task.cell })),
+      });
     // Started and made reachable in one turn: a signal is handled between turns only. Each loop holds
     // its cell's site locks from its start to its end.
     this.loops = selected.map((checked) =>
@@ -680,14 +702,23 @@ class Orchestrator {
         takeCell: () => cells.acquire(unitOf(checked)),
       }),
     );
-    const ends = await this.waitForLoops(loaded.stateDir, ids);
+    let ends: readonly TaskEnd[] | undefined;
+    try {
+      ends = await this.waitForLoops(loaded.stateDir, ids);
+    } finally {
+      // Before the exit's lines, on every path — a give-up leaves runs in flight: nothing is read or
+      // shown after. Never waits: a read that never settles must not hold the exit.
+      this.status?.stop();
+      this.status = undefined;
+    }
     await bus.settle();
     return ends;
   }
 
   /**
    * What every loop is given: the checkout, the config, each task's commands and ref, the log and the
-   * bus, with the seams a spec injects; `onRunBegun` last, so this start always knows its own runs.
+   * bus, with the seams a spec injects; `onActivity` last, so this start always knows its own runs
+   * and its status table hears every task.
    *
    * @param prepared - the config and the product list.
    * @param checkout - the checkout the runs start in.
@@ -733,8 +764,10 @@ class Orchestrator {
       once: this.options.once === true,
       ...(this.deps.now === undefined ? {} : { now: this.deps.now }),
       ...this.deps.loop,
-      onRunBegun: (id, taskId) => {
-        this.launched.set(taskId, id);
+      onActivity: (activity) => {
+        if (activity.kind === "begun")
+          this.launched.set(activity.taskId, activity.id);
+        this.status?.tell(activity);
       },
     };
   }
