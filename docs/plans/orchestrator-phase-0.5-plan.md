@@ -842,8 +842,8 @@ real script, `cli.ts` and `command.ts` over it through `swap-start.mjs`.
   it — loads `.env` and stamps `RUN_ID` as it is imported (V84, V130). So it imports from the suite
   only what `suite-imports.json` lists: `src/common/artifacts/request.ts`, `config/run-env.ts`,
   `config/run-id.ts`, `config/sites.ts`, `reporting/results-reader.ts`,
-  `reporting/results-schema.ts`, `reporting/retention.ts`, `src/common/text.ts`,
-  `src/projects/products.ts` — each admitted only once the boundary spec passes with it. Not
+  `reporting/results-schema.ts`, `reporting/retention.ts`, `src/common/terminal/capabilities.ts`,
+  `terminal/palette.ts`, `src/common/text.ts`, `src/projects/products.ts` — each admitted only once the boundary spec passes with it. Not
   `reporting/run-facts.ts`, which imports the reporter's whole summary: `runs/facts.ts` reads the
   file itself (a spec checks its name against the suite's). Enforced twice, since a lint rule sees
   only an import's spelling, not where it leads or what that module imports, and misses `import()`

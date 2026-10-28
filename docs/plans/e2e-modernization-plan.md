@@ -354,25 +354,36 @@ Phase 7 — Terminal output (next; decided 2026-10-22). The suite and the orches
     byte-plain; tests assert no `\x1b` in them and no control characters in parsed values (`JSON`
     escapes `\u001b`).
   - Colour: `styleText` is the emitter, never the decision-maker. `detectCapabilities({ env, stream,
-    columns, rows, mode })` owns the precedence; when colour is on, the palette calls
+    mode?, context?, forceColorWithoutTty? })` owns the precedence (size from `stream.columns`/`rows`;
+    `context` `run|ui|watch|list`, only `run` may redraw; `forceColorWithoutTty`, default `true`, the
+    suite's, `false` for the orchestrator) and returns `{ tty, color, live, unicode }`; when colour is
+    on, the palette calls
     `styleText(format, text, { validateStream: false })` (measured to bypass Node's own env checks),
     so a TTY under `CI` keeps its colour while the live region stays off. When off, identity. Named
     ANSI colours and bold/dim only — no 256/truecolor, no background fills. Semantic tokens: `ok`
     green, `fail` red, `warn`/`stop` yellow, `id` cyan, `dim` metadata and paths, `command` bold.
-    Every status also has a symbol and a word; the word is shown whenever colour is off (a TTY with
-    colour may show the mark alone), so a CI log and a screen reader never see a colour-only status.
-  - Precedence, once: `E2E_OUTPUT=plain` (the suite's switch) wins over everything; else
-    `FORCE_COLOR` present (`0`/`false` off, anything else on) wins; else a non-empty `NO_COLOR`,
-    `NODE_DISABLE_COLORS` (any value), `TERM=dumb` or a non-TTY stream turns colour off; else a TTY
-    turns it on. `CI` never turns colour off by itself; it only turns the live region off.
+    Every status also has a symbol and a word; the word is dropped only on a TTY with colour on, and
+    never for flaky (it shares `⚠` and `warn` with warning), so a CI log (even a `FORCE_COLOR` pipe,
+    whose escapes get stripped) and a screen reader never see a colour-only status.
+  - Precedence, once: `E2E_OUTPUT=plain` (the suite's switch) wins over everything; else a non-TTY
+    stream of a caller passing `forceColorWithoutTty: false` (the orchestrator) has no colour; else
+    `FORCE_COLOR` present (`0`/`false` in any case off, anything else on, empty included) wins; else
+    a non-empty `NO_COLOR`, `NODE_DISABLE_COLORS` (any value, empty included), `TERM` `dumb`, unset or
+    empty, or a non-TTY stream turns colour off; else a TTY turns it on. `CI` never turns colour off
+    by itself; it only turns the live region off. `TERM` unset or empty is `dumb` for colour and live,
+    but its symbols follow the locale.
   - `E2E_OUTPUT=auto|plain|fancy` (default `auto`, read by the suite only): `auto` = fancy on a TTY,
     plain otherwise; `plain` = no colour, no cursor movement, ASCII; `fancy` = live on a TTY even
     under `CI`, but never colour where the precedence says no and never cursor movement without a
     TTY. An invalid value fails fast at the env boundary, as `E2E_RETRIES` does. The orchestrator
     reads no `E2E_*` (0.5 §4.9) and detects from its own stream and the standard variables.
-  - Symbols: `✔ ✘ ⚠ ■ ▸ ▰▱ ✓ ✗ · │ ├ └ ─ ━ › …`; ASCII fallback (`OK`, `x`, `!`, `#`, `>`, `#-`,
-    `ok`, `x`, `.`, `|`, `+`, `-`, `=`, `>`, `...`) when `TERM=dumb`, the locale is `C`/`POSIX`, or
-    output is forced plain. An unset locale is UTF-8 on the supported platforms.
+  - Symbols (`SYMBOLS`, Unicode → ASCII): `✔`→`OK`, `✘`→`x`, `⚠`→`!`, `■`→`#`, `▸`→`>`, `↻`→`~`,
+    `█`→`#`, `░`→`-`, `✓`→`ok`, `✗`→`x`, `·`→`.`, `—`→`-`, `→`→`->`, `│`→`|`, `├`→`+`, `└`→`+`,
+    `─`→`-`, `━`→`=`, `›`→`>`, `…`→`...`. ASCII when `TERM=dumb`, the locale is not UTF-8, or output
+    is plain. The locale (first non-empty of `LC_ALL`, `LC_CTYPE`, `LANG`) is judged by name: unset is
+    UTF-8; a codeset decides (`*.UTF-8`/`utf8`); a name without one (`C`, `POSIX`, `en_US`, `c`) is
+    ASCII, except a bare `UTF-8` (7V16). A C/POSIX locale changes only the symbols, never colour or
+    live. ASCII spellings can be wider (`OK`, `->`, `...`): layout measures the glyph.
   - Width: `stream.columns` when a finite integer > 0, else `COLUMNS` when valid, else 80; clamped
     20–120. Live rows are hard-cut to the width (grapheme-safe: `string-width` with
     `ambiguousIsNarrow: false`, `Intl.Segmenter` for the cut); permanent lines are never truncated
@@ -492,32 +503,35 @@ Phase 7 — Terminal output (next; decided 2026-10-22). The suite and the orches
 
 - Compatibility contract:
 
-  | Sink / env                                     | Colour                                              | Live    | Symbols                 | Width                    |
-  | ---------------------------------------------- | --------------------------------------------------- | ------- | ----------------------- | ------------------------ |
-  | TTY, UTF-8, no `CI`                            | unless `NO_COLOR`/`NODE_DISABLE_COLORS`/`TERM=dumb` | yes     | Unicode                 | `columns`                |
-  | TTY, `CI`                                      | as the precedence says                              | no      | Unicode                 | `columns`                |
-  | TTY, `NO_COLOR`                                | no                                                  | yes     | Unicode                 | `columns`                |
-  | Pipe/file/CI                                   | no, unless `FORCE_COLOR`                            | no      | Unicode if UTF-8        | 80 (permanent lines)     |
-  | `TERM=dumb`, `C`/`POSIX` locale, `plain`       | no                                                  | no      | ASCII                   | 80 (permanent lines)     |
-  | `fancy`, non-TTY                               | as the precedence says (no ANSI without a TTY)      | no      | Unicode                 | 80 (permanent lines)     |
+  | Sink / env                        | Colour                                                                            | Live              | Symbols          | Width                       |
+  | --------------------------------- | --------------------------------------------------------------------------------- | ----------------- | ---------------- | --------------------------- |
+  | TTY, UTF-8, no `CI`               | unless `NO_COLOR`/`NODE_DISABLE_COLORS`/`FORCE_COLOR=0`                           | yes               | Unicode          | `columns`                   |
+  | TTY, `CI`                         | as the precedence says                                                            | no (`fancy`: yes) | Unicode          | `columns`                   |
+  | TTY, `NO_COLOR`                   | no                                                                                | yes               | Unicode          | `columns`                   |
+  | TTY, `TERM=dumb`                  | no, unless `FORCE_COLOR`                                                          | no                | ASCII            | `columns`                   |
+  | TTY, `TERM` unset or empty        | no, unless `FORCE_COLOR`                                                          | no                | by locale        | `columns`                   |
+  | TTY, `C`/`POSIX`/non-UTF-8 locale | as the precedence says                                                            | as the rows above | ASCII            | `columns`                   |
+  | Pipe/file (`fancy` too)           | no, unless `FORCE_COLOR` and the caller allows it (suite yes, orchestrator never) | no                | Unicode if UTF-8 | 80 (permanent lines)        |
+  | `plain`                           | no                                                                                | no                | ASCII            | `columns` on a TTY, else 80 |
 
   `NO_COLOR` follows no-color.org (present and not empty); `FORCE_COLOR=0`/`false` disables, any other
-  value enables and wins over `NO_COLOR` (Node warns; the palette bypasses that warning with
-  `validateStream: false`). `CI` is `true` when present and not empty/`0`/`false`; that only disables
-  live.
+  value enables and wins over `NO_COLOR` (Node then warns once on stderr; no palette option avoids it,
+  7V17). `CI` is `true` when present and not empty/`0`/`false`; that only disables live. Every row is
+  a case in `capabilities.spec.ts`; the TTY rows are also measured on a real pty
+  (`terminal.pty.spec.ts`).
 - Sub-phases:
 
   | #   | Delivers                                                                                                                        | Depends  | Parallel | Effort | Done when                                                                                                                                                                                                                                                                              |
   | --- | ------------------------------------------------------------------------------------------------------------------------------- | -------- | -------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-  | 7.1a | `terminal/capabilities.ts` and `palette.ts`: the precedence above, semantic tokens, identity palette; unit specs.                | —        | 7.1b     | S, ½ d | Every branch tested with injected env/stream objects; the `styleText` precedence measured through a real pty (`script -q /dev/null`, `stty`), never a fake `isTTY`; `validateStream` pinned; no visible change.                                                                          |
+  | 7.1a | **Done.** `terminal/capabilities.ts` and `palette.ts`: the precedence above, semantic tokens, identity palette; unit specs.     | —        | 7.1b     | S, ½ d | Every branch tested with injected env/stream objects; the `styleText` precedence measured through a real pty (`script -q /dev/null`, `stty`), never a fake `isTTY`; `validateStream` pinned; no visible change.                                                                          |
   | 7.1b | `terminal/layout.ts`: width, grapheme-safe cut, padding, rules; `plain` gains `toWellFormed` and a combining-mark cap; `string-width` (dev dependency). | —        | 7.1a     | S, ½ d | Property tests: emoji/ZWJ/flags/CJK/combining/tabs/lone surrogates, `width(cut(s, n)) <= n`, no split escapes; `npm run typecheck`/`lint` green.                                                                                                                                       |
   | 7.1c | `terminal/live.ts` and `stream.ts` (`unblockTerminal`/`drainTerminal` moved out of `orchestrator/terminal.ts`): draw/clear, resize, backlog, drain. | 7.1a, 7.1b | —       | M, 1 d | Byte-exact fake-sink contract; tmux 40×10 and 80×24 leave no residue over 20 cycles; resize and a stalled stream bounded; non-TTY is a no-op.                                                                                                                                         |
   | 7.2a | Suite sink: `terminal.reporter.ts` replaces `list`; plain lines; `onStdOut`/`onStdErr`; `--list`/`--ui` guards; the other suite reporters' warnings through the sink. | 7.1a, 7.1b | 7.3a     | M, 1½ d | A real run on the Docker cell (`npm run env:up`) on a TTY and `\| cat` shows every setup line, warning and scenario once; `--list` lists; `results.jsonl` unchanged; a fake worker chunk with ANSI lands plain.                                                                          |
   | 7.2b | The live block: bar, counts, per-worker current lines; starts at the first scenario.                                             | 7.1c, 7.2a | 7.3b     | M, 1½ d | A 40×10 tmux pane shows 20 draws with a 120-char title and a worker warning, no residue, no lost permanent line; resize mid-run; `NO_COLOR` keeps live but no colour.                                                                                                                    |
-  | 7.2c | Failure blocks, retry/flaky/setup/timeout cases, rerun command; summary `Failed` list and width-aware rule.                      | 7.2a     | 7.4a     | M, 1½ d | Each failure kind names the scenario and the failed Gherkin step (never an API step); the canary never appears; the summary lists failures, 10 then `and N more`; exact-output specs updated deliberately.                                                                                |
-  | 7.3a | Orchestrator seam (`id`, `reportDir`, `startedAt`, stopping/ended), `results.jsonl` tailer, table plain.                         | 7.1a, 7.1b | 7.2a     | M, 1½ d | The fake suite renders `starting`/`setup`/`running`/`cooling`; a partial line, truncation, a missing file, a crash without `run.end` and `--once` are handled; no timer or fd leaks (soak).                                                                                              |
+  | 7.2c | Failure blocks, retry/flaky/setup/timeout cases, rerun command; summary `Failed` list and width-aware rule. Adds `could-not-test`/`interrupted` to the palette's `Status` if the summary migrates them. | 7.2a     | 7.4a     | M, 1½ d | Each failure kind names the scenario and the failed Gherkin step (never an API step); the canary never appears; the summary lists failures, 10 then `and N more`; exact-output specs updated deliberately.                                                                                |
+  | 7.3a | Orchestrator seam (`id`, `reportDir`, `startedAt`, stopping/ended), `results.jsonl` tailer, table plain; detects with `forceColorWithoutTty: false`. Adds `RunStatus`'s `error`/`killed` to the palette's `Status` (with 7.3b, wherever first shown). | 7.1a, 7.1b | 7.2a     | M, 1½ d | The fake suite renders `starting`/`setup`/`running`/`cooling`; a partial line, truncation, a missing file, a crash without `run.end` and `--once` are handled; no timer or fd leaks (soak).                                                                                              |
   | 7.3b | Table styling, lifecycle, backlog cap, stop paths; piped bytes unchanged.                                                       | 7.1c, 7.3a | 7.2b     | M, 1 d | TTY table and piped log on the fake suite; `SIGINT`/`SIGTERM`/`--once` clear it; `orchestrator.log`/`run.log` byte-plain; event, Slack and Datator payloads identical.                                                                                                                    |
-  | 7.4a | Call-site migration: `verify`, `preflight`, `elevation-report`, `apvm`, `healthcheck`, `warm-artifacts`, `capture-backwpup-fixtures`; thrown reports become plain text, styled only when printed. | 7.1a     | 7.2a–7.3b | M, 1 d | `NO_COLOR`/`E2E_OUTPUT=plain` honoured everywhere; `formatFailureReport`/`buildReport` throw plain text; `npm run healthcheck > fleet.log` has no `\x1b`; specs updated deliberately.                                                                                                       |
+  | 7.4a | Call-site migration: `verify`, `preflight`, `elevation-report`, `apvm`, `healthcheck`, `warm-artifacts`, `capture-backwpup-fixtures`; thrown reports become plain text, styled only when printed. Adds an emphasis token for bold labels (today `["bold","red"]`, `["bold"]` in `preflight.ts`/`verify.ts`); `→` becomes `symbol("arrow")`. | 7.1a     | 7.2a–7.3b | M, 1 d | `NO_COLOR`/`E2E_OUTPUT=plain` honoured everywhere; `formatFailureReport`/`buildReport` throw plain text; `npm run healthcheck > fleet.log` has no `\x1b`; specs updated deliberately.                                                                                                       |
   | 7.4b | Compatibility matrix, pty/tmux tests, docs, measured facts.                                                                     | all      | —        | M, 1½ d | The matrix is covered by tests; README/AGENTS/configuration/execution-model/orchestrator guide document the modes; all four gates green.                                                                                                                                                |
 
 - Tests: the capability matrix against a real pty (`NO_COLOR` empty/non-empty, `FORCE_COLOR`
@@ -528,24 +542,30 @@ Phase 7 — Terminal output (next; decided 2026-10-22). The suite and the orches
   worker output); a secrets canary typed with `enterSecret`; `--list`, `--ui` and `--reporter`; the
   orchestrator's fake suite (partial line, truncation, ENOENT, crash, SIGINT/SIGTERM, `--once`, a
   stalled terminal); byte-level checks that file sinks and parsed values stay plain. No new test
-  dependency: `script -q /dev/null` with `stty` on macOS, `script -qec` on Linux.
+  dependency: `script -q /dev/null` with `stty` on macOS, `script -qec` on Linux; without `script` the
+  pty spec skips locally and fails under `CI`.
 - Phase 7 — measured (2026-10-23, Node 24.21.0 and 26.12.1, macOS; a real pty unless said):
 
   | #    | Claim                                                                                                                                                                                                                                 | Evidence                                                                                                     |
   | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-  | 7V1  | `styleText` on a pty: plain under non-empty `NO_COLOR`, any `CI` (even empty/`false`/`0`), `NODE_DISABLE_COLORS` (any value), `TERM=dumb` and `FORCE_COLOR=0`; colour otherwise; `FORCE_COLOR` (any value but `0`/`false`) wins over all of them, warning if `NO_COLOR` is set; `NO_COLOR=""` does not disable. | pty probes, both Nodes                                                                                        |
-  | 7V2  | A hand-built `{isTTY:true}` stream is not a pty: `styleText` rejects it (`ERR_INVALID_ARG_TYPE`) or takes a different branch, so a fake-stream probe reports the opposite of `NO_COLOR`. Test with `script`.                          | fake-stream probe vs the pty probes of 7V1                                                                   |
+  | 7V1  | `styleText` on a pty: plain under non-empty `NO_COLOR`, any `CI` (even empty/`false`/`0`), non-empty `NODE_DISABLE_COLORS` (an empty one keeps Node's colour; the precedence still turns colour off for any value), `TERM=dumb`, an unset `TERM` and `FORCE_COLOR=0`; colour otherwise; a `FORCE_COLOR` Node reads as on (7V15) wins over all of them, warning if `NO_COLOR` is set; `NO_COLOR=""` does not disable. | pty probes, both Nodes                                                                                        |
+  | 7V2  | A hand-built `{isTTY:true}` stream is not a pty: `styleText` rejects a plain object (`ERR_INVALID_ARG_TYPE`); a `Writable` with `isTTY: true` reads only `FORCE_COLOR`, so it colours under `NO_COLOR`, `CI`, `TERM=dumb` or no `TERM`, where a pty does not. Test with `script`. | `terminal.pty.spec.ts` measures both per case                                                                |
   | 7V3  | `styleText(..., { validateStream: false })` bypasses every env check and emits SGR, so a palette that decides first can style deterministically (including `CI` + colour).                                                             | pty probes                                                                                                    |
   | 7V4  | Playwright starts workers with `FORCE_COLOR=1`, so a worker's `styleText` emits ANSI into its output; `list` strips it (`StripAnsiStream`) only because it controls the screen.                                                        | `playwright/lib/runner/index.js` (WorkerHost)                                                                 |
   | 7V5  | `BaseReporter.onStdOut/onStdErr` only stores worker output; `ListReporter` is what prints it. Removing `list` without implementing both loses `[artifacts]`, `[site]`, `[auth]` and warnings from the terminal.                       | `runner/index.js` (BaseReporter, ListReporter)                                                                |
   | 7V6  | `firstError()`/`REPORTABLE_CATEGORIES` already pick a safe step chain; raw `TestStep` titles and `params` can hold typed values (`Fill "…"`). The BDD step's `location` is the generated spec, not the `.feature` line.                | `src/common/reporting/results.ts`; `playwright-bdd/dist/runtime/bddStepInvoker.js`                            |
   | 7V7  | A run's stdout and stderr are its `run.log` fd (`stdio: ["ignore", fd, fd]`), so the orchestrator cannot pump or strip them; only the reporter's `onStdOut`/`onStdErr` can.                                                          | `orchestrator/runs/launch.ts`                                                                                 |
   | 7V8  | `run.json` has no `reportDir`, and `onRunBegun` carries only `(id, taskId)`; `RunIdentity` has `reportDir` and `startedAt` at launch.                                                                                                 | `orchestrator/runs/record.ts`, `cycle.ts`, `start.ts`                                                         |
-  | 7V9  | BSD `script` gives a pty with `columns=0`, `rows=0`; `stty cols/rows` inside the session fixes it; `script -qec` is util-linux only.                                                                                                   | measured                                                                                                      |
+  | 7V9  | BSD `script` and util-linux `script` (2.39.3) both give a pty `columns=0`, `rows=0` when their stdin is not a terminal; `stty cols/rows` inside the session fixes it; `script -qec` is util-linux only.                            | measured; `terminal.pty.spec.ts` (unsized case), macOS and Ubuntu 24.04                                       |
   | 7V10 | The draw/clear contract above leaves no residue and loses no permanent line in a 40×12 tmux pane over five cycles.                                                                                                                    | tmux capture                                                                                                  |
   | 7V11 | `run-summary` already begins with a blank line and already drops colour under `NO_COLOR` (it passes `process.stdout`). The summary's `WIDTH` is a fixed 88 and its marks are literal Unicode.                                          | `run-summary.ts`; pty probe                                                                                   |
   | 7V12 | `reporting.spec.ts` pins `"list"` (position and neighbours); `--reporter` replaces the whole configured stack, stream and summary included.                                                                                            | `src/common/config/reporting.spec.ts`; `run-pruning.run.spec.ts`                                              |
   | 7V13 | `--ui`/`--watch` create the config reporters and replace `process.stdout.write`/`stderr.write` with dispatchers, so a live region must stay inert there.                                                                               | `runner/index.js` (`disableConfigReporters`, `_setInterceptStdio`)                                            |
+  | 7V14 | util-linux `script` exits 0 when SIGTERMed (BSD: 143), so a spawn `timeout` passes a killed probe off as finished: the pty spec times probes with its own timer, then SIGKILL.                                                       | 2026-10-27, Ubuntu 24.04 container, util-linux 2.39.3                                                         |
+  | 7V15 | Node's `styleText` reads `FORCE_COLOR` `yes`, `FALSE`, `False` as no colour (pipe and pty); `2`, `3`, empty as colour. The precedence reads `yes` as on, `FALSE` as off.                                                              | 2026-10-27, Node 24.21.0 macOS; pinned in `terminal.pty.spec.ts`                                              |
+  | 7V16 | Codeset-less locales: Ubuntu 24.04 gives `en_US`, `c`, `UTF-8`, `c.utf8` (and every uninstalled locale) the charmap `ANSI_X3.4-1968`; macOS reports none for `en_US`/`de_DE` (their `LC_CTYPE` links `C.UTF-8`'s; `nl_langinfo` fails) and `UTF-8` for `LC_CTYPE=UTF-8`. Hence by name: codeset-less is ASCII except bare `UTF-8`. | `locale charmap`, Python `nl_langinfo`, 2026-10-27                                                            |
+  | 7V17 | Node's "NO_COLOR is ignored due to FORCE_COLOR" warning fires once, when anything loads Node's colour helpers — the ESM or tsx loader at start-up already does — so `validateStream: false` cannot keep it off stderr; a bare CommonJS bypass call does not warn. | `node --trace-warnings`, 2026-10-27; pinned in `terminal.pty.spec.ts`                                         |
+  | 7V18 | Playwright's workers inherit `FORCE_COLOR=1`, so an in-process palette spec passes even without `validateStream: false` unless it removes `FORCE_COLOR` and sets `NO_COLOR`/`CI`/`TERM=dumb`; `palette.spec.ts` does, per test. | mutation run, 2026-10-27                                                                                      |
 
 - Docs, by sub-phase: 7.1 — AGENTS' tree, `package.json`/lock, `suite-imports.json`, the boundary spec;
   7.2a — `reporting.ts` and `cell-notice.ts` TSDoc, `execution-model.md` (reporters, the cell line),
