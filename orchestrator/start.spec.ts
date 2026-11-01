@@ -40,6 +40,8 @@ import { runningRecord, writeRunRecord } from "./runs/record";
 import type { ShutdownSignal, ShutdownTimers } from "./runs/shutdown";
 import { acquireLock } from "./state/lock";
 import { readTail } from "./status/tail";
+import type { LoggedLine } from "./line-style";
+import type { Screen, ScreenOptions } from "./screen";
 import { siteLockPath } from "./state/cell-lock";
 import { formatOwner, parseOwner } from "./state/lock-owner";
 import { readPidSpace } from "./state/pid-space";
@@ -2289,5 +2291,217 @@ test.describe("start — the status table's watch", () => {
     await delay(100);
     expect(counts).toEqual(atReturn);
     await expectCleanEnd(r.proc);
+  });
+});
+
+test.describe("start — the terminal's screen", () => {
+  /**
+   * A screen stand-in recording, in one order, each line printed, each table shown and its close.
+   *
+   * @param live - whether it can show the table.
+   * @returns the factory `start` is given, and what it saw.
+   */
+  function recording(live = true): {
+    factory: (options: ScreenOptions) => Screen;
+    events: string[];
+    formatted: LoggedLine[];
+    opened: ScreenOptions[];
+  } {
+    const events: string[] = [];
+    const formatted: LoggedLine[] = [];
+    const opened: ScreenOptions[] = [];
+    return {
+      events,
+      formatted,
+      opened,
+      factory: (options) => {
+        opened.push(options);
+        return {
+          live,
+          format: (line) => {
+            formatted.push(line);
+            return [`${line.scope}  ${line.text}`];
+          },
+          print: (lines) => {
+            events.push(...lines.map((line) => `print ${line}`));
+          },
+          show: () => {
+            events.push("show");
+          },
+          close: () => {
+            events.push("close");
+          },
+        };
+      },
+    };
+  }
+
+  /**
+   * Where `pattern` first appears among the events.
+   *
+   * @param events - the events.
+   * @param pattern - what is looked for.
+   */
+  function at(events: readonly string[], pattern: RegExp): number {
+    return events.findIndex((event) => pattern.test(event));
+  }
+
+  test("prints every line through the screen, shows the table while the loops run, and closes it before `exiting`", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const screen = recording();
+    const r = rig(() => runner("bpng", 1, "passed"), {
+      screen: screen.factory,
+    });
+    expect(await start({ config, once: true }, r.deps)).toBe(0);
+    const { events } = screen;
+    // The screen is opened for the selected tasks, on the process's own stdout and environment.
+    expect(screen.opened).toHaveLength(1);
+    expect(screen.opened[0]?.taskIds).toEqual(["bpng"]);
+    expect(screen.opened[0]?.stdout).toBe(r.proc.stdout);
+    // The logger writes nothing itself: the screen prints.
+    expect(r.proc.stdout.text).toBe("");
+    const started = at(events, /^print orchestrator {2}started/);
+    const close = events.indexOf("close");
+    const exiting = at(events, /^print orchestrator {2}exiting 0$/);
+    expect(started).toBeGreaterThanOrEqual(0);
+    expect(at(events, /^show$/)).toBeGreaterThan(started);
+    expect(close).toBeGreaterThan(at(events, /^print bpng {2}bpng-1 ✔ passed/));
+    expect(exiting).toBeGreaterThan(close);
+    expect(events.lastIndexOf("show")).toBeLessThan(close);
+    await expectCleanEnd(r.proc);
+  });
+
+  test("hands the screen the start's clock, its standard error and the config's secrets", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const screen = recording();
+    const r = rig(() => runner("bpng", 1, "passed"), {
+      screen: screen.factory,
+    });
+    expect(await start({ config, once: true }, r.deps)).toBe(0);
+    const opened = screen.opened[0];
+    // The table's elapsed times read the start's clock, as the log's lines do.
+    expect(opened?.now?.()).toBe(T0);
+    expect(opened?.stderr).toBe(r.proc.stderr);
+    expect(opened?.secrets).toContain(SECRET);
+    await expectCleanEnd(r.proc);
+  });
+
+  test("a run's end and a stop's escalation open blocks; other lines do not", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const screen = recording();
+    const r = rig(undefined, { screen: screen.factory });
+    const started = start({ config }, r.deps);
+    await signalWhenReady(r.proc, r.clock, ["SIGINT"]);
+    expect(await started).toBe(130);
+    const opening = screen.formatted
+      .filter((line) => line.opensBlock === true)
+      .map((line) => line.text.split(" ").slice(0, 3).join(" "));
+    expect(opening).toEqual(["stopping: the orchestrator", "bpng-1 ■ stopped"]);
+    await expectCleanEnd(r.proc);
+  });
+
+  test("closes the table before the lines naming what a give-up leaves", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const screen = recording();
+    const r = rig(undefined, {
+      killSettleMs: 100,
+      screen: screen.factory,
+      loop: {
+        runOnce: () => ({
+          stop: () => undefined,
+          done: new Promise(() => undefined),
+        }),
+      },
+    });
+    const started = start({ config }, r.deps);
+    await expect.poll(() => screen.events.includes("show")).toBe(true);
+    for (const _ of [1, 2, 3]) {
+      r.proc.emit("SIGINT");
+      r.clock.ms += 2_000;
+    }
+    expect(await started).toBe(130);
+    const { events } = screen;
+    const close = events.indexOf("close");
+    expect(close).toBeGreaterThanOrEqual(0);
+    expect(at(events, /stopped waiting/)).toBeGreaterThan(close);
+    expect(events.lastIndexOf("show")).toBeLessThan(close);
+  });
+
+  test("closes it before `exiting` after an unexpected failure too", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const screen = recording();
+    const r = rig(undefined, { busTimeoutMs: 0, screen: screen.factory });
+    expect(await start({ config }, r.deps)).toBe(1);
+    const { events } = screen;
+    expect(events.indexOf("close")).toBeGreaterThanOrEqual(0);
+    expect(at(events, /exiting 1$/)).toBeGreaterThan(events.indexOf("close"));
+    await expectCleanEnd(r.proc);
+  });
+
+  test("a screen whose close throws changes nothing: the exit's line and code are as they were", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const screen = recording();
+    const r = rig(() => runner("bpng", 1, "passed"), {
+      screen: (options) => ({
+        ...screen.factory(options),
+        close: () => {
+          throw new Error("close failed");
+        },
+      }),
+    });
+    expect(await start({ config, once: true }, r.deps)).toBe(0);
+    expect(screen.events.at(-1)).toBe("print orchestrator  exiting 0");
+    await expectCleanEnd(r.proc);
+  });
+
+  test("a config error opens no screen: its refusal goes to standard error as before", async () => {
+    const screen = recording();
+    const config = join(stateDir, "config.json");
+    await writeFile(config, "{", { mode: 0o600 });
+    const r = rig(undefined, { screen: screen.factory });
+    expect(await start({ config }, r.deps)).toBe(1);
+    expect(screen.opened).toEqual([]);
+    expect(r.proc.stderrText).toContain("orchestrator: not started:");
+  });
+
+  test("a terminal that cannot redraw in place shows no table, and an injected sink wins over the screen's", async () => {
+    for (const shape of ["not live", "injected"] as const) {
+      const config = await writeConfig({ tasks: [TASKS[0]] });
+      const screen = recording(shape === "injected");
+      let injected = 0;
+      const r = rig(() => runner("bpng", 1, "passed"), {
+        screen: screen.factory,
+        ...(shape === "injected"
+          ? {
+              status: {
+                show: () => {
+                  injected += 1;
+                },
+              },
+            }
+          : {}),
+      });
+      expect(await start({ config, once: true }, r.deps)).toBe(0);
+      expect(screen.events).not.toContain("show");
+      if (shape === "injected") expect(injected).toBeGreaterThan(0);
+      // Closed whatever it showed: idempotent, on every path.
+      expect(screen.events).toContain("close");
+      await rm(join(stateDir, "runs"), { recursive: true, force: true });
+      await rm(join(stateDir, "tasks"), { recursive: true, force: true });
+    }
+  });
+
+  test("a screen that cannot be opened leaves the lines plain", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const r = rig(() => runner("bpng", 1, "passed"), {
+      screen: () => {
+        throw new Error("no screen");
+      },
+    });
+    expect(await start({ config, once: true }, r.deps)).toBe(0);
+    expect(r.proc.stdout.text).toMatch(
+      /^\d\d:\d\d:\d\d orchestrator {2}started/,
+    );
+    expect(r.proc.stdout.text).toContain("orchestrator  exiting 0\n");
   });
 });

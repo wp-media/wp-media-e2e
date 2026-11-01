@@ -1,5 +1,10 @@
-import type { ProductList } from "../config/product-list";
+import { basename, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+
+import { RESULTS_FILE } from "../../src/common/reporting/results-schema";
+import type { ProductList } from "../config/product-list";
+import type { RunCommands } from "../runs/commands";
+import { launchRun } from "../runs/launch";
 
 import {
   prepareStart as realPrepareStart,
@@ -7,7 +12,8 @@ import {
   type StartOptions,
 } from "../start";
 import type { ExitCode } from "../start-lines";
-import { fakeCommand } from "./fake-suite";
+import { fakeCommand, type FakeBehaviour } from "./fake-suite";
+import { runBegin, runEnd, scenarioEnd, setupEnd, streamOf } from "./results";
 
 /**
  * For specs: `orchestrator/start.ts` as the real `cli.ts` sees it once `swap-start.ts` is preloaded —
@@ -19,8 +25,14 @@ import { fakeCommand } from "./fake-suite";
  * preparation says `preparing` on standard error, then waits 10 s — a dry run still in progress;
  * `FAKE_PARENT_WATCH_MS` reads the parent's PID that often instead of every second; `FAKE_RUN_MS`
  * makes each run's fake runner last that long instead of a minute (`0`: a run that ends at once, its
- * loop then cooling down).
+ * loop then cooling down); `FAKE_RESULTS_MS` makes it write its results stream as a run goes — its
+ * begin, two setups, {@link FAKE_SCENARIOS} scenarios (one flaky), its end, one piece that
+ * often — and exit once it is written, so the status table has a run to show; with
+ * `FAKE_IGNORE_STOPS=1` too, that runner ignores the drain and SIGINT, so only a kill ends it early.
  */
+
+/** The scenarios a run writes under `FAKE_RESULTS_MS`. */
+export const FAKE_SCENARIOS = 12;
 
 export * from "../start";
 
@@ -38,12 +50,19 @@ const SITE = {
   },
 } as const;
 
-/** The stand-in product list: BackWPup with one cell, `fake@cell` — a name no real sites file has, so that should the swap ever fail, the real `start` refuses the config instead of running the real suite. */
+/** The stand-in product list: BackWPup with two cells, `fake@cell` and `fake2@cell` — names no real sites file has, so that should the swap ever fail, the real `start` refuses the config instead of running the real suite. */
 const PRODUCT_LIST = {
   PRODUCTS: [
     {
       name: "backwpup",
-      sites: { "fake@cell": { edition: "pro", sites: [SITE] } },
+      sites: {
+        "fake@cell": { edition: "pro", sites: [SITE] },
+        // A second cell, its own site: two tasks running side by side.
+        "fake2@cell": {
+          edition: "pro",
+          sites: [{ ...SITE, baseURL: "https://b.qa.test" }],
+        },
+      },
     },
   ],
   productByName: () => {
@@ -61,16 +80,40 @@ const PRODUCT_LIST = {
 export async function start(options: StartOptions): Promise<ExitCode> {
   const checkout = process.env.FAKE_CLI_CHECKOUT;
   if (checkout === undefined) throw new Error("FAKE_CLI_CHECKOUT is not set");
+  const stepMs = process.env.FAKE_RESULTS_MS;
+  /**
+   * The fake's commands for a run writing its stream into `reportDir`, or none.
+   *
+   * @param reportDir - the run's report folder; empty before its launch.
+   * @returns `bddgen`'s and the runner's.
+   */
+  const commands = (reportDir: string): RunCommands => ({
+    bddgen: fakeCommand({ exitCode: 0 }),
+    playwright: fakeCommand(
+      stepMs === undefined || reportDir === ""
+        ? { runMs: Number(process.env.FAKE_RUN_MS ?? 60_000) }
+        : {
+            ...writingResults(join(reportDir, RESULTS_FILE), Number(stepMs)),
+            ...(process.env.FAKE_IGNORE_STOPS === "1"
+              ? { ignoreDrain: true, ignoreSigint: true }
+              : {}),
+          },
+    ),
+  });
   const code = await realStart(options, {
     checkout,
     loadProductList: () => Promise.resolve(PRODUCT_LIST),
     loop: {
-      commandsFor: () => ({
-        bddgen: fakeCommand({ exitCode: 0 }),
-        playwright: fakeCommand({
-          runMs: Number(process.env.FAKE_RUN_MS ?? 60_000),
-        }),
-      }),
+      commandsFor: () => commands(""),
+      ...(stepMs === undefined
+        ? {}
+        : {
+            launch: (launch) =>
+              launchRun({
+                ...launch,
+                commands: commands(launch.identity.reportDir),
+              }),
+          }),
       launchOptions: { pollMs: 20 },
     },
     ...(process.env.FAKE_PARENT_WATCH_MS === undefined
@@ -85,6 +128,43 @@ export async function start(options: StartOptions): Promise<ExitCode> {
   const late = process.env.FAKE_LATE_SIGNAL;
   if (late !== undefined) process.kill(process.pid, late);
   return code;
+}
+
+/**
+ * A runner writing its results stream piece by piece, `stepMs` apart, then exiting: a run's begin,
+ * both setups, {@link FAKE_SCENARIOS} scenarios — the third flaky —, its end: a flaky run.
+ *
+ * @param results - the stream's path.
+ * @param stepMs - the time between two pieces.
+ * @returns the behaviour.
+ */
+function writingResults(results: string, stepMs: number): FakeBehaviour {
+  const runId = basename(join(results, ".."));
+  const statusOf = (i: number): "passed" | "flaky" =>
+    i === 2 ? "flaky" : "passed";
+  const pieces = [
+    streamOf([runBegin(FAKE_SCENARIOS, { runId })]),
+    streamOf([setupEnd("auth", "passed")]),
+    streamOf([setupEnd("artifacts", "passed")]),
+    ...Array.from({ length: FAKE_SCENARIOS }, (_, i) =>
+      streamOf([scenarioEnd(`s${String(i)}`, statusOf(i))]),
+    ),
+    streamOf([
+      runEnd("passed", {
+        total: FAKE_SCENARIOS,
+        passed: FAKE_SCENARIOS - 1,
+        flaky: 1,
+      }),
+    ]),
+  ];
+  return {
+    exitAfterAppends: true,
+    appends: pieces.map((text, i) => ({
+      afterMs: (i + 1) * stepMs,
+      path: results,
+      text,
+    })),
+  };
 }
 
 /**

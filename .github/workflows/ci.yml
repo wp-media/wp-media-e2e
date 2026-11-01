@@ -46,8 +46,9 @@ jobs:
       # A stalled download fails here, not at the job's limit.
       - uses: ./.github/actions/setup-chromium
         timeout-minutes: 5
-      # tmux is not on the runner image; live.tmux.spec.ts and live-block.run.spec.ts fail under CI
-      # without it. Waits for the dpkg lock (an image's own apt job may hold it) and retries once.
+      # tmux is not on the runner image; live.tmux.spec.ts, live-block.run.spec.ts and the
+      # orchestrator's table.tmux.spec.ts fail under CI without it. Waits for the dpkg lock (an
+      # image's own apt job may hold it) and retries once.
       - name: Install tmux
         timeout-minutes: 3
         env:
@@ -78,8 +79,9 @@ jobs:
       # A stalled download fails here, not at the job's limit.
       - uses: ./.github/actions/setup-chromium
         timeout-minutes: 5
-      # tmux is not on the runner image; live.tmux.spec.ts and live-block.run.spec.ts fail under CI
-      # without it. Waits for the dpkg lock (an image's own apt job may hold it) and retries once.
+      # tmux is not on the runner image; live.tmux.spec.ts, live-block.run.spec.ts and the
+      # orchestrator's table.tmux.spec.ts fail under CI without it. Waits for the dpkg lock (an
+      # image's own apt job may hold it) and retries once.
       - name: Install tmux
         timeout-minutes: 3
         env:

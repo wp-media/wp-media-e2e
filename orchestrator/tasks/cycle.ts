@@ -7,7 +7,7 @@ import {
   type RunFinishedEvent,
   type RunFinishedInput,
 } from "../events/run-finished";
-import type { Logger } from "../log";
+import type { LineOptions, Logger } from "../log";
 import {
   tellActivity,
   type ActivityListener,
@@ -606,7 +606,12 @@ class Cycle {
       return { kind: "ended", id: identity.id, status: "error", endedAt };
     }
     if (record !== undefined) await this.recordEnd(identity, record, event);
-    this.say(outcomeLine(event, (path) => this.show(path)));
+    this.say(
+      outcomeLine(event, (path) => this.show(path)),
+      {
+        opensBlock: true,
+      },
+    );
     try {
       this.deps.bus.publish(event);
     } catch (error) {
@@ -883,10 +888,12 @@ class Cycle {
    * Logs a line under the task's id. A logger that throws loses the line, never the run.
    *
    * @param text - the line.
+   * @param options - how it is shown on a terminal: a run's end opens a block.
    */
-  private say(text: string): void {
+  private say(text: string, options?: LineOptions): void {
     try {
-      this.deps.logger.line(this.task.id, text);
+      if (options === undefined) this.deps.logger.line(this.task.id, text);
+      else this.deps.logger.line(this.task.id, text, options);
     } catch {
       // Dropped: there is nowhere left to say it.
     }

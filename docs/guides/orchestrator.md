@@ -148,15 +148,48 @@ shows `✗` with the status or our reason (`✗ 404 no_service`, `✗ no answer 
 Outcomes: `✔` passed, `⚠` flaky, `✘` failed or error (could not test — [What a run is](#what-a-run-is)), `■` stopped or killed. A run that could not test gives its
 reason and log. A failing run never stops its loop: it fails, and says so, every cycle.
 
-These lines are all it prints, on a terminal and piped alike. A per-task status table (`TASK RUN
-CELL PROGRESS ELAPSED STATE`) is built from the loops and each run's `results.jsonl`
-(`orchestrator/status/`), counted as `run.finished` counts, but not shown yet; once it is, only on a
-terminal: a pipe never gets the table or colour, even under `FORCE_COLOR`. STATE: `starting` (no
-run yet, or launched with no `run.begin` read), `setup n/m`, `running` (also once `run.end` is read),
-`stopping`, `ended` (recorded and announced, cooldown not armed), `next HH:MM:SS` (PROGRESS: the
-last outcome, or `not started · failed|stopped` for an attempt that began no run), then `done`
-(`--once`), `stopped` or `loop failed`. A stream past 8 MiB (the cap `run.finished` reads) shows
-`unknown` and is no longer read.
+### On a terminal, and piped
+
+Piped or redirected (`… > out.log`, `| tee`), stdout is exactly these lines: no table, no colour
+(even under `FORCE_COLOR`), Unicode kept. `orchestrator.log` always holds them plain, each with its
+ISO date, time and offset.
+
+On a terminal the same words are styled: the time dim, the scope in its task's colour; a line wider
+than the terminal wraps at its spaces, continuation lines under the message (a path or a command is
+never broken); an empty line opens each run's end and each stop's escalation. `NO_COLOR` drops the
+colour only; a C/POSIX or non-UTF-8 locale draws the table's symbols in ASCII (the lines keep their
+words).
+
+Where the terminal redraws in place (a TTY with a size, `TERM` set and not `dumb`, no `CI`), a
+status table sits below the lines, redrawn at most once a second and after a resize:
+
+```text
+TASK  RUN      CELL        PROGRESS                    ELAPSED  STATE
+bpng  bpng-12  pro@nginx   ███████░░░ 38/52 · 1 failed  18m 04s  running
+bfap  —        free@nginx  ✔ passed · 52 scenarios      54m 10s  next 11:14:42
+```
+
+- STATE: `starting` (no run yet, or launched with no `run.begin` read), `setup n/m`, `running` (also
+  once `run.end` is read), `stopping`, `ended` (recorded and announced, cooldown not armed),
+  `next HH:MM:SS` (PROGRESS: the last outcome, or `not started · failed|stopped` for an attempt that
+  began no run), then `done` (`--once`), `stopped` or `loop failed`.
+- Counts come from each run's `results.jsonl`, counted as `run.finished` counts; a stream past 8 MiB
+  (the cap `run.finished` reads) shows `unknown` and is no longer read. No scenario title is shown.
+- Shorter than its tasks (the terminal's rows less two): the header goes first, then runs in flight
+  (`starting` to `stopping`) come first, the rest in config order, and `and N more`. Narrower: the
+  bar goes, then ELAPSED, CELL, the counts; below 50 columns, one short line per task.
+- It is cleared before every line and at every end — `--once`, Ctrl-C (one, two or three), SIGTERM,
+  SIGHUP, a refusal, a failure —, before `exiting`; a crash (uncaught exception or rejection) clears
+  it before Node prints the error, exit code unchanged. What the process itself writes meanwhile (a
+  Node warning, a dependency's `console.*`) prints above it, masked; not into `orchestrator.log`.
+  While the terminal is paused (Ctrl-S) or behind by over 1 MiB, draws are skipped and lines counted
+  (`N lines not shown`; the log keeps them).
+- Left on the screen, for good: by a SIGKILL (the whole table); by Enter or other keys typed
+  meanwhile (the terminal echoes them, moving the cursor below the table: one stale header or row);
+  by a narrowing below the table's width (the terminal rewraps its rows and the erase from its last
+  row leaves the parts above — the live region's accepted residue, `resetBytes` in
+  [`terminal/live.ts`](../../src/common/terminal/live.ts)). No log line is lost or doubled; `clear`
+  or `reset` tidies the terminal.
 
 ## The command
 
@@ -321,8 +354,11 @@ the checkout under a running orchestrator: a run reads its files as it goes.
 ## Testing the orchestrator
 
 - `npm run test:unit -- --project=orchestrator` runs its specs alone: real processes and signals over
-  a fake suite, no site.
+  a fake suite, no site. `status/table.tmux.spec.ts` runs the command in a tmux pane (tmux needed;
+  skipped locally without it, failing under `CI`): the table drawn, resized (rows kept whole, and
+  split), gone after `--once`, Ctrl-C, SIGTERM and a crash, and a Node warning printed above it.
 - `npm run orchestrator:soak` runs the real `start` for hundreds of runs over the fake suite (a few
-  minutes; `ORCHESTRATOR_SOAK_RUNS` sets how many), the status table followed throughout. It fails if
+  minutes; `ORCHESTRATOR_SOAK_RUNS` sets how many), the status table followed throughout, drawn on a
+  stand-in terminal and, in a second pass, with stdout a pipe. It fails if
   listeners, handles, timers or file descriptors grow, if pruning lets run folders pass the cap, or if pruning costs 1 ms a folder or
   more.

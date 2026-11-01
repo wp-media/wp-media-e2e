@@ -7,7 +7,12 @@ import {
   padEnd,
   padStart,
 } from "../../src/common/terminal/layout";
-import type { Palette } from "../../src/common/terminal/palette";
+import {
+  STATUSES,
+  type Palette,
+  type Status,
+  type Token,
+} from "../../src/common/terminal/palette";
 import { plain } from "../../src/common/text";
 import { clockTime } from "../log";
 import {
@@ -56,6 +61,27 @@ export interface TableOptions {
   readonly now: Date;
 }
 
+/**
+ * A table line and what it shows, so a terminal can style it after the cut (`table-rows.ts`): the
+ * header, a task's row, or the `and N more` line.
+ */
+export interface TableLine {
+  /** The line, plain and cut to the width. */
+  readonly text: string;
+  readonly kind: "header" | "task" | "more";
+  /** A task's row: its id, as the line starts with it (plain). */
+  readonly taskId?: string;
+  /**
+   * A task's row whose PROGRESS shows a status mark (`✔ passed`, `✘ not started`): the mark and its
+   * word as the line holds them, the mark's symbol, and its colour.
+   */
+  readonly mark?: {
+    readonly label: string;
+    readonly symbol: string;
+    readonly token: Token;
+  };
+}
+
 /** A row's cells, before they are laid out; `detail` and `bar` are dropped first. */
 interface RowCells {
   readonly task: string;
@@ -68,6 +94,8 @@ interface RowCells {
   readonly detail: string;
   readonly elapsed: string;
   readonly state: string;
+  /** The status mark `main` starts with, if any. */
+  readonly mark?: TableLine["mark"];
 }
 
 /** Which optional parts a layout keeps. */
@@ -138,23 +166,54 @@ const COLUMNS: readonly Column[] = [
  * ```
  */
 export function renderTable(board: Board, options: TableOptions): string[] {
+  return renderTableLines(board, options).map((line) => line.text);
+}
+
+/**
+ * The table's lines, each with what it shows: {@link renderTable}'s lines, for a terminal that styles
+ * them after the cut.
+ *
+ * @param board - every task, in the config's order.
+ * @param options - the width, the height, the palette, now.
+ * @returns the lines; none for no task.
+ */
+export function renderTableLines(
+  board: Board,
+  options: TableOptions,
+): TableLine[] {
   const width = tableWidth(options.width);
   const ellipsis = options.palette.symbol("ellipsis");
   const compact = width < COMPACT_WIDTH;
   const shown = pickRows(board, options.height, !compact);
   if (shown === undefined) return [];
   const cells = shown.rows.map((task) => rowCells(task, options));
-  const lines =
+  const texts =
     compact || cells.length === 0
       ? cells.map(compactLine)
       : tableLines(cells, width, ellipsis).slice(shown.header ? 0 : 1);
+  const header = !compact && cells.length > 0 && shown.header;
+  const lines: TableLine[] = texts.map((text, i) => {
+    const row = cells[header ? i - 1 : i];
+    if (row === undefined) return { text, kind: "header" };
+    return {
+      text,
+      kind: "task",
+      taskId: row.task,
+      ...(row.mark === undefined ? {} : { mark: row.mark }),
+    };
+  });
   if (shown.more > 0)
-    lines.push(
-      cells.length === 0
-        ? `${String(shown.more)} tasks`
-        : `and ${String(shown.more)} more`,
-    );
-  return lines.map((line) => cutToWidth(line, width, ellipsis));
+    lines.push({
+      text:
+        cells.length === 0
+          ? `${String(shown.more)} tasks`
+          : `and ${String(shown.more)} more`,
+      kind: "more",
+    });
+  return lines.map((line) => ({
+    ...line,
+    text: cutToWidth(line.text, width, ellipsis),
+  }));
 }
 
 /**
@@ -312,17 +371,25 @@ function rowCells(task: TaskState, options: TableOptions): RowCells {
       state: liveState(run),
     };
   }
-  if (task.notStarted !== undefined)
+  if (task.notStarted !== undefined) {
+    const status: Status = task.notStarted === "stopped" ? "stopped" : "failed";
+    const symbol = palette.symbol(STATUSES[status].symbol);
     return {
       ...base,
       run: dash,
       bar: "",
       // The attempt began no run: its reason's class, never the run before it alone.
-      main: `${palette.symbol(task.notStarted === "stopped" ? "stopped" : "failed")} not started`,
+      main: `${symbol} not started`,
+      mark: {
+        label: `${symbol} not started`,
+        symbol,
+        token: STATUSES[status].token,
+      },
       detail: `${palette.symbol("separator")} ${task.notStarted}`,
       elapsed: dash,
       state: idleState(task),
     };
+  }
   return {
     ...base,
     run: dash,
@@ -382,12 +449,18 @@ function lastProgress(
   last: EndedRun | undefined,
   palette: TableOptions["palette"],
   dash: string,
-): Pick<RowCells, "bar" | "main" | "detail"> {
+): Pick<RowCells, "bar" | "main" | "detail" | "mark"> {
   if (last === undefined) return { bar: "", main: dash, detail: "" };
   const scenarios = last.scenarios ?? 0;
+  const { symbol, token } = STATUSES[last.status];
   return {
     bar: "",
     main: palette.status(last.status),
+    mark: {
+      label: palette.status(last.status),
+      symbol: palette.symbol(symbol),
+      token,
+    },
     detail:
       scenarios > 0
         ? `${palette.symbol("separator")} ${String(scenarios)} ${scenarios === 1 ? "scenario" : "scenarios"}`

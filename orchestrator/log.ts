@@ -11,11 +11,14 @@ import {
 } from "./folders";
 import {
   assertWaitMs,
+  backlogBytes,
   drainTerminal,
   stdoutTerminal,
   TERMINAL_BACKLOG_BYTES,
+  writeSafely,
   type Terminal,
 } from "../src/common/terminal/stream";
+import type { LoggedLine } from "./line-style";
 import { safeLine } from "./text";
 
 export type { Terminal } from "../src/common/terminal/stream";
@@ -40,7 +43,13 @@ export { TERMINAL_BACKLOG_BYTES };
  * first failure stops terminal writes for good. It may stall — a paused terminal, a pipe nobody reads —
  * so standard output is made non-blocking where Node allows it ({@link stdoutTerminal}: its limits are
  * there), and while more than {@link TERMINAL_BACKLOG_BYTES} wait for it, its lines are skipped and
- * counted, and the count shown when it takes a line again. Being non-blocking, the terminal takes a
+ * counted, and the count shown when it takes a line again. A terminal whose backlog cannot be read (a
+ * `writableLength` that throws) is gone too. Every terminal write is `writeSafely`'s, in bytes.
+ *
+ * On a terminal the start hands the logger a {@link TerminalScreen}: its lines are then styled
+ * (`line-style.ts`) and printed above the status table (`screen.ts`) — the same words; the file's
+ * line never changes. Without one — a pipe, a file —, the terminal gets exactly the file's words
+ * after `HH:MM:SS`, plain. Being non-blocking, the terminal takes a
  * line after it is written, so {@link Logger.flush} and {@link Logger.close} wait for it too, within
  * their bound: a `process.exit` right after them would otherwise cut what it had not taken yet. The
  * file is written through one queue, in call order, and its failure never reaches the caller: a log
@@ -60,7 +69,7 @@ export interface Logger {
    * @param scope - who speaks: `orchestrator`, or a task's id.
    * @param text - what happened.
    */
-  line(scope: string, text: string): void;
+  line(scope: string, text: string, options?: LineOptions): void;
   /**
    * Settles once every line logged so far is in the file (or failed to be) and taken by the terminal
    * ({@link drainTerminal}; not waited for once the terminal is gone), or after `maxWaitMs` — a file
@@ -83,6 +92,34 @@ export interface Logger {
   close(maxWaitMs?: number): Promise<void>;
 }
 
+/** How a line is shown, beyond its words. */
+export interface LineOptions {
+  /** It starts a run's end or a stop's escalation: on a terminal, an empty line comes first. */
+  readonly opensBlock?: boolean;
+}
+
+/**
+ * How a terminal shows the logger's lines, when it is one: styled, and printed above the status
+ * table. The logger still masks, bounds the backlog and counts skipped lines.
+ */
+export interface TerminalScreen {
+  /**
+   * The terminal lines of a logged line.
+   *
+   * @param line - its parts, already masked, made one line and cut.
+   * @returns its lines, without line ends.
+   */
+  format(line: LoggedLine): readonly string[];
+  /**
+   * Prints lines, in bytes; never throws. A failure, now or later, is told to `onFailure` — at most
+   * once per call —, after which the terminal is gone.
+   *
+   * @param lines - the lines, without line ends.
+   * @param onFailure - told what failed.
+   */
+  print(lines: readonly string[], onFailure: (error: Error) => void): void;
+}
+
 /** Where the file's lines go: the open `orchestrator.log`, or a stand-in. */
 export interface LogFile {
   /**
@@ -101,6 +138,8 @@ export interface LoggerOptions {
   readonly file: LogFile;
   /** The terminal; standard output by default ({@link stdoutTerminal}). */
   readonly terminal?: Terminal;
+  /** How the terminal shows lines, when it is one; absent, the plain line is written as it is. */
+  readonly screen?: TerminalScreen;
   /** Secret values to mask wherever a line holds them (`allSecretValues(config, tasks)`). */
   readonly secrets?: readonly string[];
   /** The clock a line's time is read from; local time is shown. */
@@ -193,7 +232,28 @@ function formatBody(
   text: string,
   secrets: readonly string[],
 ): string {
-  return `${safeLine(scope, MAX_SCOPE_LENGTH, secrets)}  ${safeLine(text, MAX_TEXT_LENGTH, secrets)}`;
+  const safe = safeParts(scope, text, secrets);
+  return `${safe.scope}  ${safe.text}`;
+}
+
+/**
+ * A line's scope and text as every output shows them: each through {@link safeLine} — masked, one
+ * line, cut.
+ *
+ * @param scope - who speaks.
+ * @param text - what happened.
+ * @param secrets - secret values to mask.
+ * @returns the safe scope and text.
+ */
+export function safeParts(
+  scope: string,
+  text: string,
+  secrets: readonly string[],
+): { readonly scope: string; readonly text: string } {
+  return {
+    scope: safeLine(scope, MAX_SCOPE_LENGTH, secrets),
+    text: safeLine(text, MAX_TEXT_LENGTH, secrets),
+  };
 }
 
 /**
@@ -501,11 +561,11 @@ function watchTerminal(
   };
 }
 
-/** A line in both its forms, each with its line end. */
+/** A line in both its forms. */
 interface StampedLine {
-  /** `HH:MM:SS …`, for the terminal. */
-  readonly terminal: string;
-  /** `<ISO time> …`, for the file. */
+  /** `HH:MM:SS …` for the terminal, or what its screen makes of it: lines without line ends. */
+  readonly terminal: readonly string[];
+  /** `<ISO time> …`, for the file, with its line end. */
   readonly file: string;
 }
 
@@ -551,10 +611,11 @@ class TwoWayLogger implements Logger {
    *
    * @param scope - who speaks: `orchestrator`, or a task's id.
    * @param text - what happened.
+   * @param options - how it is shown.
    */
-  line(scope: string, text: string): void {
+  line(scope: string, text: string, options: LineOptions = {}): void {
     if (this.closing !== undefined) return;
-    const line = this.stamp(scope, text);
+    const line = this.stamp(scope, text, options);
     // Queued first, so a terminal that throws has its failure told after the line it failed on.
     this.enqueue(line.file);
     this.toTerminal(line.terminal);
@@ -612,31 +673,74 @@ class TwoWayLogger implements Logger {
   }
 
   /**
-   * A line, read off the clock now, in both forms — through {@link formatLine} and
-   * {@link formatFileLine}, so the formatters the specs pin are the ones that run.
+   * A line, read off the clock now, in both forms — through {@link formatFileLine}, and
+   * {@link formatLine} or the screen's format of the same safe parts ({@link safeParts}), so the
+   * formatters the specs pin are the ones that run.
    *
    * @param scope - who speaks.
    * @param text - what happened.
-   * @returns the terminal's and the file's line, each with its line end.
+   * @param options - how it is shown.
+   * @returns the terminal's lines and the file's line.
    */
-  private stamp(scope: string, text: string): StampedLine {
+  private stamp(
+    scope: string,
+    text: string,
+    options: LineOptions = {},
+  ): StampedLine {
     const at = this.now();
+    const { screen } = this.options;
     return {
-      terminal: `${formatLine(at, scope, text, this.secrets)}\n`,
+      terminal:
+        screen === undefined
+          ? [formatLine(at, scope, text, this.secrets)]
+          : this.screenLines(screen, {
+              at,
+              ...safeParts(scope, text, this.secrets),
+              ...(options.opensBlock === true ? { opensBlock: true } : {}),
+            }),
       file: `${formatFileLine(at, scope, text, this.secrets)}\n`,
     };
   }
 
   /**
-   * Offers a line to the terminal, unless it is gone. While more than
-   * {@link TERMINAL_BACKLOG_BYTES} wait for it, the line is skipped and counted; the next line it
-   * takes is preceded by the count.
+   * What the screen makes of a line; the plain line when its format throws or gives no line, so a
+   * broken style never loses a line.
    *
-   * @param line - the line, with its line end.
+   * @param screen - the screen.
+   * @param line - the safe parts.
+   * @returns the lines, without line ends.
    */
-  private toTerminal(line: string): void {
+  private screenLines(
+    screen: TerminalScreen,
+    line: LoggedLine,
+  ): readonly string[] {
+    const plainLine = [
+      `${clockTime(line.at)} ${line.scope}  ${line.text}`,
+    ] as const;
+    try {
+      const lines = screen.format(line);
+      return Array.isArray(lines) && lines.length > 0 ? lines : plainLine;
+    } catch {
+      return plainLine;
+    }
+  }
+
+  /**
+   * Offers a line to the terminal, unless it is gone. While more than
+   * {@link TERMINAL_BACKLOG_BYTES} wait for it, the line is skipped and counted (once, however many
+   * terminal lines it takes); the next line it takes is preceded by the count. A backlog that cannot
+   * be read makes the terminal gone: it is broken.
+   *
+   * @param line - the line's terminal lines, without line ends.
+   */
+  private toTerminal(line: readonly string[]): void {
     if (this.terminalGone) return;
-    if (this.terminal.writableLength > TERMINAL_BACKLOG_BYTES) {
+    const backlog = backlogBytes(this.terminal);
+    if (backlog === undefined) {
+      this.loseTerminal(undefined, "its backlog cannot be read");
+      return;
+    }
+    if (backlog > TERMINAL_BACKLOG_BYTES) {
       this.skipped++;
       return;
     }
@@ -654,36 +758,49 @@ class TwoWayLogger implements Logger {
   }
 
   /**
-   * Writes to the terminal, UTF-8 encoded, so its backlog counts bytes ({@link TERMINAL_BACKLOG_BYTES});
-   * a failure, thrown or called back, makes it gone.
+   * Writes lines to the terminal — through its screen when it has one, else UTF-8 encoded with a line
+   * end each ({@link writeSafely}), so its backlog counts bytes ({@link TERMINAL_BACKLOG_BYTES}); a
+   * failure — the stream destroyed, a throw, an error called back — makes it gone.
    *
-   * @param line - the line, with its line end.
+   * @param lines - the lines, without line ends.
    */
-  private writeTerminal(line: string): void {
+  private writeTerminal(lines: readonly string[]): void {
     if (this.terminalGone) return;
-    try {
-      this.terminal.write(Buffer.from(line, "utf8"), (error) => {
-        if (error) this.loseTerminal(error);
-      });
-    } catch (error) {
+    /** Makes the terminal gone. */
+    const onFailure = (error: Error): void => {
       this.loseTerminal(error);
+    };
+    const { screen } = this.options;
+    if (screen !== undefined) {
+      try {
+        screen.print(lines, onFailure);
+      } catch (error) {
+        this.loseTerminal(error);
+      }
+      return;
     }
+    writeSafely(
+      this.terminal,
+      Buffer.from(`${lines.join("\n")}\n`, "utf8"),
+      onFailure,
+    );
   }
 
   /**
    * Stops terminal writes for good, and says so in the file — once, however many ways the failure
    * is told (a callback and an `error` event both come for one failed write), and not once closing.
    *
-   * @param error - what the terminal failed with.
+   * @param error - what the terminal failed with: its code is said.
+   * @param reason - said instead of the code, when the failure has words of its own.
    */
-  private loseTerminal(error: unknown): void {
+  private loseTerminal(error: unknown, reason?: string): void {
     if (this.terminalGone) return;
     this.terminalGone = true;
     if (this.closing !== undefined) return;
     this.enqueue(
       this.stamp(
         LOG_SCOPE,
-        `terminal gone (${errorCode(error) ?? "unknown error"}): lines go to the file only`,
+        `terminal gone (${reason ?? errorCode(error) ?? "unknown error"}): lines go to the file only`,
       ).file,
     );
   }
