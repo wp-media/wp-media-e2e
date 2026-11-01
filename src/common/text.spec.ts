@@ -4,6 +4,7 @@ import {
   escapeHtml,
   escapeRegExp,
   maskSiteUrl,
+  siteLabel,
   maskValues,
   NOT_A_SITE_URL,
   MAX_COMBINING_MARKS,
@@ -204,6 +205,46 @@ test.describe("redactSecrets", () => {
   });
 });
 
+test.describe("siteLabel", () => {
+  test("host, port and path as written: no scheme, no credentials, no trailing slash", () => {
+    expect(siteLabel("https://bwu4.example/")).toBe("bwu4.example");
+    expect(siteLabel("http://admin:pw@localhost:8100/wp//")).toBe(
+      "localhost:8100/wp",
+    );
+    expect(siteLabel("HTTPS://user@Host.Example")).toBe("Host.Example");
+    expect(siteLabel("https://a.test/x?token=ghp_abc#frag")).toBe("a.test/x");
+  });
+
+  test("never shows what may be a user, a password or a session: an @ in the path, ; parameters", () => {
+    // A password holding `/`, `\\` or `%2F`: the parser reads its start as the host.
+    expect(siteLabel("https://user:123/secretpw@host.example/")).toBe(
+      "host.example",
+    );
+    expect(siteLabel("https://user:8080/x@host/")).toBe("host");
+    expect(siteLabel("https://host.example\\admin:pw@x")).toBe("x");
+    expect(siteLabel("https://host.example/%2F%2Fadmin:pw@x")).toBe("x");
+    expect(siteLabel("https:admin:pw@host.example")).toBe("host.example");
+    expect(siteLabel("https://host.example/path;jsessionid=SECRET123")).toBe(
+      "host.example/path;***",
+    );
+    for (const url of [
+      "https://user:123/secretpw@host.example/",
+      "https://host.example/a;token=SECRET123/b",
+    ]) {
+      expect(siteLabel(url)).not.toContain("secretpw");
+      expect(siteLabel(url)).not.toContain("SECRET123");
+    }
+  });
+
+  test("no label for what is not an http(s) URL; a secret-shaped path is still masked", () => {
+    expect(siteLabel("ftp://a.test")).toBe("");
+    expect(siteLabel("not a url")).toBe("");
+    expect(
+      siteLabel("https://a.test/ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
+    ).toBe("a.test/***");
+  });
+});
+
 test.describe("maskSiteUrl", () => {
   test("keeps an http(s) URL as written, a path only when it has one", () => {
     for (const url of [
@@ -242,11 +283,33 @@ test.describe("maskSiteUrl", () => {
       expect(maskSiteUrl(url), url).toBe(NOT_A_SITE_URL);
   });
 
+  test("an @ after the authority hides all before it; ; parameters are masked", () => {
+    expect(maskSiteUrl("https://user:123/secretpw@host.example/")).toBe(
+      "https://***@host.example/",
+    );
+    expect(maskSiteUrl("https://a.test/%2Fu:pw@b.test/wp?x=1")).toBe(
+      "https://***@b.test/wp",
+    );
+    expect(maskSiteUrl("https://a.test\\u:pw@b.test")).toBe(
+      "https://***@b.test",
+    );
+    // Every `@` counts: what precedes the last one is hidden.
+    expect(maskSiteUrl("https://a.test/x@y/p:w@b.test/")).toBe(
+      "https://***@b.test/",
+    );
+    expect(maskSiteUrl("https://a.test/wp;jsessionid=S3CR3T/x;v=1")).toBe(
+      "https://a.test/wp;***/x;***",
+    );
+    expect(maskSiteUrl("https:a.test/p;s=1")).toBe("https://a.test/p;***");
+  });
+
   test("is the same when applied again", () => {
     for (const url of [
       "http://admin:pw@wp.test",
       "https://a.test/wp?x=1",
       "bad url",
+      "https://user:123/secretpw@host.example/",
+      "https://a.test/wp;jsessionid=S3CR3T",
     ])
       expect(maskSiteUrl(maskSiteUrl(url))).toBe(maskSiteUrl(url));
   });

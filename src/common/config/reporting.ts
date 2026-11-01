@@ -29,7 +29,8 @@ function ownReporter(file: string): string {
  *                          test and per retry, the workers' output made plain and masked, errors
  *                          outside any test. The run's one writer: the cell notice and the other
  *                          reporters' warnings print through it. Gets `output` (`E2E_OUTPUT`, read
- *                          and validated here, so a bad value fails the run as it starts)
+ *                          and validated here, so a bad value fails the run as it starts) and
+ *                          `sites`, its live block's site label per worker
  *                          (`reporting/terminal.reporter.ts`).
  *  - run facts           — what the run tested (plugin, SHA-256, site, verdict) up front in every
  *                          report: the HTML title and metadata, Allure's environment, a Cucumber
@@ -60,9 +61,14 @@ function ownReporter(file: string): string {
  *   Playwright resolves its reporters' relative paths against the config's folder, but
  *   allure-playwright resolves `resultsDir` against the working directory, so a relative folder
  *   splits the report when a run starts anywhere but the repository root.
+ * @param sites - the run's sites as labels (`siteLabel`: no user, password, query, fragment or `;`
+ *   parameter), by worker (`parallelIndex`); only the terminal reporter gets them.
  * @throws {@link Error} when `run.reportPath` is relative, or `E2E_OUTPUT` is not a mode.
  */
-export function reporters(run: RunDescription): ReporterDescription[] {
+export function reporters(
+  run: RunDescription,
+  sites: readonly string[] = [],
+): ReporterDescription[] {
   const reportDir = run.reportPath;
   if (!isAbsolute(reportDir)) {
     throw new Error(
@@ -75,7 +81,10 @@ export function reporters(run: RunDescription): ReporterDescription[] {
   return [
     [ownReporter("cell-notice.ts"), run],
     [ownReporter("results-stream.ts"), run],
-    [ownReporter("terminal.reporter.ts"), { ...run, output }],
+    [
+      ownReporter("terminal.reporter.ts"),
+      { ...run, output, ...(sites.length > 0 ? { sites } : {}) },
+    ],
     [ownReporter("run-facts.reporter.ts"), run],
     ["html", { outputFolder: `${reportDir}/playwright`, open: "never" }],
     cucumberReporter("html", {

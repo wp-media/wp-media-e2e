@@ -184,6 +184,20 @@ test.describe("reporters — the terminal reporter", () => {
     ).toMatchObject({ output: "auto" });
   });
 
+  test("only the terminal reporter gets the site labels, when there are any", () => {
+    const list = withOutput("auto", () => reporters(RUN, ["a.test", "b.test"]));
+    const names = list.map(([name]) => name);
+    expect(list[ownIndex(names, "terminal.reporter.ts")]?.[1]).toEqual({
+      ...RUN,
+      output: "auto",
+      sites: ["a.test", "b.test"],
+    });
+    for (const [name, options] of list) {
+      if (!name.endsWith("terminal.reporter.ts"))
+        expect(JSON.stringify(options ?? {})).not.toContain("a.test");
+    }
+  });
+
   test("a bad E2E_OUTPUT fails the config as it is built, naming the variable", () => {
     expect(() => withOutput("pretty", () => reporters(RUN))).toThrow(
       'Environment variable "E2E_OUTPUT" must be one of auto/plain/fancy, got "pretty".',

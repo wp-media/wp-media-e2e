@@ -796,11 +796,13 @@ test.describe("the run's pruning, in the summary", () => {
     const root = tempRoot("e2e-summary-prune-");
     try {
       const cell = join(root, "backwpup", "pro@nginx");
-      const old = [
-        "2026-10-01T00-00-00-000Z-1",
-        "2026-10-02T00-00-00-000Z-1",
-        "2026-10-03T00-00-00-000Z-1",
-      ].map((name) => makeRun(cell, name));
+      // Three, four and five days old: well inside the 30-day age rule, so only the count prunes.
+      // (Fixed dates once aged past it and changed the reason.)
+      const daysAgo = (days: number): string =>
+        `${new Date(Date.now() - days * 86_400_000).toISOString().replace(/[:.]/g, "-")}-1`;
+      const old = [daysAgo(5), daysAgo(4), daysAgo(3)].map((name) =>
+        makeRun(cell, name),
+      );
       const current = makeRun(
         cell,
         new Date().toISOString().replace(/[:.]/g, "-") + "-2",

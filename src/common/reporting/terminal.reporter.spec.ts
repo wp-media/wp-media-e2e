@@ -9,6 +9,11 @@ import type {
 } from "@playwright/test/reporter";
 
 import {
+  FakeExit,
+  FakeScheduler,
+  FakeTerminal,
+} from "../__fixtures__/terminal-fakes";
+import {
   addAttempt,
   beginningAttempt,
   captureWrites,
@@ -18,8 +23,14 @@ import {
   type FakeTest,
 } from "../__fixtures__/reporter-fakes";
 import { STOPPED_ANNOTATION } from "../config/drain";
+import { REPAINT_GAP_MS } from "../terminal/live";
 import type { RunDescription } from "./run-description";
-import TerminalReporter, { type TerminalDeps } from "./terminal.reporter";
+import { describeCounts } from "./run-summary";
+import { RunTally } from "./results";
+import TerminalReporter, {
+  siteLabelsOption,
+  type TerminalDeps,
+} from "./terminal.reporter";
 import { currentTerminalSink, printLine } from "./terminal-sink";
 
 /**
@@ -837,5 +848,481 @@ test.describe("TerminalReporter — never fails a run", () => {
         addAttempt(fakeTest(), { status: "passed" }),
       );
     }).not.toThrow();
+  });
+});
+
+/** A reporter on a fake terminal that can hold a live block, its streams and its clock. */
+interface LiveHarness {
+  readonly reporter: TerminalReporter;
+  readonly stdout: FakeTerminal;
+  readonly stderr: FakeTerminal;
+  readonly exit: FakeExit;
+  readonly scheduler: FakeScheduler;
+  readonly warnings: string[];
+}
+
+/**
+ * A reporter on a fake 80×24 terminal (`TERM=xterm-256color`), two sites by worker.
+ *
+ * @param env - the environment; a terminal that moves the cursor by default.
+ * @param options - the reporter's options.
+ * @param size - the terminal's columns and rows.
+ */
+function liveHarness(
+  env: Record<string, string> = { TERM: "xterm-256color" },
+  options: unknown = { ...RUN, sites: ["bwu4.example", "bwu5.example"] },
+  size: { columns?: number; rows?: number; tty?: boolean } = {},
+): LiveHarness {
+  const stdout = new FakeTerminal(size.tty ?? true);
+  stdout.columns = size.columns ?? 80;
+  stdout.rows = size.rows ?? 24;
+  const stderr = new FakeTerminal(true);
+  const exit = new FakeExit();
+  const scheduler = new FakeScheduler();
+  const warnings: string[] = [];
+  const reporter = new TerminalReporter(options, {
+    stdout: stdout as unknown as TerminalDeps["stdout"],
+    env,
+    argv: ["node", "cli.js", "test"],
+    stdoutIntercepted: false,
+    warn: (message) => warnings.push(message),
+    stderr: stderr as unknown as NonNullable<TerminalDeps["stderr"]>,
+    exit,
+    signals: exit,
+    scheduler,
+  });
+  built.push(reporter);
+  return { reporter, stdout, stderr, exit, scheduler, warnings };
+}
+
+/** Begins an attempt of `fake` on worker `slot`, as the runner does. */
+function beginOn(h: LiveHarness, fake: FakeTest, slot = 0): void {
+  h.reporter.onTestBegin(fake.test, beginningAttempt(fake, slot));
+}
+
+/** Ends an attempt of `fake` on worker `slot`. */
+function endOn(
+  h: LiveHarness,
+  fake: FakeTest,
+  attempt: Parameters<typeof addAttempt>[1],
+): void {
+  h.reporter.onTestEnd(fake.test, addAttempt(fake, attempt));
+}
+
+/** The progress rows drawn so far, newest last. */
+function progressRows(h: LiveHarness): string[] {
+  return [
+    ...stripVTControlCharacters(h.stdout.all).matchAll(
+      /\d+\/\d+ · \d+% · [^\r\n]*/g,
+    ),
+  ].map(([row]) => row);
+}
+
+/** The rows of the last draw: what follows the last row cleared, cut at the cursor contract's `\r\n`. */
+function lastFrame(h: LiveHarness): string[] {
+  const draw = h.stdout.all.split("\r\x1b[2K").at(-1) ?? "";
+  return stripVTControlCharacters(draw).replace(/\r$/, "").split("\r\n");
+}
+
+/** Whether the reporter holds standard output's `write`: a capture is in force. */
+function captured(stream: FakeTerminal): boolean {
+  return Object.hasOwn(stream, "write");
+}
+
+test.describe("TerminalReporter — the live block", () => {
+  test("setup lines print plain before it; the first scenario's begin starts it and the capture", () => {
+    const h = liveHarness();
+    const setup = authSetup();
+    const a = scenario("a", "Create a backup", 0);
+    begin(h as unknown as Harness, [setup, a]);
+    beginOn(h, setup);
+    endOn(h, setup, { status: "passed", duration: 2_000 });
+    expect(h.stdout.all).not.toContain("\r");
+    expect(captured(h.stdout)).toBe(false);
+    expect(progressRows(h)).toEqual([]);
+    beginOn(h, a);
+    expect(captured(h.stdout)).toBe(true);
+    expect(captured(h.stderr)).toBe(true);
+    expect(stripVTControlCharacters(h.stdout.all)).toContain(
+      "0/1 · 0% · 0 passed · 1 running · 0s\r\n  ▸ Backups › Create a backup · bwu4.example · 0s\r",
+    );
+  });
+
+  test("one row per busy worker, named by its site; an attempt's end removes its row", () => {
+    const h = liveHarness();
+    const a = scenario("a", "Create", 0);
+    const b = scenario("b", "Restore", 0);
+    begin(h as unknown as Harness, [a, b]);
+    h.scheduler.advance(65_000);
+    beginOn(h, b, 1);
+    h.scheduler.advance(1_000);
+    beginOn(h, a, 0);
+    h.scheduler.advance(500);
+    expect(lastFrame(h)).toEqual([
+      "░░░░░░░░░░ 0/2 · 0% · 0 passed · 2 running · 1m 06s",
+      "  ▸ Backups › Create · bwu4.example · 0s",
+      "  ▸ Backups › Restore · bwu5.example · 1s",
+    ]);
+    endOn(h, a, { status: "passed", duration: 1_500, parallelIndex: 0 });
+    h.scheduler.advance(50);
+    // The test's line, then the block repainted below it without the ended attempt's row.
+    expect(lastFrame(h)).toEqual([
+      "✔ 1.5s  Backups › Create",
+      "█████░░░░░ 1/2 · 50% · 1 passed · 1 running · 1m 06s",
+      "  ▸ Backups › Restore · bwu5.example · 1s",
+    ]);
+  });
+
+  test("its counts are the summary's for every final status: retries, flaky, failed, skipped, stopped, interrupted", () => {
+    const h = liveHarness(undefined, undefined, { columns: 120 });
+    const passed = scenario("p", "Passes");
+    const flaky = scenario("f", "Is flaky");
+    const failed = scenario("x", "Fails");
+    const skipped = scenario("s", "Is skipped", 0);
+    const drained = fakeTest({
+      id: "d",
+      titles: ["f.spec.js", "Backups", "Begins after the stop"],
+      annotations: [{ type: STOPPED_ANNOTATION }],
+    });
+    const interrupted = scenario("i", "Is interrupted");
+    const all = [passed, flaky, failed, skipped, drained, interrupted];
+    begin(h as unknown as Harness, all);
+    const summary = new RunTally();
+    summary.begin(all.map((t) => t.test));
+    /** Runs an attempt through both: the block's reporter and the summary's tally. */
+    const attempt = (
+      fake: FakeTest,
+      result: Parameters<typeof addAttempt>[1],
+    ): void => {
+      beginOn(h, fake);
+      const ended = addAttempt(fake, result);
+      h.reporter.onTestEnd(fake.test, ended);
+      summary.attemptEnded(fake.test, ended);
+    };
+    attempt(passed, { status: "passed" });
+    attempt(flaky, failing("Error: once"));
+    h.scheduler.advance(500);
+    // A retry is due: not done, not counted yet.
+    expect(progressRows(h).at(-1)).toMatch(
+      /^1\/6 · 16% · 1 passed · 0 running/,
+    );
+    attempt(flaky, { status: "passed" });
+    attempt(failed, failing("Error: once"));
+    attempt(failed, failing("Error: twice"));
+    attempt(skipped, { status: "skipped" });
+    attempt(drained, { status: "skipped" });
+    attempt(interrupted, { status: "interrupted" });
+    h.scheduler.advance(500);
+    expect(progressRows(h).at(-1)).toBe(
+      "6/6 · 100% · 1 passed · 1 flaky · 1 failed · 1 interrupted · 1 skipped · 1 stopped · 0 running · 1s",
+    );
+    expect(describeCounts(summary.scenarios)).toBe(
+      "1 failed · 1 interrupted · 1 flaky · 1 passed · 1 skipped · 1 stopped",
+    );
+  });
+
+  test("the reporter's lines, the sink's and foreign writes print above it once each", () => {
+    const h = liveHarness();
+    const a = scenario("a", "Create", 0);
+    begin(h as unknown as Harness, [a]);
+    beginOn(h, a);
+    printLine("[results] a warning through the sink", "stderr");
+    h.stdout.write("[lib] stdout line\n");
+    h.stderr.write("(node:1) Warning: x\n");
+    h.reporter.onStdErr("[probe] worker line\n", a.test, beginningAttempt(a));
+    endOn(h, a, { status: "passed", duration: 1_000 });
+    const text = stripVTControlCharacters(h.stdout.all);
+    for (const line of [
+      "[results] a warning through the sink\r\n",
+      "[lib] stdout line\r\n",
+      "(node:1) Warning: x\r\n",
+      "  │ [probe] worker line\r\n",
+      "✔ 1.0s  Backups › Create\r\n",
+    ])
+      expect(text.split(line), line).toHaveLength(2);
+    expect(h.stderr.chunks).toEqual([]);
+  });
+
+  test("onEnd clears it before the settled lines, and puts every stream back; onExit drains and re-blocks", async () => {
+    const h = liveHarness();
+    const a = scenario("a", "Never retried");
+    begin(h as unknown as Harness, [a]);
+    beginOn(h, a);
+    endOn(h, a, failing("Error: no baseline"));
+    h.reporter.onEnd(RESULT);
+    expect(captured(h.stdout)).toBe(false);
+    expect(captured(h.stderr)).toBe(false);
+    expect(h.stdout.listenerCount("resize")).toBe(0);
+    expect(h.exit.count).toBe(0);
+    expect(h.scheduler.timers.size).toBe(0);
+    // The settled test's lines come after the block is gone, as plain lines.
+    expect(stripVTControlCharacters(h.stdout.all)).toMatch(
+      /\n✘ 8\.1s {2}Backups › Never retried · attempt 1\/2 · retry not run\n {2}Error: no baseline\n$/,
+    );
+    await h.reporter.onExit();
+    expect(h.stdout.blocking).toEqual([false, true]);
+  });
+
+  test("a callback that throws closes it first, then warns", () => {
+    const h = liveHarness();
+    const a = scenario("a", "Create", 0);
+    begin(h as unknown as Harness, [a]);
+    beginOn(h, a);
+    h.reporter.onTestEnd({} as TestCase, beginningAttempt(a));
+    expect(captured(h.stdout)).toBe(false);
+    expect(h.warnings).toHaveLength(1);
+    expect(h.scheduler.timers.size).toBe(0);
+  });
+
+  test("SIGTERM clears it and puts the streams back; the block's rows throwing closes it and warns once, never retried", () => {
+    const h = liveHarness();
+    const a = scenario("a", "Create", 0);
+    begin(h as unknown as Harness, [a]);
+    beginOn(h, a);
+    h.exit.emit("SIGTERM");
+    expect(captured(h.stdout)).toBe(false);
+    expect(h.exit.total).toBe(0);
+
+    const t = liveHarness();
+    const b = scenario("b", "Restore", 0);
+    begin(t as unknown as Harness, [b]);
+    beginOn(t, b);
+    // A terminal whose size throws when read breaks the next draw (the tick's).
+    Object.defineProperty(t.stdout, "rows", {
+      get: () => {
+        throw new Error("rows unreadable");
+      },
+    });
+    expect(() => {
+      t.scheduler.advance(500);
+    }).not.toThrow();
+    expect(captured(t.stdout)).toBe(false);
+    expect(t.warnings).toHaveLength(1);
+    expect(t.warnings[0]).toContain("rows unreadable");
+    beginOn(t, scenario("c", "Again", 0), 1);
+    expect(captured(t.stdout)).toBe(false);
+  });
+
+  test("a write that fails ends it for good: streams back, nothing more written", () => {
+    const h = liveHarness();
+    const a = scenario("a", "Create", 0);
+    begin(h as unknown as Harness, [a]);
+    beginOn(h, a);
+    h.stdout.mode = "throw";
+    endOn(h, a, { status: "passed", duration: 1 });
+    expect(captured(h.stdout)).toBe(false);
+    h.stdout.mode = "ok";
+    const before = h.stdout.chunks.length;
+    printLine("after", "stdout");
+    h.reporter.onEnd(RESULT);
+    expect(h.stdout.chunks.length).toBe(before);
+  });
+
+  test("a later attempt's begin hands the block its row at once: the next repaint shows it", () => {
+    const h = liveHarness();
+    const a = scenario("a", "Create", 0);
+    const b = scenario("b", "Restore", 0);
+    begin(h as unknown as Harness, [a, b]);
+    beginOn(h, a, 0);
+    h.scheduler.advance(600);
+    beginOn(h, b, 1);
+    // A worker line repaints the block soon after, with the rows it was last given.
+    h.reporter.onStdErr("[probe] line\n", b.test, beginningAttempt(b, 1));
+    h.scheduler.advance(REPAINT_GAP_MS);
+    expect(lastFrame(h)).toContain("  ▸ Backups › Restore · bwu5.example · 0s");
+  });
+
+  test("an attempt's end removes only its own row: a newer attempt on the same worker stays", () => {
+    const h = liveHarness();
+    const a = scenario("a", "Create", 0);
+    const b = scenario("b", "Restore", 0);
+    begin(h as unknown as Harness, [a, b]);
+    beginOn(h, a, 0);
+    // The worker was replaced: its next attempt began before the old one's end came.
+    beginOn(h, b, 0);
+    endOn(h, a, { status: "passed", duration: 1, parallelIndex: 0 });
+    h.scheduler.advance(500);
+    expect(progressRows(h).at(-1)).toMatch(/ · 1 running · /);
+    expect(lastFrame(h)).toContain("  ▸ Backups › Restore · bwu4.example · 0s");
+  });
+
+  test("a second reporter on the same terminal (--add-reporter) shows no second block: its lines print above the first", () => {
+    const h = liveHarness();
+    const second = new TerminalReporter(
+      { ...RUN, sites: ["bwu4.example"] },
+      {
+        stdout: h.stdout as unknown as TerminalDeps["stdout"],
+        env: { TERM: "xterm-256color" },
+        argv: ["node", "cli.js", "test"],
+        stdoutIntercepted: false,
+        warn: () => undefined,
+        stderr: h.stderr as unknown as NonNullable<TerminalDeps["stderr"]>,
+        exit: h.exit,
+        signals: h.exit,
+        scheduler: h.scheduler,
+      },
+    );
+    built.push(second);
+    const a = scenario("a", "Create", 0);
+    begin(h as unknown as Harness, [a]);
+    second.onBegin(CONFIG, fakeSuite([a]) as unknown as Suite);
+    beginOn(h, a);
+    second.onTestBegin(a.test, beginningAttempt(a));
+    h.scheduler.advance(1_000);
+    // One session: one capture, one set of listeners; the second's progress row never drawn.
+    expect(h.exit.listenerCount("SIGTERM")).toBe(1);
+    expect(h.exit.count).toBe(1);
+    expect(h.stdout.listenerCount("resize")).toBe(1);
+    const rows = stripVTControlCharacters(h.stdout.all).match(/0\/1 · 0% · /g);
+    expect(rows?.length).toBe(3);
+  });
+
+  test("a narrow worker row keeps the scenario's own name and drops its feature", () => {
+    const h = liveHarness(undefined, undefined, { columns: 44 });
+    const a = scenario("a", "Create a backup now", 0);
+    begin(h as unknown as Harness, [a]);
+    beginOn(h, a);
+    expect(lastFrame(h)).toContain(
+      "  ▸ Create a backup now · bwu4.example · 0s",
+    );
+  });
+
+  test("never starts once a write failed, nor again after a start that threw", () => {
+    const dead = liveHarness();
+    const a = scenario("a", "Create", 0);
+    dead.stdout.mode = "throw";
+    begin(dead as unknown as Harness, [a]);
+    dead.stdout.mode = "ok";
+    beginOn(dead, a);
+    expect(captured(dead.stdout)).toBe(false);
+    expect(dead.exit.total).toBe(0);
+
+    const h = liveHarness();
+    // A standard error that refuses a new `write`: the session cannot capture it, and throws.
+    Object.freeze(h.stderr);
+    const b = scenario("b", "Restore", 0);
+    begin(h as unknown as Harness, [a, b]);
+    beginOn(h, a);
+    expect(captured(h.stdout)).toBe(false);
+    expect(h.warnings).toHaveLength(1);
+    beginOn(h, b, 1);
+    // Not tried again: the terminal was made non-blocking once.
+    expect(h.stdout.blocking).toEqual([false]);
+  });
+
+  test("a closed block frees the terminal: a later reporter on it shows its own", () => {
+    const first = liveHarness();
+    const a = scenario("a", "Create", 0);
+    begin(first as unknown as Harness, [a]);
+    beginOn(first, a);
+    first.reporter.onEnd(RESULT);
+    const second = new TerminalReporter(
+      { ...RUN, sites: ["bwu4.example"] },
+      {
+        stdout: first.stdout as unknown as TerminalDeps["stdout"],
+        env: { TERM: "xterm-256color" },
+        argv: ["node", "cli.js", "test"],
+        stdoutIntercepted: false,
+        warn: () => undefined,
+        stderr: first.stderr as unknown as NonNullable<TerminalDeps["stderr"]>,
+        exit: first.exit,
+        signals: first.exit,
+        scheduler: first.scheduler,
+      },
+    );
+    built.push(second);
+    second.onBegin(CONFIG, fakeSuite([a]) as unknown as Suite);
+    second.onTestBegin(a.test, beginningAttempt(a));
+    expect(captured(first.stdout)).toBe(true);
+    second.onEnd(RESULT);
+  });
+
+  test("its elapsed time counts from the run's begin", () => {
+    const h = liveHarness();
+    const a = scenario("a", "Create", 0);
+    h.scheduler.advance(90_000);
+    begin(h as unknown as Harness, [a]);
+    h.scheduler.advance(3_000);
+    beginOn(h, a);
+    expect(progressRows(h).at(-1)).toMatch(/ · 1 running · 3s$/);
+  });
+
+  test("the process exiting clears it; a resize redraws it at the new width", () => {
+    const h = liveHarness();
+    const a = scenario("a", "Create", 0);
+    begin(h as unknown as Harness, [a]);
+    beginOn(h, a);
+    h.stdout.columns = 40;
+    h.stdout.emit("resize");
+    h.scheduler.advance(500);
+    expect(progressRows(h).at(-1)).toBe("0/1 · 0% · 0 passed · 1 running · 0s");
+    h.exit.emit();
+    expect(captured(h.stdout)).toBe(false);
+  });
+
+  test("NO_COLOR keeps it, with no colour", () => {
+    const h = liveHarness({ TERM: "xterm", NO_COLOR: "1" });
+    const a = scenario("a", "Create", 0);
+    begin(h as unknown as Harness, [a]);
+    beginOn(h, a);
+    expect(progressRows(h)).toHaveLength(1);
+    // eslint-disable-next-line no-control-regex -- an SGR sequence is what must be absent.
+    expect(h.stdout.all).not.toMatch(/\x1b\[[0-9;]*m/);
+  });
+
+  test("never where the terminal cannot hold it: CI (unless fancy), TERM dumb or unset, narrow, plain, a pipe, quiet", () => {
+    const cases: [
+      string,
+      Record<string, string>,
+      unknown,
+      Parameters<typeof liveHarness>[2],
+      boolean,
+    ][] = [
+      ["CI", { TERM: "xterm", CI: "true" }, RUN, {}, false],
+      [
+        "CI + fancy",
+        { TERM: "xterm", CI: "true" },
+        { ...RUN, output: "fancy" },
+        {},
+        true,
+      ],
+      ["TERM dumb", { TERM: "dumb" }, RUN, {}, false],
+      ["TERM unset", {}, RUN, {}, false],
+      ["19 columns", { TERM: "xterm" }, RUN, { columns: 19 }, false],
+      ["20 columns", { TERM: "xterm" }, RUN, { columns: 20 }, true],
+      ["plain", { TERM: "xterm" }, { ...RUN, output: "plain" }, {}, false],
+      [
+        "a pipe",
+        { TERM: "xterm" },
+        { ...RUN, output: "fancy" },
+        { tty: false },
+        false,
+      ],
+      ["--list", { TERM: "xterm" }, { ...RUN, _mode: "list" }, {}, false],
+      ["watch", { TERM: "xterm", PWTEST_WATCH: "1" }, RUN, {}, false],
+    ];
+    for (const [name, env, options, size, live] of cases) {
+      const h = liveHarness(env, options, size);
+      const a = scenario("a", "Create", 0);
+      begin(h as unknown as Harness, [a]);
+      beginOn(h, a);
+      expect(captured(h.stdout), name).toBe(live);
+      expect(progressRows(h).length > 0, name).toBe(live);
+      expect(h.stdout.all.includes("\r"), name).toBe(live);
+    }
+  });
+});
+
+test.describe("siteLabelsOption", () => {
+  test("the labels when a list of strings, else none", () => {
+    expect(siteLabelsOption({ sites: ["a", "b"] })).toEqual(["a", "b"]);
+    for (const options of [
+      undefined,
+      null,
+      {},
+      { sites: "a" },
+      { sites: ["a", 1] },
+    ])
+      expect(siteLabelsOption(options)).toEqual([]);
   });
 });
