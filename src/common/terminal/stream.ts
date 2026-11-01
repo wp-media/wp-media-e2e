@@ -31,7 +31,10 @@
  * {@link openLiveTerminal} are called only once the process starts its work — after the command line
  * is parsed, so `--help`, a usage error and the orchestrator's `--dry-run` print through Node's
  * blocking default — and before `process.exit` the queue is waited for, within a bound:
- * {@link drainTerminal}. A paused terminal then costs that bound, never more.
+ * {@link drainTerminal}. A paused terminal then costs that bound in our code. A caller that waits for
+ * the queue itself waits longer: Playwright's runner, before it exits, writes `""` to standard output
+ * and error and waits for their callbacks, so a run whose terminal is paused (Ctrl-S) ends only once
+ * it is resumed — its event loop turning meanwhile, Ctrl-C and signals still heard.
  *
  * A pipe needs nothing: Node writes it asynchronously on both systems (measured), and a pipe nobody
  * reads only grows the queue.
@@ -89,13 +92,41 @@ export interface TerminalStream {
  * @returns whether its handle was made non-blocking (`setBlocking` answered `0`).
  */
 export function unblockTerminal(stream: TerminalStream): boolean {
+  return setTerminalBlocking(stream, false);
+}
+
+/**
+ * Makes a terminal stream's writes blocking again — Node's default — once a writer that unblocked it
+ * ({@link unblockTerminal}) is done and the terminal took its queue ({@link drainTerminal}): writers
+ * after it (a summary printed just before `process.exit`) then lose nothing to the exit. Only after a
+ * drain that succeeded: on a paused terminal, a blocking write would freeze the process again.
+ *
+ * @param stream - the stream, e.g. `process.stdout`.
+ * @returns whether its handle was made blocking (`setBlocking` answered `0`).
+ */
+export function reblockTerminal(stream: TerminalStream): boolean {
+  return setTerminalBlocking(stream, true);
+}
+
+/**
+ * Sets a terminal's handle blocking or not, through Node's internal `_handle.setBlocking`; anything
+ * that is no terminal, or has no such handle, is left as it is.
+ *
+ * @param stream - the stream.
+ * @param blocking - the mode.
+ * @returns whether `setBlocking` answered `0`.
+ */
+function setTerminalBlocking(
+  stream: TerminalStream,
+  blocking: boolean,
+): boolean {
   if (stream.isTTY !== true) return false;
   const handle: unknown = Reflect.get(stream, "_handle");
   if (typeof handle !== "object" || handle === null) return false;
   const setBlocking: unknown = Reflect.get(handle, "setBlocking");
   if (typeof setBlocking !== "function") return false;
   try {
-    return Reflect.apply(setBlocking, handle, [false]) === 0;
+    return Reflect.apply(setBlocking, handle, [blocking]) === 0;
   } catch {
     return false;
   }
@@ -161,20 +192,43 @@ export class LiveTerminal {
   }
 }
 
-/** The streams {@link openLiveTerminal} opened, so each is opened (and listened to) once. */
+/**
+ * Where a stand-in for a stream (`bypassWriter`) names the stream it writes to: what
+ * {@link openLiveTerminal} listens to, once, however many stand-ins it is given.
+ */
+export const UNDERLYING_STREAM: unique symbol = Symbol("underlying stream");
+
+/** What {@link openLiveTerminal} returned for each object it was given: the same one again. */
 const opened = new WeakMap<object, LiveTerminal>();
 
+/** The real streams {@link openLiveTerminal} put its `error` listener on: each once. */
+const listened = new WeakSet<object>();
+
 /**
- * Makes `stream` safe for a live region, once per stream: non-blocking when it is a terminal
+ * The stream `stream` writes to: the one a stand-in names under {@link UNDERLYING_STREAM}, else
+ * `stream` itself.
+ *
+ * @param stream - a stream or a stand-in for one.
+ */
+function underlyingOf(stream: object): object {
+  const named: unknown = Reflect.get(stream, UNDERLYING_STREAM);
+  return typeof named === "object" && named !== null ? named : stream;
+}
+
+/**
+ * Makes `stream` safe for a live region: non-blocking when it is a terminal
  * ({@link unblockTerminal}), and its `error` event heard by a listener that does nothing — a write to
  * a closed pipe (`EPIPE`) or a terminal gone (`EIO`) emits one per queued write, and an unheard one
  * crashes the process; the region learns of the failure from the write's callback instead. Every
  * other writer of the stream then fails silently too: what it writes is lost, as the terminal is.
  * Call it only once the process starts its work, and drain before `process.exit`: see this module's
- * description. Never throws: a stream that refuses the listener is still returned.
+ * description. Never throws: a stream that refuses the listener is still returned. The listener is
+ * added once per real stream, a stand-in's ({@link UNDERLYING_STREAM}) included, so a live session
+ * per run never piles listeners up; each new object given is made non-blocking again (a session's
+ * drain may have re-blocked the stream).
  *
- * @param stream - the stream; `process.stdout` by default.
- * @returns the opened stream, the same object for the same stream.
+ * @param stream - the stream, or a stand-in for one; `process.stdout` by default.
+ * @returns the opened stream, the same object for the same object given.
  * @example
  * ```ts
  * const terminal = openLiveTerminal();
@@ -190,10 +244,14 @@ export function openLiveTerminal(
   const known = opened.get(stream);
   if (known !== undefined) return known;
   const terminal = new LiveTerminal(stream, unblockTerminal(stream));
-  try {
-    stream.on("error", ignoreError);
-  } catch {
-    // A stream without events cannot crash the process with one.
+  const real = underlyingOf(stream);
+  if (!listened.has(real)) {
+    try {
+      stream.on("error", ignoreError);
+      listened.add(real);
+    } catch {
+      // A stream without events cannot crash the process with one.
+    }
   }
   opened.set(stream, terminal);
   return terminal;

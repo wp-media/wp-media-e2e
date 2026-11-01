@@ -13,14 +13,25 @@ import {
   detectCapabilities,
   type Environment,
   type OutputStream,
+  type TerminalCapabilities,
 } from "../terminal/capabilities";
 import { terminalWidth } from "../terminal/layout";
+import { realScheduler } from "../terminal/live";
 import { writeSafely, type ByteSink } from "../terminal/stream";
+import { liveBlockRows, type RunningAttempt } from "./live-block";
+import {
+  LiveSession,
+  liveSessionOn,
+  type ExitEvents,
+  type LiveSessionDeps,
+  type SignalEvents,
+} from "./live-session";
 import {
   RunTally,
   firstError,
   isNoTestsFound,
   scenarioPlace,
+  setupOf,
   wasDrainedTest,
   type TestStatus,
 } from "./results";
@@ -76,34 +87,46 @@ import { WorkerOutput } from "./worker-output";
  * included. `--add-reporter` is not detected: an added printing reporter prints every line a second
  * time, and an added `list` prints errors unmasked — the caller's choice.
  *
+ * On a terminal that can hold one (`capabilities.live`: a TTY at least 20 columns wide whose `TERM` moves
+ * the cursor, not under `CI` unless `E2E_OUTPUT=fancy`, not plain, not watch or UI mode), a live block
+ * (`live-block.ts`) is kept at the bottom from the first scenario's begin — setup output before it
+ * prints as plain lines — to `onEnd`: the run's progress and one row per busy worker, redrawn at most
+ * twice a second. Meanwhile every line the reporter prints goes above it, and so does every line the
+ * runner process writes to its own standard output or error (`live-session.ts`). The block is
+ * cleared in `onEnd`, before the reports' hints and the summary, which print as they would alone; the
+ * terminal is drained in `onExit`.
+ *
  * Never fails a run: every callback is caught, and a callback's failure warns once on stderr — missing
  * options warn apart, so they never hide it. While it owns standard output it listens for its `error` event, so a closed pipe
  * (`EPIPE`, `… | head -1`) never crashes the runner; a write that fails stops its output for good, and
  * the listener stays so the writers after it (the summary) fail silently too.
  */
 
-/** A stream's `error` event, which an unheard emit turns into a crash: `process.stdout` has it. */
-export interface ErrorEvents {
+/**
+ * A stream's events: `error`, which an unheard emit turns into a crash, and a terminal's `resize`.
+ * `process.stdout` has both.
+ */
+export interface StreamEvents {
   /**
-   * Listens for the stream's failures.
+   * Listens for the stream's failures, or the terminal's new size.
    *
-   * @param event - always `error`.
-   * @param listener - called with the error.
+   * @param event - `error` or `resize`.
+   * @param listener - called with the error; with nothing on `resize`.
    */
-  on(event: "error", listener: (error: Error) => void): unknown;
+  on(event: "error" | "resize", listener: (error: Error) => void): unknown;
   /**
    * Stops listening.
    *
-   * @param event - always `error`.
-   * @param listener - the listener given to {@link ErrorEvents.on}.
+   * @param event - `error` or `resize`.
+   * @param listener - the listener given to {@link StreamEvents.on}.
    */
-  off(event: "error", listener: (error: Error) => void): unknown;
+  off(event: "error" | "resize", listener: (error: Error) => void): unknown;
 }
 
 /** What the reporter writes to and reads: `process.stdout` and the process, by default. */
 export interface TerminalDeps {
   /** Standard output: written, listened to, and read for its size and whether it is a terminal. */
-  readonly stdout: ByteSink & OutputStream & ErrorEvents;
+  readonly stdout: ByteSink & OutputStream & StreamEvents;
   readonly env: Environment;
   /** The runner's arguments, for `--ui`. */
   readonly argv: readonly string[];
@@ -111,6 +134,14 @@ export interface TerminalDeps {
   readonly stdoutIntercepted: boolean;
   /** Where the reporter's own failure is told, once. */
   readonly warn: (message: string) => void;
+  /** Standard error, captured beside standard output while a live block is shown. */
+  readonly stderr?: LiveSessionDeps["stderr"];
+  /** The process's `exit` event: a live block is cleared there at the latest. */
+  readonly exit?: ExitEvents;
+  /** `SIGTERM` and `SIGHUP`, which end the process without `exit`: a live block is cleared first. */
+  readonly signals?: SignalEvents;
+  /** The live block's clock and timers. */
+  readonly scheduler?: LiveSessionDeps["scheduler"];
 }
 
 /**
@@ -125,8 +156,15 @@ function processDeps(): TerminalDeps {
     argv: process.argv,
     stdoutIntercepted: writeIntercepted(process.stdout),
     warn: (message) => process.stderr.write(`${message}\n`),
+    stderr: process.stderr,
+    exit: process,
+    signals: process,
+    scheduler: realScheduler,
   };
 }
+
+/** How long `onExit` waits for the terminal to take the block's last bytes. */
+export const DRAIN_MS = 2_000;
 
 /** Whose output a line is: a test's attempt, or none (output outside any test). */
 interface OutputSource {
@@ -157,6 +195,28 @@ function outputKey(stream: Stream, id: string): string {
   return `${stream} ${id}`;
 }
 
+/**
+ * The site labels the config factory hands the reporter (`sites`), by worker (`parallelIndex`);
+ * none when absent or not a list of strings.
+ *
+ * @param options - the reporter's options.
+ */
+export function siteLabelsOption(options: unknown): readonly string[] {
+  const value: unknown =
+    typeof options === "object" && options !== null
+      ? (options as Record<string, unknown>).sites
+      : undefined;
+  return Array.isArray(value) &&
+    value.every((label) => typeof label === "string")
+    ? value
+    : [];
+}
+
+/** A running attempt the block shows, and which test it is: its end removes only its own. */
+interface BusyWorker extends RunningAttempt {
+  readonly testId: string;
+}
+
 /** What the reporter warns about: its options, or a callback that threw — each told once. */
 type Warning = "options" | "failure";
 
@@ -170,6 +230,18 @@ export default class TerminalReporter implements Reporter {
   private readonly style: TerminalStyle;
   /** The screen's width, for the header's rule. */
   private readonly width: number;
+  /** What the stream can show: whether a live block may be drawn. */
+  private readonly capabilities: TerminalCapabilities;
+  /** The workers' sites, by `parallelIndex`, for the live block. */
+  private readonly sites: readonly string[];
+  /** The live block, from the first scenario's begin; `undefined` before, and when never live. */
+  private live: LiveSession | undefined;
+  /** Whether a live block was tried: one that failed to start is not tried again. */
+  private liveTried = false;
+  /** The attempts running now, by worker (`parallelIndex`): the block's rows. */
+  private readonly busy = new Map<number, BusyWorker>();
+  /** When the run began, on the scheduler's clock. */
+  private startedAt = 0;
   /** The run's tally: final attempt or retry, and the statuses. */
   private readonly tally = new RunTally();
   /** The workers' output, cut into lines per source. */
@@ -204,14 +276,14 @@ export default class TerminalReporter implements Reporter {
       argv: deps.argv,
       stdoutIntercepted: deps.stdoutIntercepted,
     });
-    this.style = terminalStyle(
-      detectCapabilities({
-        env: deps.env,
-        stream: deps.stdout,
-        mode: outputModeOption(options),
-        context: this.owner.context,
-      }),
-    );
+    this.capabilities = detectCapabilities({
+      env: deps.env,
+      stream: deps.stdout,
+      mode: outputModeOption(options),
+      context: this.owner.context,
+    });
+    this.style = terminalStyle(this.capabilities);
+    this.sites = siteLabelsOption(options);
     this.width = terminalWidth({ stream: deps.stdout, env: deps.env });
     if (this.quiet()) return;
     // Registered as it is built, before any reporter's `onBegin`: the cell notice, listed first,
@@ -238,6 +310,7 @@ export default class TerminalReporter implements Reporter {
   onBegin(config: FullConfig, suite: Suite): void {
     this.guard(() => {
       if (this.quiet()) return;
+      this.startedAt = this.now();
       this.quietOutput = config.quiet;
       this.tally.begin(suite.allTests());
       if ("missing" in this.run) {
@@ -264,6 +337,31 @@ export default class TerminalReporter implements Reporter {
           this.width,
         ),
       ]);
+    });
+  }
+
+  /**
+   * Shows a scenario's attempt in the live block — the first one starts the block, on a terminal
+   * that can hold one. A setup's attempt is never shown: it runs before the block starts.
+   *
+   * @param test - the test.
+   * @param result - the attempt that begins.
+   */
+  onTestBegin(test: TestCase, result: TestResult): void {
+    this.guard(() => {
+      if (this.quiet() || setupOf(test) !== undefined) return;
+      const slot = result.parallelIndex;
+      const site = this.sites[slot];
+      this.busy.set(slot, {
+        testId: test.id,
+        slot,
+        title: this.titleOf(test),
+        scenario: this.scenarioOf(test),
+        ...(site !== undefined && site !== "" ? { site } : {}),
+        startedAt: this.now(),
+      });
+      this.startLive();
+      this.live?.refresh();
     });
   }
 
@@ -300,6 +398,8 @@ export default class TerminalReporter implements Reporter {
     this.guard(() => {
       if (this.quiet()) return;
       const verdict = this.tally.attemptEnded(test, result);
+      if (this.busy.get(result.parallelIndex)?.testId === test.id)
+        this.busy.delete(result.parallelIndex);
       this.endOutput(OUTSIDE_TESTS, OUTSIDE);
       this.endOutput(test.id, { test, retry: result.retry });
       this.print(
@@ -307,6 +407,7 @@ export default class TerminalReporter implements Reporter {
           ? this.finalLines(test, result, verdict.status)
           : this.retryLines(test, result),
       );
+      this.live?.refresh();
     });
   }
 
@@ -340,6 +441,8 @@ export default class TerminalReporter implements Reporter {
   onEnd(_result: FullResult): void {
     this.guard(() => {
       if (this.quiet()) return;
+      // Cleared first: what prints from here on, the reports' hints and the summary are plain lines.
+      this.live?.close();
       for (const { test, result, status } of this.tally.settle()) {
         this.print(this.finalLines(test, result, status, "retry not run"));
       }
@@ -351,17 +454,19 @@ export default class TerminalReporter implements Reporter {
    * Prints the open output of tests that never ended, then hands the terminal back: later writers
    * (the summary) print as they would alone.
    */
-  onExit(): Promise<void> {
+  async onExit(): Promise<void> {
     this.guard(() => {
       if (this.quiet()) return;
+      this.live?.close();
       for (const [id, source] of [...this.openTests]) {
         this.endOutput(id, source);
       }
     });
+    // Before Playwright's `process.exit` drops what a non-blocking terminal still queues.
+    if (this.live !== undefined) await this.live.drain(DRAIN_MS);
     this.guard(() => {
       this.release();
     });
-    return Promise.resolve();
   }
 
   /**
@@ -370,6 +475,56 @@ export default class TerminalReporter implements Reporter {
    */
   printsToStdio(): boolean {
     return !this.quiet();
+  }
+
+  /**
+   * Starts the live block once, when the stream can hold one, nothing failed yet and no other
+   * reporter's block holds it; a start that failed is not tried again (the reporter's guard warns of
+   * it).
+   */
+  private startLive(): void {
+    if (this.liveTried || !this.capabilities.live || this.dead) return;
+    this.liveTried = true;
+    const { deps } = this;
+    // Another reporter's block holds the terminal (`--add-reporter`): this one prints plain lines.
+    if (liveSessionOn(deps.stdout)) return;
+    this.live = new LiveSession({
+      deps: {
+        stdout: deps.stdout,
+        stderr: deps.stderr ?? process.stderr,
+        exit: deps.exit ?? process,
+        signals: deps.signals ?? process,
+        scheduler: this.scheduler(),
+      },
+      capabilities: this.capabilities,
+      ellipsis: this.style.palette.symbol("ellipsis"),
+      rows: ({ width, maxRows }) =>
+        liveBlockRows({
+          counts: this.tally.scenarios,
+          running: [...this.busy.values()],
+          startedAt: this.startedAt,
+          now: this.now(),
+          width,
+          maxRows,
+          palette: this.style.palette,
+        }),
+      onFailure: () => {
+        this.dead = true;
+      },
+      onError: (error) => {
+        this.warnOnce("failure", errorMessage(error));
+      },
+    });
+  }
+
+  /** The live block's clock and timers. */
+  private scheduler(): LiveSessionDeps["scheduler"] {
+    return this.deps.scheduler ?? realScheduler;
+  }
+
+  /** Now, on the live block's clock. */
+  private now(): number {
+    return this.scheduler().now();
   }
 
   /** Called on standard output's `error` event: the stream is gone, nothing more is written. */
@@ -572,6 +727,18 @@ export default class TerminalReporter implements Reporter {
     );
   }
 
+  /**
+   * A test's own name, as {@link TerminalReporter.titleOf} ends with it: what a narrow live row keeps.
+   *
+   * @param test - the test.
+   */
+  private scenarioOf(test: TestCase): string {
+    return testTitle(
+      [scenarioPlace(test, test.parent.project()?.testDir).scenario],
+      this.style,
+    );
+  }
+
   /** Whether this reporter prints nothing: another owns the screen. */
   private quiet(): boolean {
     return this.owner.inert !== undefined;
@@ -595,6 +762,10 @@ export default class TerminalReporter implements Reporter {
    */
   private write(lines: readonly string[]): void {
     if (lines.length === 0 || this.dead) return;
+    if (this.live !== undefined) {
+      if (!this.live.print(lines)) this.dead = true;
+      return;
+    }
     const bytes = Buffer.from(`${lines.join("\n")}\n`, "utf8");
     writeSafely(this.deps.stdout, bytes, () => {
       this.dead = true;
@@ -611,6 +782,12 @@ export default class TerminalReporter implements Reporter {
     try {
       work();
     } catch (error) {
+      // The block would stand still, over lines nobody can tell from it: it goes first.
+      try {
+        this.live?.close();
+      } catch {
+        // Closing never throws; nothing is left to do if it did.
+      }
       this.warnOnce("failure", errorMessage(error));
     }
   }

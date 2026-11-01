@@ -15,6 +15,7 @@ import {
   drainTerminal,
   LiveTerminal,
   openLiveTerminal,
+  reblockTerminal,
   stdoutTerminal,
   TERMINAL_BACKLOG_BYTES,
   unblockTerminal,
@@ -77,6 +78,29 @@ test.describe("unblockTerminal", () => {
 
   test("says so when the handle refuses", () => {
     expect(unblockTerminal(stream(true, () => -22).stream)).toBe(false);
+  });
+});
+
+test.describe("reblockTerminal", () => {
+  test("makes a terminal's handle blocking again", () => {
+    const { stream: tty, calls } = stream(true, () => 0);
+    expect(reblockTerminal(tty)).toBe(true);
+    expect(calls).toEqual([[true]]);
+  });
+
+  test("leaves a pipe alone, and never throws on a missing, refusing or throwing handle", () => {
+    const { stream: pipe, calls } = stream(false, () => 0);
+    expect(reblockTerminal(pipe)).toBe(false);
+    expect(calls).toEqual([]);
+    expect(reblockTerminal({ isTTY: true })).toBe(false);
+    expect(reblockTerminal(stream(true, () => -22).stream)).toBe(false);
+    expect(
+      reblockTerminal(
+        stream(true, () => {
+          throw new Error("EBADF");
+        }).stream,
+      ),
+    ).toBe(false);
   });
 });
 

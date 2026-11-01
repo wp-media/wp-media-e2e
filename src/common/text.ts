@@ -121,9 +121,12 @@ const URL_PARTS = /^([a-z][a-z\d+.-]*:)[\\/]{2}([^\\/]*)(.*)$/is;
  * A site's `baseURL` as safe to show, judged by a URL parser rather than by a shape: an `http(s)` URL
  * keeps its host, port and path **as written** (nothing re-encoded or case-folded, so a secret in them
  * is still masked by its value later), its user and password shown as `***@`, its query and fragment
- * dropped (either may carry a token); anything else — text that does not parse, another scheme — is
- * {@link NOT_A_SITE_URL}, since a sites file may hold anything pasted there (a password with a space
- * included). The same when applied again.
+ * dropped (either may carry a token), its `;` parameters (`;jsessionid=…`) shown as `;***`; anything
+ * else — text that does not parse, another scheme — is {@link NOT_A_SITE_URL}, since a sites file may
+ * hold anything pasted there (a password with a space included). An `@` after the authority's end
+ * (`https://user:12/pw@host/`: a password holding `/`, `\\` or `%2F` the parser reads as the host and
+ * a path) means everything before its last `@` may be a user and password: only what follows it is
+ * shown, after `***@`. The same when applied again.
  *
  * @param baseURL - the site's address, as its sites file writes it.
  * @returns the address to show.
@@ -131,6 +134,7 @@ const URL_PARTS = /^([a-z][a-z\d+.-]*:)[\\/]{2}([^\\/]*)(.*)$/is;
  * ```ts
  * maskSiteUrl("http://admin:pw@wp.test"); // "http://***@wp.test"
  * maskSiteUrl("https://admin:hunter 2@bad host/"); // "(not a valid http(s) URL)"
+ * maskSiteUrl("https://user:12/secret@host.test/"); // "https://***@host.test/"
  * ```
  */
 export function maskSiteUrl(baseURL: string): string {
@@ -145,8 +149,47 @@ export function maskSiteUrl(baseURL: string): string {
   const written = parts?.[2]?.split("@").at(-1);
   if (parts === null || written === undefined)
     // Written some other way the parser still takes (`https:host`): shown as it reads it.
-    return `${url.protocol}//${credentials}${url.host}${url.pathname}`;
-  return `${url.protocol}//${credentials}${written}${parts[3] ?? ""}`;
+    return `${url.protocol}//${credentials}${url.host}${maskPathParams(url.pathname)}`;
+  const rest = parts[3] ?? "";
+  // An `@` in the path: what precedes it may be a password the parser cut at a `/`.
+  if (rest.includes("@"))
+    return `${url.protocol}//${MASK}@${maskPathParams(rest.slice(rest.lastIndexOf("@") + 1))}`;
+  return `${url.protocol}//${credentials}${written}${maskPathParams(rest)}`;
+}
+
+/**
+ * A path with each `;` parameter's text (`;jsessionid=…`, a session or a token) shown as `;***`.
+ *
+ * @param path - a URL's path, as written.
+ */
+function maskPathParams(path: string): string {
+  return path.replace(/;[^/\\]*/g, `;${MASK}`);
+}
+
+/**
+ * A site as a short label for a progress row: its {@link maskSiteUrl} address without the scheme,
+ * the `***@` of a user or password, or a trailing slash — the host, port and path a person tells sites
+ * apart by — then {@link plain} and {@link redactSecrets}. What `maskSiteUrl` hides stays hidden: a
+ * user and password, a query, a fragment, `;` parameters, all before an `@` in the path; a credential
+ * written plainly into the host or path is shown unless its shape is known. An address that is not an
+ * `http(s)` URL has no label (`""`).
+ *
+ * @param baseURL - the site's address, as its sites file writes it.
+ * @example
+ * ```ts
+ * siteLabel("https://admin:pw@bwu4.example/"); // "bwu4.example"
+ * siteLabel("http://localhost:8100/wp"); // "localhost:8100/wp"
+ * ```
+ */
+export function siteLabel(baseURL: string): string {
+  const masked = maskSiteUrl(baseURL);
+  if (masked === NOT_A_SITE_URL) return "";
+  const bare = masked
+    .replace(/^https?:\/\//i, "")
+    // `maskSiteUrl` puts the mask right after the scheme, and only there.
+    .replace(/^\*\*\*@/, "")
+    .replace(/[\\/]+$/, "");
+  return redactSecrets(plain(bare));
 }
 
 /** The shortest value {@link maskValues} masks: a shorter one would mask ordinary words. */

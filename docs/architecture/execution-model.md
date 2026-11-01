@@ -173,6 +173,30 @@ Three always-on reporters of the suite's own, given the run's facts (`RunDescrip
     colour and Unicode; a pipe, a file or the orchestrator's `run.log` (its environment carries no
     colour variable, its stdout is a file) get plain bytes, `FORCE_COLOR` honoured. Nothing styled
     reaches `results.jsonl` or the reports.
+  - **Live block** ([`live-block.ts`](../../src/common/reporting/live-block.ts) rows,
+    [`live-session.ts`](../../src/common/reporting/live-session.ts) lifecycle): only when
+    `capabilities.live` — a TTY ≥ 20 columns whose `TERM` moves the cursor, not `plain`, not `CI`
+    unless `fancy`, not quiet; never in a pipe or `run.log`. From the first scenario's begin (setup
+    lines print plain before it) to `onEnd`, bottom-pinned: `███░░ 23/52 · 44% · 20 passed · 1 flaky ·
+    3 running · 4m 12s` (the summary's counts, `RunTally`) and one `▸ Feature › Scenario · site ·
+    1m 03s` row per busy worker (`sites` option: `siteLabel` per `parallelIndex` — no user, password,
+    query, fragment or `;` parameter, nothing before an `@` in the path). Narrow: the bar goes, then
+    `running`, then the counts are cut — the time stays; a worker row drops the feature path before
+    the name and site are cut. Redrawn on every event, on a 500 ms tick and on `resize`; taller than
+    the terminal, `… N more running`. **Stdio capture** ([`terminal/stdio-capture.ts`](../../src/common/terminal/stdio-capture.ts)):
+    meanwhile the runner's own `process.stdout.write` (and `stderr`'s, when a TTY; redirected, it keeps
+    its bytes) is replaced: foreign writes (Playwright's warnings, `emitWarning`, another reporter's
+    `console.*`) are cut into lines — a partial line held until its end or 64 KiB — masked
+    (`redactSecrets`) and printed above the block; the region writes through a `bypassWriter`, so its
+    bytes never loop; a child's writes to an inherited fd cannot be seen. **Ending**: `onEnd` clears it
+    before the settled lines, reports' hints and summary (plain lines); a callback's throw, a throw
+    while drawing (warned once, never retried), a failed write and `exit` close it too — capture,
+    `resize`/`exit`/signal listeners and tick undone. `SIGTERM`/`SIGHUP` while live: cleared, drained
+    ≤ 500 ms, then re-sent when no other listener handles it, so the exit status stays 143/129.
+    `SIGKILL` cannot be heard: the block stays, the shell's next lines over it. `onExit` drains ≤ 2 s,
+    then makes a drained terminal blocking again; a paused one (Ctrl-S) stays non-blocking, and the run
+    ends when it is resumed (Playwright waits for stdout itself). One block per terminal: a second
+    terminal reporter (`--add-reporter`) prints plain lines above the first's.
   - **Quiet** (prints nothing, registers no sink; `terminal-mode.ts`) for `--list` (`_mode`), `--ui`
     (`--ui*` in `argv`, or `process.stdout.write` replaced on the stream — Playwright's stdio
     interception, an editor's test server too) and `PW_TEST_REPORTER` (a second reporter prints).
