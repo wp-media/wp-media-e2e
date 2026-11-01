@@ -10,6 +10,7 @@
   "src/common/terminal/layout.ts",
   "src/common/terminal/live.ts",
   "src/common/terminal/palette.ts",
+  "src/common/terminal/stdio-capture.ts",
   "src/common/terminal/stream.ts",
   "src/common/text.ts",
   "src/projects/products.ts"

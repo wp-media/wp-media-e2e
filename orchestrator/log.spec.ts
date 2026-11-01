@@ -34,10 +34,13 @@ import {
   pathKind,
   refuseLogFile,
   systemCode,
+  safeParts,
   TERMINAL_BACKLOG_BYTES,
   type LogFile,
   type Terminal,
+  type TerminalScreen,
 } from "./log";
+import type { LoggedLine } from "./line-style";
 import { runSlowlyRead } from "../src/common/__fixtures__/slow-reader";
 
 /** A fixed local time, so a line's clock reads the same in every time zone: 10:15:30. */
@@ -1101,5 +1104,221 @@ test.describe("openLogFile and openLogger", () => {
         "",
       ].join("\n"),
     );
+  });
+});
+
+test.describe("createLogger on a terminal's screen", () => {
+  /**
+   * A screen stand-in: what it was asked to format and print; `print` may fail at once or later.
+   *
+   * @param print - what a print does with its failure hook; nothing by default.
+   */
+  function fakeScreen(
+    print: (onFailure: (error: Error) => void) => void = () => undefined,
+  ) {
+    const formatted: LoggedLine[] = [];
+    const printed: (readonly string[])[] = [];
+    const screen: TerminalScreen = {
+      format: (line) => {
+        formatted.push(line);
+        return [`<${line.scope}|${line.text}>`, "  more"];
+      },
+      print: (lines, onFailure) => {
+        printed.push(lines);
+        print(onFailure);
+      },
+    };
+    return { screen, formatted, printed };
+  }
+
+  test("hands the screen the safe parts and prints what it formats; the file line is unchanged", async () => {
+    const { file, lines } = fakeFile();
+    const { terminal, written } = fakeTerminal();
+    const { screen, formatted, printed } = fakeScreen();
+    const secret = "s3cret-value-123";
+    const logger = createLogger({
+      file,
+      terminal,
+      screen,
+      secrets: [secret],
+      now: () => AT,
+    });
+    logger.line("bpng", `token ${secret}\nnext`, { opensBlock: true });
+    logger.line("orchestrator", "plain");
+    await logger.flush();
+    expect(formatted).toEqual([
+      { at: AT, scope: "bpng", text: "token *** next", opensBlock: true },
+      { at: AT, scope: "orchestrator", text: "plain" },
+    ]);
+    expect(printed).toEqual([
+      ["<bpng|token *** next>", "  more"],
+      ["<orchestrator|plain>", "  more"],
+    ]);
+    // The screen writes; the logger never writes the stream itself.
+    expect(written).toEqual([]);
+    expect(lines).toEqual([
+      `${F} bpng  token *** next\n`,
+      `${F} orchestrator  plain\n`,
+    ]);
+  });
+
+  test("safeParts are what formatLine shows: the screen gets the same words", () => {
+    const parts = safeParts("bpng", "a\tb  c", []);
+    expect(`${clockTime(AT)} ${parts.scope}  ${parts.text}`).toBe(
+      formatLine(AT, "bpng", "a\tb  c"),
+    );
+  });
+
+  test("prints the plain line when the screen's format throws or gives no line", async () => {
+    const { file } = fakeFile();
+    const { terminal } = fakeTerminal();
+    const printed: (readonly string[])[] = [];
+    let calls = 0;
+    const logger = createLogger({
+      file,
+      terminal,
+      now: () => AT,
+      screen: {
+        format: () => {
+          calls++;
+          if (calls === 1) throw new Error("broken style");
+          return [];
+        },
+        print: (lines) => printed.push(lines),
+      },
+    });
+    logger.line("bpng", "one");
+    logger.line("bpng", "two");
+    await logger.flush();
+    expect(printed).toEqual([["10:15:30 bpng  one"], ["10:15:30 bpng  two"]]);
+  });
+
+  test("a screen failure, told at once or later, makes the terminal gone once; a throwing print too", async () => {
+    for (const how of ["now", "later", "throw"] as const) {
+      const { file, lines } = fakeFile();
+      const { terminal } = fakeTerminal();
+      let later: ((error: Error) => void) | undefined;
+      const { screen, printed } = fakeScreen((onFailure) => {
+        if (how === "now") onFailure(systemError("EIO"));
+        else if (how === "later") later = onFailure;
+        else throw systemError("EIO");
+      });
+      const logger = createLogger({ file, terminal, screen, now: () => AT });
+      logger.line("bpng", "one");
+      later?.(systemError("EIO"));
+      later?.(systemError("EIO"));
+      logger.line("bpng", "two");
+      await logger.flush();
+      expect(printed).toHaveLength(1);
+      expect(lines).toEqual([
+        `${F} bpng  one\n`,
+        `${F} log  terminal gone (EIO): lines go to the file only\n`,
+        `${F} bpng  two\n`,
+      ]);
+    }
+  });
+
+  test("skips a line of several terminal lines as one, then says how many", async () => {
+    const { file } = fakeFile();
+    let backlog = TERMINAL_BACKLOG_BYTES + 1;
+    const terminal: Terminal = {
+      write: (_chunk, callback) => {
+        callback();
+        return true;
+      },
+      on: () => undefined,
+      get writableLength() {
+        return backlog;
+      },
+    };
+    const { screen, printed } = fakeScreen();
+    const logger = createLogger({ file, terminal, screen, now: () => AT });
+    logger.line("bpng", "one");
+    logger.line("bpng", "two");
+    backlog = 0;
+    logger.line("bpng", "three");
+    await logger.flush();
+    expect(printed).toEqual([
+      [
+        "<log|2 lines not shown: the terminal was not keeping up (the log file has them)>",
+        "  more",
+      ],
+      ["<bpng|three>", "  more"],
+    ]);
+  });
+});
+
+test.describe("createLogger's terminal backlog", () => {
+  test("a backlog that cannot be read — a writableLength that throws or is no length — never throws: the terminal is gone", async () => {
+    const shapes: Terminal[] = [
+      {
+        write: () => true,
+        on: () => undefined,
+        get writableLength(): number {
+          throw new Error("broken getter");
+        },
+      },
+      {
+        write: () => true,
+        on: () => undefined,
+        writableLength: Number.NaN,
+      },
+    ];
+    for (const terminal of shapes) {
+      const { file, lines } = fakeFile();
+      let writes = 0;
+      const counted: Terminal = {
+        write: (chunk, callback) => {
+          writes++;
+          return terminal.write(chunk, callback);
+        },
+        on: () => undefined,
+        get writableLength() {
+          return terminal.writableLength;
+        },
+      };
+      const logger = createLogger({ file, terminal: counted, now: () => AT });
+      expect(() => {
+        logger.line("bpng", "one");
+      }).not.toThrow();
+      logger.line("bpng", "two");
+      await logger.close(100);
+      expect(writes).toBe(0);
+      expect(lines).toEqual([
+        `${F} bpng  one\n`,
+        `${F} log  terminal gone (its backlog cannot be read): lines go to the file only\n`,
+        `${F} bpng  two\n`,
+      ]);
+    }
+  });
+
+  test("a destroyed terminal is gone without a write", async () => {
+    const { file, lines } = fakeFile();
+    let writes = 0;
+    const terminal: Terminal = {
+      write: () => {
+        writes++;
+        return true;
+      },
+      on: () => undefined,
+      writableLength: 0,
+      destroyed: true,
+    };
+    const logger = createLogger({ file, terminal, now: () => AT });
+    logger.line("bpng", "one");
+    await logger.close(100);
+    expect(writes).toBe(0);
+    expect(lines[1]).toBe(
+      `${F} log  terminal gone (unknown error): lines go to the file only\n`,
+    );
+  });
+
+  test("without a screen, ignores a line's options: the terminal line is today's bytes", async () => {
+    const { file } = fakeFile();
+    const { terminal, written } = fakeTerminal();
+    const logger = createLogger({ file, terminal, now: () => AT });
+    logger.line("bpng", "one", { opensBlock: true });
+    await logger.flush();
+    expect(written).toEqual(["10:15:30 bpng  one\n"]);
   });
 });

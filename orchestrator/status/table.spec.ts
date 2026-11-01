@@ -9,6 +9,7 @@ import {
   pickRows,
   progressBar,
   renderTable,
+  renderTableLines,
   tableWidth,
   type TableOptions,
 } from "./table";
@@ -396,6 +397,41 @@ test.describe("renderTable — what it cannot know", () => {
 });
 
 test.describe("pickRows", () => {
+  test("every run in flight comes first — starting, setup, running and stopping alike — then the rest in config order", () => {
+    const cooling = (taskId: string): TaskState => ({
+      taskId,
+      cell: "c",
+      phase: { kind: "cooling", nextRunAt: T0 },
+    });
+    const board: Board = [
+      cooling("c1"),
+      cooling("c2"),
+      // Launched, no run.begin read yet.
+      running("st", {}),
+      // Setups arriving.
+      running("se", { begun: true, setups: 2, setupsEnded: 1, planned: 3 }),
+      cooling("c3"),
+      running("ru", { begun: true, planned: 3, running: 1 }),
+      running("so", { begun: true, planned: 3 }, { stopping: true }),
+    ];
+    const picked = pickRows(board, 5, true);
+    expect(picked?.rows.map((task) => task.taskId)).toEqual([
+      "st",
+      "se",
+      "ru",
+      "so",
+    ]);
+    expect(picked?.more).toBe(3);
+    // One more line: the first task in config order joins, in its place.
+    expect(pickRows(board, 6, true)?.rows.map((task) => task.taskId)).toEqual([
+      "c1",
+      "st",
+      "se",
+      "ru",
+      "so",
+    ]);
+  });
+
   test("a height that is not a number bounds nothing; below one line, nothing", () => {
     expect(pickRows(EXAMPLE, NaN, true)?.rows).toHaveLength(2);
     expect(pickRows(EXAMPLE, Infinity, true)?.header).toBe(true);
@@ -443,6 +479,67 @@ test.describe("the parts", () => {
       "18m 04s",
       "1h 00m",
       "2h 05m",
+    ]);
+  });
+});
+
+test.describe("renderTableLines", () => {
+  test("tags each line: the header, each task's row with its id and status mark, the count", () => {
+    const board: Board = [
+      ...EXAMPLE,
+      {
+        taskId: "bnot",
+        cell: "c",
+        phase: { kind: "cooling", nextRunAt: T0 },
+        notStarted: "stopped",
+      },
+    ];
+    const lines = renderTableLines(board, {
+      width: 80,
+      height: 2,
+      palette: UNICODE,
+      now: NOW,
+    });
+    expect(lines.map((line) => line.text)).toEqual(
+      renderTable(board, { width: 80, height: 2, palette: UNICODE, now: NOW }),
+    );
+    expect(lines.map((line) => [line.kind, line.taskId])).toEqual([
+      ["task", "bpng"],
+      ["more", undefined],
+    ]);
+    // A run in flight shows no mark.
+    expect(lines[0]?.mark).toBeUndefined();
+    const all = renderTableLines(board, {
+      width: 80,
+      palette: ASCII,
+      now: NOW,
+    });
+    expect(all[0]).toEqual({ text: all[0]?.text, kind: "header" });
+    // A last run's status is a mark, as is an attempt that began no run.
+    expect(all[2]?.mark).toEqual({
+      label: "OK passed",
+      symbol: "OK",
+      token: "ok",
+    });
+    expect(all[3]?.mark).toEqual({
+      label: "# not started",
+      symbol: "#",
+      token: "stop",
+    });
+    // Every mark is in its line, as it is shown.
+    for (const line of all)
+      if (line.mark !== undefined) expect(line.text).toContain(line.mark.label);
+  });
+
+  test("compact lines carry their task too, and no header", () => {
+    const lines = renderTableLines(EXAMPLE, {
+      width: 30,
+      palette: UNICODE,
+      now: NOW,
+    });
+    expect(lines.map((line) => [line.kind, line.taskId])).toEqual([
+      ["task", "bpng"],
+      ["task", "bfap"],
     ]);
   });
 });

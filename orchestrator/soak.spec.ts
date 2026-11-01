@@ -28,6 +28,7 @@ import type { ProductList } from "./config/product-list";
 import type { RunCommands } from "./runs/commands";
 import { launchRun } from "./runs/launch";
 import type { ShutdownSignal } from "./runs/shutdown";
+import { openScreen, type Screen } from "./screen";
 import { start, type StartProcess } from "./start";
 import { pruneTaskRuns } from "./state/run-retention";
 
@@ -125,12 +126,35 @@ const PRODUCT_LIST = {
   playwrightConfigFor: () => "playwright.backwpup.config.ts",
 } as unknown as ProductList;
 
-/** A stand-in for `process.stdout` that takes every write at once. */
+/** Where a soak's standard output goes: a terminal (the screen's styled lines and table) or a pipe. */
+type SoakOutput = "tty" | "pipe";
+
+/**
+ * A stand-in for `process.stdout` that takes every write at once: a terminal of 100×30, so the
+ * screen's table — a live region, its throttle's timers, its capture — is drawn throughout, or a pipe,
+ * written by the logger's own plain path.
+ */
 class SinkStdout {
   readonly writableLength = 0;
-  readonly isTTY = false;
+  readonly isTTY: boolean;
+  readonly columns = 100;
+  readonly rows = 30;
+  /** How many tables were drawn: writes holding the header. */
+  tables = 0;
+  /** How many writes were taken. */
+  writes = 0;
+
+  /**
+   * @param output - a terminal or a pipe.
+   */
+  constructor(output: SoakOutput) {
+    this.isTTY = output === "tty";
+  }
+
   /** Takes a chunk at once. */
-  write(_chunk: Uint8Array, callback: (error?: Error | null) => void): boolean {
+  write(chunk: Uint8Array, callback: (error?: Error | null) => void): boolean {
+    this.writes += 1;
+    if (Buffer.from(chunk).includes("TASK  RUN")) this.tables += 1;
     callback();
     return true;
   }
@@ -145,8 +169,16 @@ class SoakProcess extends EventEmitter implements StartProcess {
   readonly pid = 4242;
   readonly env = { PATH: process.env.PATH };
   readonly execPath = process.execPath;
-  readonly stdout = new SinkStdout();
+  readonly stdout: SinkStdout;
   readonly stderr = { write: (): boolean => true };
+
+  /**
+   * @param output - what standard output is.
+   */
+  constructor(output: SoakOutput) {
+    super();
+    this.stdout = new SinkStdout(output);
+  }
   /** Sends a signal the way the terminal would. */
   signal(signal: ShutdownSignal): void {
     this.emit(signal);
@@ -168,6 +200,12 @@ interface SoakResult {
   readonly lastPhase: string;
   /** The most scenarios a run in flight was shown done: above 0 only if its stream was read. */
   readonly mostDone: number;
+  /** How many tables the screen drew on the terminal. */
+  readonly tables: number;
+  /** How many writes standard output took. */
+  readonly writes: number;
+  /** What standard output was. */
+  readonly output: SoakOutput;
 }
 
 let root = "";
@@ -209,7 +247,11 @@ function runFolders(stateDir: string): number {
  * @param reportsKeep - the config's `runs.reportsKeep`; the suite's default when absent.
  * @returns what it measured.
  */
-async function soak(runs: number, reportsKeep?: number): Promise<SoakResult> {
+async function soak(
+  runs: number,
+  output: SoakOutput,
+  reportsKeep?: number,
+): Promise<SoakResult> {
   const checkout = join(root, "checkout");
   const stateDir = join(checkout, ".orchestrator");
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
@@ -237,10 +279,11 @@ async function soak(runs: number, reportsKeep?: number): Promise<SoakResult> {
     }),
     { mode: 0o600 },
   );
-  const proc = new SoakProcess();
+  const proc = new SoakProcess(output);
   let shows = 0;
   let lastPhase = "";
   let mostDone = 0;
+  let screen: Screen | undefined;
   const samples: Sample[] = [];
   const timings: PruneTiming[] = [];
   const kept: number[] = [];
@@ -266,10 +309,16 @@ async function soak(runs: number, reportsKeep?: number): Promise<SoakResult> {
       loadProductList: () => Promise.resolve(PRODUCT_LIST),
       cellLocks: join(root, "site-locks"),
       exitWaitMs: 1_000,
+      // The terminal's screen as on a real one: its live region's timers must leak nothing either.
+      screen: (options) => {
+        screen = openScreen({ ...options, env: { TERM: "xterm-256color" } });
+        return screen;
+      },
       // The status table, followed the whole time: its tails and its poll timer must leak nothing.
       status: {
         pollMs: 20,
         show: (board) => {
+          screen?.show(board);
           shows += 1;
           const phase = board[0]?.phase;
           lastPhase = phase?.kind ?? "";
@@ -328,6 +377,9 @@ async function soak(runs: number, reportsKeep?: number): Promise<SoakResult> {
     shows,
     lastPhase,
     mostDone,
+    tables: proc.stdout.tables,
+    writes: proc.stdout.writes,
+    output,
   };
 }
 
@@ -370,6 +422,12 @@ function expectEveryRunAnnounced(result: SoakResult, runs: number): void {
   expect(result.lastPhase).toBe("over");
   // The poller worked: a run's stream was read, not only the loops' activity shown.
   expect(result.mostDone).toBeGreaterThanOrEqual(1);
+  // On a terminal the screen drew its table, a second apart at most; a pipe got the plain lines only.
+  if (result.output === "tty") expect(result.tables).toBeGreaterThanOrEqual(2);
+  else {
+    expect(result.tables).toBe(0);
+    expect(result.writes).toBeGreaterThanOrEqual(runs);
+  }
 }
 
 /**
@@ -406,36 +464,37 @@ test.describe("the soak", () => {
   // Each run spawns two Node processes: well under a second, allowed two.
   test.setTimeout(RUNS * 2_000 + 60_000);
 
-  test("hundreds of runs leave listeners, handles, timers and descriptors flat, the run folders at the cap", async () => {
-    const before = takeSample(0);
-    const result = await soak(RUNS);
-    report("capped (reportsKeep 20)", result);
-    expect(result.code).toBe(130);
-    expect(result.timings).toHaveLength(RUNS);
-    expectEveryRunAnnounced(result, RUNS);
-    expect(judgeFlat(result.samples, WARMUP_SAMPLES, TOLERANCE)).toEqual([]);
-    // Each pruning leaves the cap: the run just ended is one of the 20.
-    expect(Math.max(...result.kept)).toBeLessThanOrEqual(DEFAULT_KEEP);
-    expect(result.kept.at(-1)).toBe(DEFAULT_KEEP);
-    // With the folders held at the cap, pruning costs the same at the end as once warmed up.
-    expect(
-      pruneMsPerFolder(result.timings, 20) /
-        pruneMsPerFolder(result.timings.slice(20, 40), 20),
-    ).toBeLessThan(3);
-    // And once it has stopped, the process holds what it held before it started.
-    const after = await settled(before);
-    expect(after.listeners).toBeLessThanOrEqual(before.listeners);
-    expect(after.resources).toBeLessThanOrEqual(
-      before.resources + TOLERANCE.resources,
-    );
-    expect(after.timeouts).toBeLessThanOrEqual(
-      before.timeouts + TOLERANCE.timeouts,
-    );
-    expect(after.fds).toBeLessThanOrEqual(before.fds + TOLERANCE.fds);
-  });
+  for (const output of ["tty", "pipe"] as const)
+    test(`hundreds of runs on a ${output} leave listeners, handles, timers and descriptors flat, the run folders at the cap`, async () => {
+      const before = takeSample(0);
+      const result = await soak(RUNS, output);
+      report(`capped (reportsKeep 20), ${output}`, result);
+      expect(result.code).toBe(130);
+      expect(result.timings).toHaveLength(RUNS);
+      expectEveryRunAnnounced(result, RUNS);
+      expect(judgeFlat(result.samples, WARMUP_SAMPLES, TOLERANCE)).toEqual([]);
+      // Each pruning leaves the cap: the run just ended is one of the 20.
+      expect(Math.max(...result.kept)).toBeLessThanOrEqual(DEFAULT_KEEP);
+      expect(result.kept.at(-1)).toBe(DEFAULT_KEEP);
+      // With the folders held at the cap, pruning costs the same at the end as once warmed up.
+      expect(
+        pruneMsPerFolder(result.timings, 20) /
+          pruneMsPerFolder(result.timings.slice(20, 40), 20),
+      ).toBeLessThan(3);
+      // And once it has stopped, the process holds what it held before it started.
+      const after = await settled(before);
+      expect(after.listeners).toBeLessThanOrEqual(before.listeners);
+      expect(after.resources).toBeLessThanOrEqual(
+        before.resources + TOLERANCE.resources,
+      );
+      expect(after.timeouts).toBeLessThanOrEqual(
+        before.timeouts + TOLERANCE.timeouts,
+      );
+      expect(after.fds).toBeLessThanOrEqual(before.fds + TOLERANCE.fds);
+    });
 
   test("without a cap the run folders accumulate, and pruning stays under 1 ms a folder", async () => {
-    const result = await soak(RUNS, 0);
+    const result = await soak(RUNS, "tty", 0);
     report("uncapped (reportsKeep 0)", result);
     expect(result.code).toBe(130);
     expectEveryRunAnnounced(result, RUNS);

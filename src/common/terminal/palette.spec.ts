@@ -2,6 +2,7 @@ import { test, expect } from "@playwright/test";
 
 import {
   createPalette,
+  SERIES_FORMATS,
   STATUSES,
   SYMBOLS,
   type Status,
@@ -274,5 +275,35 @@ test.describe("status", () => {
       ].join("");
       expect(everything).not.toContain("\x1b");
     }
+  });
+});
+
+test.describe("series", () => {
+  test("colours the items of a list in turn, cycling, with none of a status's colours", () => {
+    const palette = createPalette({ tty: true, color: true, unicode: true });
+    const opens = ["36", "35", "34", "96", "95", "94"];
+    for (const [i, open] of opens.entries())
+      expect(palette.series(i, "bpng")).toBe(`\x1b[${open}mbpng\x1b[39m`);
+    expect(palette.series(SERIES_FORMATS.length, "a")).toBe(
+      palette.series(0, "a"),
+    );
+    // Past the fallback colour too: the one after a full turn is the second.
+    expect(palette.series(SERIES_FORMATS.length + 1, "a")).toBe(
+      palette.series(1, "a"),
+    );
+    expect(palette.series(2 * SERIES_FORMATS.length + 3, "a")).toBe(
+      palette.series(3, "a"),
+    );
+    for (const format of SERIES_FORMATS)
+      expect(["green", "red", "yellow"]).not.toContain(format);
+  });
+
+  test("leaves the text as it is with colour off, for an empty text, or an index that is no place", () => {
+    const off = createPalette({ tty: true, color: false, unicode: true });
+    const on = createPalette({ tty: true, color: true, unicode: true });
+    expect(off.series(0, "bpng")).toBe("bpng");
+    expect(on.series(0, "")).toBe("");
+    for (const index of [-1, 1.5, Number.NaN, Infinity])
+      expect(on.series(index, "bpng")).toBe("bpng");
   });
 });

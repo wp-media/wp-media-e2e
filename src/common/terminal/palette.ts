@@ -29,6 +29,19 @@ const TOKEN_FORMATS: Readonly<Record<Token, Parameters<typeof styleText>[0]>> =
   };
 
 /**
+ * The colours that tell the items of a list apart — the orchestrator's tasks —, in turn: none a
+ * status's (green, red, yellow), so an item's colour never reads as an outcome.
+ */
+export const SERIES_FORMATS = [
+  "cyan",
+  "magenta",
+  "blue",
+  "cyanBright",
+  "magentaBright",
+  "blueBright",
+] as const satisfies readonly Parameters<typeof styleText>[0][];
+
+/**
  * A symbol's two spellings: Unicode, and the ASCII shown on a dumb terminal, under a non-UTF-8 locale
  * or in plain mode. The ASCII one can be wider (`OK`, `->`, `...`): layout measures the glyph it is
  * given, never assumes one column.
@@ -127,6 +140,11 @@ export interface Palette {
    * get stripped) or a screen reader never meets a colour-only status.
    */
   readonly status: (status: Status) => string;
+  /**
+   * `text` in the colour of the `index`-th item of a list ({@link SERIES_FORMATS}, in turn); `text`
+   * itself when colour is off, it is empty, or `index` is no whole number ≥ 0.
+   */
+  readonly series: (index: number, text: string) => string;
 }
 
 /**
@@ -153,7 +171,22 @@ export function createPalette(
     const mark = paint(token, symbol(glyph));
     return marksAlone && markAlone ? mark : `${mark} ${name}`;
   };
-  return { paint, symbol, status };
+  const series = (index: number, text: string): string =>
+    capabilities.color ? seriesPaint(index, text) : text;
+  return { paint, symbol, status, series };
+}
+
+/**
+ * {@link Palette.series} with colour on.
+ *
+ * @param index - the item's place in its list, from 0; its colour repeats every
+ *   {@link SERIES_FORMATS}' length.
+ * @param text - final, plain text.
+ */
+function seriesPaint(index: number, text: string): string {
+  if (text === "" || !Number.isSafeInteger(index) || index < 0) return text;
+  const format = SERIES_FORMATS[index % SERIES_FORMATS.length] ?? "cyan";
+  return styleText(format, text, { validateStream: false });
 }
 
 /**
