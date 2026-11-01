@@ -125,6 +125,22 @@ const SHOWN: Readonly<
     pipeColour: "\x1b[33m■\x1b[39m killed",
     colourless: ["■ killed", "# killed"],
   },
+  "could-not-test": {
+    ttyColour: [
+      "\x1b[31m✘\x1b[39m could-not-test",
+      "\x1b[31mx\x1b[39m could-not-test",
+    ],
+    pipeColour: "\x1b[31m✘\x1b[39m could-not-test",
+    colourless: ["✘ could-not-test", "x could-not-test"],
+  },
+  interrupted: {
+    ttyColour: [
+      "\x1b[33m■\x1b[39m interrupted",
+      "\x1b[33m#\x1b[39m interrupted",
+    ],
+    pipeColour: "\x1b[33m■\x1b[39m interrupted",
+    colourless: ["■ interrupted", "# interrupted"],
+  },
 };
 
 /** Every status. */
@@ -244,6 +260,8 @@ test.describe("status", () => {
     const palette = createPalette({ tty: true, color: true, unicode: true });
     expect(palette.status("error")).not.toBe(palette.status("failed"));
     expect(palette.status("killed")).not.toBe(palette.status("stopped"));
+    expect(palette.status("could-not-test")).not.toBe(palette.status("failed"));
+    expect(palette.status("interrupted")).not.toBe(palette.status("stopped"));
   });
 
   test("colour off emits no escape anywhere", () => {

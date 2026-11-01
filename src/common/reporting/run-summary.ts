@@ -1,5 +1,4 @@
 import { isAbsolute, relative, sep } from "node:path";
-import { styleText } from "node:util";
 
 import type {
   FullConfig,
@@ -13,6 +12,16 @@ import type {
 
 import { cellOfProject, type SetupKind } from "../config/project-names";
 import { errorMessage } from "../guards";
+import { detectCapabilities } from "../terminal/capabilities";
+import { rule, terminalWidth } from "../terminal/layout";
+import {
+  SYMBOLS,
+  createPalette,
+  STATUSES,
+  type Status,
+  type SymbolName,
+  type Token,
+} from "../terminal/palette";
 import { maskSiteUrl, plain, redactSecrets } from "../text";
 
 // Shared with the facts, the prune command and the Site Health reader; re-exported for its importers.
@@ -23,7 +32,9 @@ import {
 } from "../setup/attachments";
 import {
   RunTally,
+  failedStep,
   firstError,
+  scenarioPlace,
   setupOf,
   type Counts,
   type TestStatus,
@@ -56,6 +67,8 @@ import {
  * ```text
  * ━━ backwpup · pro@nginx (pro) ━━ ✘ FAILED ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  *   Result      2 failed · 1 flaky · 11 passed · 1 skipped, in 14.2m
+ *   Failed      Backups › Create a backup — When the backup runs
+ *               Restore › Restore a backup — Before Hooks › BeforeEach Hooks › reset the site
  *   Plugin      BackWPup Pro 9.99.99 · develop @ af1ab5c4d2
  *   Site        https://bwu3.example · WordPress 7.1.2 · PHP 8.5.10
  *   Playwright  npx playwright show-report reports/backwpup/pro@nginx/<RUN_ID>/playwright
@@ -63,6 +76,13 @@ import {
  *   Allure      npm run report:allure -- backwpup pro@nginx --open
  *   Pruned      1 old report, 4.3 MB — beyond the newest 20 (E2E_REPORTS_KEEP)
  * ```
+ *
+ * The rule is as wide as the terminal (`COLUMNS`, else 80, in a pipe); colours, the verdict's mark and
+ * its own glyphs (frame, separators, breadcrumbs, dashes, ellipses) come from the terminal palette —
+ * colourless, those glyphs ASCII, under `E2E_OUTPUT=plain`. The phrases it shares with the reports (the
+ * counts, the plugin, the site) keep their own wording, `·` included.
+ * `Failed` lists the failed scenarios, each with the step it failed in — never an API step's title,
+ * which can hold what a test typed — the first ten, then how many more.
  *
  * Before printing, it prunes the run's report folder's group (`run-pruning.ts`): the last reporter's
  * `onExit` comes after every report is written, and `Pruned` says what went — only when something did.
@@ -87,6 +107,17 @@ export interface CellFacts {
   readonly failed: readonly SetupKind[];
 }
 
+/** A scenario that failed, as the `Failed` list names it. */
+export interface FailedScenario {
+  /** Its feature, any Rule or Outline between, and its own title; raw. */
+  readonly title: readonly string[];
+  /**
+   * The step it failed in ({@link failedStep}'s path: the Gherkin step, or a hook's titles), raw;
+   * absent when none can be named.
+   */
+  readonly step?: readonly string[];
+}
+
 /** A setup that failed, and why. */
 export interface SetupFailure {
   readonly project: string;
@@ -105,6 +136,8 @@ export interface SummaryInput {
   readonly durationMs: number;
   readonly scenarios: Counts;
   readonly setupFailures: readonly SetupFailure[];
+  /** The scenarios that failed, in the order they ended. Absent: none. */
+  readonly failures?: readonly FailedScenario[];
   /**
    * The errors raised outside any test — a test file that would not load, a global setup that threw —
    * each its first line; "No tests found" is not one ({@link RunTally.runError}). Absent: none.
@@ -116,14 +149,28 @@ export interface SummaryInput {
   readonly pruned?: readonly PruneLine[];
 }
 
-/** Colours a piece of the summary; identity when colours are off (a spec, a pipe). */
-export type Styler = (
-  format: Parameters<typeof styleText>[0],
-  text: string,
-) => string;
+/**
+ * Styles a piece of the summary by what it means: the palette's `paint`, or identity when colours are
+ * off (a spec, a pipe).
+ */
+export type Styler = (token: Token, text: string) => string;
 
-/** How wide the header rule runs. */
-const WIDTH = 88;
+/** How the summary is laid out: the rule's width and the glyphs it draws. */
+export interface SummaryLayout {
+  /** The most columns the header rule takes (the terminal's width). */
+  readonly width: number;
+  /** A glyph by its role: the palette's `symbol`, ASCII where the stream needs it. */
+  readonly symbol: (name: SymbolName) => string;
+}
+
+/** The layout a summary gets when none is given: 88 columns, Unicode glyphs. */
+export const DEFAULT_LAYOUT: SummaryLayout = {
+  width: 88,
+  symbol: (name) => SYMBOLS[name].unicode,
+};
+
+/** How many failed scenarios `Failed` lists; the rest are counted. */
+export const FAILED_SHOWN = 10;
 
 /** How wide the labels column is. */
 const LABEL_WIDTH = 12;
@@ -134,20 +181,45 @@ const SETUP_MESSAGE_LIMIT = 200;
 /** How many characters of a commit the summary shows; the reports carry it whole. */
 const SHORT_COMMIT = 10;
 
-/** Each verdict's mark and colour. */
+/**
+ * Each verdict's mark, word and colour: the palette's own for a {@link Status} (always with its word,
+ * in capitals — the summary is read in logs), none for a run with nothing to test.
+ */
 const VERDICTS: Readonly<
   Record<
     Verdict,
-    { readonly text: string; readonly color: "green" | "red" | "yellow" }
+    {
+      readonly symbol?: SymbolName;
+      readonly token: Token;
+      readonly word: string;
+    }
   >
 > = {
-  passed: { text: "✔ PASSED", color: "green" },
-  failed: { text: "✘ FAILED", color: "red" },
-  "could-not-test": { text: "✘ COULD NOT TEST", color: "red" },
-  interrupted: { text: "■ INTERRUPTED", color: "yellow" },
-  stopped: { text: "■ STOPPED", color: "yellow" },
-  "no-tests": { text: "NO TESTS", color: "yellow" },
+  passed: verdictStyle("passed", "PASSED"),
+  failed: verdictStyle("failed", "FAILED"),
+  "could-not-test": verdictStyle("could-not-test", "COULD NOT TEST"),
+  interrupted: verdictStyle("interrupted", "INTERRUPTED"),
+  stopped: verdictStyle("stopped", "STOPPED"),
+  "no-tests": { token: "warn", word: "NO TESTS" },
 };
+
+/**
+ * A verdict shown as the palette shows `status`.
+ *
+ * @param status - the palette's status.
+ * @param word - the verdict's word.
+ */
+function verdictStyle(
+  status: Status,
+  word: string,
+): {
+  readonly symbol: SymbolName;
+  readonly token: Token;
+  readonly word: string;
+} {
+  const { symbol, token } = STATUSES[status];
+  return { symbol, token, word };
+}
 
 /**
  * The run's verdict. An interrupt is said first — the person who pressed Ctrl+C knows why the rest
@@ -285,21 +357,22 @@ function labelled(
 ): string[] {
   return values.map(
     (value, index) =>
-      `  ${style("bold", (index === 0 ? label : "").padEnd(LABEL_WIDTH))}${value}`,
+      `  ${style("command", (index === 0 ? label : "").padEnd(LABEL_WIDTH))}${value}`,
   );
 }
 
 /**
- * A phrase cut to `limit` characters, an ellipsis included, never inside a surrogate pair.
+ * A phrase cut to `limit` characters, the ellipsis included, never inside a surrogate pair.
  *
  * @param text - the phrase.
  * @param limit - the most characters it may take.
+ * @param ellipsis - what marks the cut: `…`, or the palette's (`...` under plain output).
  */
-export function cut(text: string, limit: number): string {
+export function cut(text: string, limit: number, ellipsis = "…"): string {
   if (text.length <= limit) return text;
-  const end = limit - 1;
+  const end = Math.max(0, limit - ellipsis.length);
   const last = text.charCodeAt(end - 1);
-  return `${text.slice(0, last >= 0xd800 && last <= 0xdbff ? end - 1 : end)}…`;
+  return `${text.slice(0, last >= 0xd800 && last <= 0xdbff ? end - 1 : end)}${ellipsis}`;
 }
 
 /**
@@ -327,7 +400,8 @@ export function displayPath(path: string, cwd: string): string {
 }
 
 /** The characters a shell reads as part of a word, unquoted. */
-const SHELL_SAFE = /^[\w@%+=:,./-]+$/;
+// No `=`: zsh expands `=cmd` at an assignment value's start or after a `:` (`E2E_PLUGIN_ZIP=/a:=ls`).
+const SHELL_SAFE = /^[\w@%+:,./-]+$/;
 
 /**
  * A path as one shell word, single-quoted when it holds anything a shell would read otherwise.
@@ -343,6 +417,7 @@ function pluginLines(
   style: Styler,
   cells: ReadonlyMap<string, CellFacts>,
   prefix: (cell: string) => string,
+  dash: string,
 ): string[] {
   const byLabel = new Map<string, string[]>();
   const add = (label: string, value: string): void => {
@@ -351,7 +426,10 @@ function pluginLines(
   for (const [cell, facts] of cells) {
     if (facts.plugins === undefined) {
       if (facts.failed.includes("artifacts")) {
-        add("Plugin", `${prefix(cell)}unknown — the artifacts setup failed`);
+        add(
+          "Plugin",
+          `${prefix(cell)}unknown ${dash} the artifacts setup failed`,
+        );
       }
       continue;
     }
@@ -372,12 +450,13 @@ function siteLines(
   style: Styler,
   cells: ReadonlyMap<string, CellFacts>,
   prefix: (cell: string) => string,
+  dash: string,
 ): string[] {
   const values: string[] = [];
   for (const [cell, facts] of cells) {
     if (facts.sites === undefined) {
       if (facts.failed.includes("auth")) {
-        values.push(`${prefix(cell)}unknown — the auth setup failed`);
+        values.push(`${prefix(cell)}unknown ${dash} the auth setup failed`);
       }
       continue;
     }
@@ -389,50 +468,92 @@ function siteLines(
 }
 
 /**
+ * The summary's header: the run and its verdict inside a heavy rule as wide as the layout allows,
+ * bold and in the verdict's colour — `━━ backwpup · pro@nginx (pro) ━━ ✘ FAILED ━━━…`.
+ *
+ * @param input - what the run came to.
+ * @param style - colours; identity for none.
+ * @param layout - the width and glyphs.
+ */
+function headerLine(
+  input: SummaryInput,
+  style: Styler,
+  layout: SummaryLayout,
+): string {
+  const { run } = input;
+  const { symbol } = layout;
+  const verdict = VERDICTS[verdictOf(input)];
+  const separator = symbol("separator");
+  const subject =
+    run.cell === undefined
+      ? `${run.product} ${separator} every cell`
+      : `${run.product} ${separator} ${run.cell}${run.edition === undefined ? "" : ` (${run.edition})`}`;
+  const mark =
+    verdict.symbol === undefined
+      ? verdict.word
+      : `${symbol(verdict.symbol)} ${verdict.word}`;
+  const heavy = symbol("heavyRule");
+  const line = rule({
+    width: layout.width,
+    line: heavy,
+    title: `${displayText(subject)} ${heavy}${heavy} ${mark}`,
+  });
+  return style("command", style(verdict.token, line));
+}
+
+/**
  * The summary's lines.
  *
  * @param input - what the run came to.
  * @param style - colours; identity for none.
+ * @param layout - the rule's width and the glyphs; {@link DEFAULT_LAYOUT} when not given.
  */
 export function renderSummary(
   input: SummaryInput,
-  style: Styler = (_format, text) => text,
+  style: Styler = (_token, text) => text,
+  layout: SummaryLayout = DEFAULT_LAYOUT,
 ): string[] {
   const { run } = input;
-  const verdict = VERDICTS[verdictOf(input)];
-  const subject =
-    run.cell === undefined
-      ? `${run.product} · every cell`
-      : `${run.product} · ${run.cell}${run.edition === undefined ? "" : ` (${run.edition})`}`;
-  const head = `━━ ${subject} ━━ ${verdict.text} `;
-  const rule = "━".repeat(Math.max(2, WIDTH - head.length));
+  const dash = layout.symbol("dash");
+  const ellipsis = layout.symbol("ellipsis");
+  // Plain: a report folder holding an escape (`REPORT_ROOT`) must not drive the terminal.
+  const reportDir = displayText(input.reportDir);
   // A run of every cell says whose facts each line gives.
   const prefix = (cell: string): string =>
     input.cells.size > 1 || run.cell === undefined ? `${cell}: ` : "";
 
   return [
-    style(["bold", verdict.color], `${head}${rule}`),
+    headerLine(input, style, layout),
     ...labelled(style, "Result", [
       `${describeCounts(input.scenarios)}, in ${formatDuration(input.durationMs)}`,
     ]),
-    ...labelled(style, "Error", errorLines(style, input.runErrors ?? [])),
+    ...labelled(
+      style,
+      "Failed",
+      failedLines(style, input.failures ?? [], layout),
+    ),
+    ...labelled(
+      style,
+      "Error",
+      errorLines(style, input.runErrors ?? [], ellipsis),
+    ),
     ...labelled(
       style,
       "Setup",
       input.setupFailures.map((failure) =>
         style(
-          "red",
-          `${failure.project} failed — ${cut(displayText(failure.message), SETUP_MESSAGE_LIMIT)}`,
+          "fail",
+          `${failure.project} failed ${dash} ${cut(displayText(failure.message), SETUP_MESSAGE_LIMIT, ellipsis)}`,
         ),
       ),
     ),
-    ...pluginLines(style, input.cells, prefix),
-    ...siteLines(style, input.cells, prefix),
+    ...pluginLines(style, input.cells, prefix, dash),
+    ...siteLines(style, input.cells, prefix, dash),
     ...labelled(style, "Playwright", [
-      `npx playwright show-report ${shellWord(`${input.reportDir}/playwright`)}`,
+      `npx playwright show-report ${shellWord(`${reportDir}/playwright`)}`,
     ]),
     ...labelled(style, "Cucumber", [
-      shellWord(`${input.reportDir}/cucumber/index.html`),
+      shellWord(`${reportDir}/cucumber/index.html`),
     ]),
     ...labelled(style, "Allure", [
       `npm run report:allure -- ${run.product} ${run.reportCell} --open`,
@@ -442,7 +563,7 @@ export function renderSummary(
       "Pruned",
       (input.pruned ?? []).map((line) =>
         line.warn
-          ? style("yellow", displayText(line.text))
+          ? style("warn", displayText(line.text))
           : displayText(line.text),
       ),
     ),
@@ -452,21 +573,58 @@ export function renderSummary(
 /** How many errors outside any test the summary lists; the rest are counted. */
 const RUN_ERRORS_SHOWN = 3;
 
-/** The errors raised outside any test, as red lines: the first few, then how many more. */
-function errorLines(style: Styler, errors: readonly string[]): string[] {
+/**
+ * The errors raised outside any test, as red lines: the first few, then how many more.
+ *
+ * @param style - colours.
+ * @param errors - each error's first line.
+ * @param ellipsis - what marks a cut line.
+ */
+function errorLines(
+  style: Styler,
+  errors: readonly string[],
+  ellipsis: string,
+): string[] {
   const shown = errors
     .slice(0, RUN_ERRORS_SHOWN)
-    .map((error) => style("red", cut(displayText(error), SETUP_MESSAGE_LIMIT)));
+    .map((error) =>
+      style("fail", cut(displayText(error), SETUP_MESSAGE_LIMIT, ellipsis)),
+    );
   const more = errors.length - shown.length;
   return more > 0 ? [...shown, `and ${String(more)} more`] : shown;
 }
 
-/** Colours for the terminal: Node's `styleText` drops them for a pipe, `NO_COLOR` and the like. */
-const terminalStyle: Styler = (format, text) =>
-  styleText(format, text, { stream: process.stdout });
-
-/** No colour at all: `E2E_OUTPUT=plain`, whatever `FORCE_COLOR` says. */
-const plainStyle: Styler = (_format, text) => text;
+/**
+ * The failed scenarios, as red lines — `Feature › Scenario — the failed step` — the first
+ * {@link FAILED_SHOWN}, then how many more. Each is plain, masked, then cut.
+ *
+ * @param style - colours.
+ * @param failures - the failed scenarios.
+ * @param layout - the glyphs.
+ */
+function failedLines(
+  style: Styler,
+  failures: readonly FailedScenario[],
+  layout: SummaryLayout,
+): string[] {
+  const breadcrumb = ` ${layout.symbol("breadcrumb")} `;
+  const joined = (parts: readonly string[]): string =>
+    parts
+      .map(displayText)
+      .filter((part) => part !== "")
+      .join(breadcrumb);
+  const shown = failures.slice(0, FAILED_SHOWN).map((failure) => {
+    const title = joined(failure.title);
+    const path = joined(failure.step ?? []);
+    const step = path === "" ? "" : ` ${layout.symbol("dash")} ${path}`;
+    return style(
+      "fail",
+      cut(`${title}${step}`, SETUP_MESSAGE_LIMIT, layout.symbol("ellipsis")),
+    );
+  });
+  const more = failures.length - shown.length;
+  return more > 0 ? [...shown, `and ${String(more)} more`] : shown;
+}
 
 /** Prints {@link renderSummary} as the run's last word; see the module's description. */
 export default class RunSummaryReporter implements Reporter {
@@ -478,22 +636,36 @@ export default class RunSummaryReporter implements Reporter {
   private readonly tally = new RunTally();
   /** The setups that failed. */
   private readonly setupFailures: SetupFailure[] = [];
+  /** The scenarios that failed, as they ended. */
+  private readonly failures: FailedScenario[] = [];
   /** Each cell's facts. */
   private readonly cells = new Map<string, CellFacts>();
   /** How the run ended; set by `onEnd`. */
   private ended: Pick<FullResult, "status" | "duration"> | undefined;
   /** How the summary is coloured: never under `E2E_OUTPUT=plain`, else as the stream allows. */
   private readonly style: Styler;
+  /** The rule's width and the glyphs: the terminal's, ASCII under `E2E_OUTPUT=plain`. */
+  private readonly layout: SummaryLayout;
 
   /**
-   * @param options - a {@link RunDescription} and `output` (`E2E_OUTPUT`: `plain` drops colour),
-   *   plus what Playwright adds.
+   * @param options - a {@link RunDescription} and `output` (`E2E_OUTPUT`: `plain` drops colour and
+   *   Unicode glyphs), plus what Playwright adds.
    */
   constructor(options: unknown) {
     this.run = readRunDescription(options);
     this.mode = reporterMode(options);
-    this.style =
-      outputModeOption(options) === "plain" ? plainStyle : terminalStyle;
+    const palette = createPalette(
+      detectCapabilities({
+        env: process.env,
+        stream: process.stdout,
+        mode: outputModeOption(options),
+      }),
+    );
+    this.style = palette.paint;
+    this.layout = {
+      width: terminalWidth({ stream: process.stdout, env: process.env }),
+      symbol: palette.symbol,
+    };
   }
 
   /**
@@ -517,7 +689,7 @@ export default class RunSummaryReporter implements Reporter {
   onTestEnd(test: TestCase, result: TestResult): void {
     this.guard(() => {
       const verdict = this.tally.attemptEnded(test, result);
-      if (verdict.final) this.recordSetup(test, result, verdict.status);
+      if (verdict.final) this.recordFinal(test, result, verdict.status);
     });
   }
 
@@ -541,7 +713,7 @@ export default class RunSummaryReporter implements Reporter {
     this.ended = { status: result.status, duration: result.duration };
     this.guard(() => {
       for (const { test, result: last, status } of this.tally.settle()) {
-        this.recordSetup(test, last, status);
+        this.recordFinal(test, last, status);
       }
     });
   }
@@ -567,11 +739,13 @@ export default class RunSummaryReporter implements Reporter {
           durationMs: this.ended.duration,
           scenarios: this.tally.scenarios,
           setupFailures: this.setupFailures,
+          failures: this.failures,
           runErrors: this.tally.runErrors,
           cells: this.cells,
           pruned: prune(this.run),
         },
         this.style,
+        this.layout,
       );
       process.stdout.write(`\n${lines.join("\n")}\n`);
     });
@@ -581,6 +755,32 @@ export default class RunSummaryReporter implements Reporter {
   /** A summary is no progress report: Playwright keeps its own terminal reporter. */
   printsToStdio(): boolean {
     return false;
+  }
+
+  /**
+   * Keeps what a finished test tells the summary: a setup's facts ({@link recordSetup}), a failed
+   * scenario's title and the step it failed in.
+   *
+   * @param test - the finished test.
+   * @param result - its last attempt.
+   * @param status - its final status.
+   */
+  private recordFinal(
+    test: TestCase,
+    result: TestResult,
+    status: TestStatus,
+  ): void {
+    if (setupOf(test) !== undefined) {
+      this.recordSetup(test, result, status);
+      return;
+    }
+    if (status !== "failed") return;
+    const place = scenarioPlace(test, test.parent.project()?.testDir);
+    const step = failedStep(result);
+    this.failures.push({
+      title: [place.feature, ...place.path, place.scenario],
+      ...(step !== undefined ? { step: step.path } : {}),
+    });
   }
 
   /**

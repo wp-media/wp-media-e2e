@@ -147,9 +147,32 @@ the Allure report's name and Metadata. An unknown fact says why (`site unknown: 
 `E2E_RUN_NAME` names the run and `E2E_REQUESTED_REF` shows the ref asked for (both display only); a
 `PLAYWRIGHT_HTML_TITLE` you set wins.
 
+Under each scenario that fails for good, the terminal prints a block: the Gherkin step it failed in,
+its `.feature` file, the first error, the screenshot and trace paths, and a command that reruns just
+that scenario on the same cell and plugin build:
+
+```text
+✘ failed 8.1s  Backups › Create a backup
+  Step        When the backup runs
+  Feature     src/projects/backwpup/features/backups.feature
+  Error       Error: expect(locator).toBeVisible() failed
+  Screenshot  test-results/backwpup/pro@nginx/…/test-failed-1.png
+  Trace       test-results/backwpup/pro@nginx/…/trace.zip
+  Rerun       E2E_CELL=pro@nginx E2E_PLUGIN_REF=commit:af1ab5c4d2… E2E_PLUGIN_VERSION=9.99.99 npm run test:backwpup -- --grep='/ \.features-gen/…/backups\.feature\.spec\.js(?: @\S+)* Backups(?: @\S+)* Create a backup(?: @\S+)*$/'
+```
+
+The `--grep` matches the scenario's generated file, Feature and title literally and case-sensitively,
+anchored at the end, so `Create a backup encrypted` is not rerun with it; only an exact duplicate is.
+The build is the one the run tested: the release tag (`release:3.17.4`) or commit it built, else the
+zip, ref and version you set. A run of every cell reruns the scenario's own cell. A failed setup gets
+its own block, rerunning `--project=<setup>`. A title shaped like a credential gets no command, and
+its screenshot and trace paths (its folder carries the title) are not shown.
+
 The run ends with a summary below everything: the verdict (`✘ COULD NOT TEST` when a setup failed,
-`■ STOPPED` when stopped), counts, the plugin and sites tested, how to open each report, and which old
-reports it pruned.
+`■ STOPPED` when stopped), counts, the failed scenarios with their failed step (ten, then `and N
+more`), the plugin and sites tested, how to open each report, and which old reports it pruned. Its rule
+spans the terminal; `E2E_OUTPUT=plain` makes it colourless and its own glyphs ASCII (the phrases it
+shares with the reports keep their `·`).
 
 **Old reports are pruned as each run ends**, for its cell only: at most `E2E_REPORTS_KEEP` (20; `0`
 lifts the cap, not the age rules), none older than 30 days except the cell's newest complete report,

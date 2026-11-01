@@ -18,6 +18,7 @@ import { stripVTControlCharacters } from "node:util";
 
 import { STOP_FILE_ENV } from "../config/drain";
 import { parseResults } from "./results-reader";
+import { shellWord } from "./run-summary";
 import {
   RESULTS_FILE,
   type ResultsEvent,
@@ -593,7 +594,26 @@ test.describe("the results stream and the summary, through the real runner", () 
         /^■ stopped .* A scenario that begins after the run is asked to stop is drained$/,
       ),
     ]);
-    expect(count(outcome.stdout, "  Error: boom (attempt 2)")).toBe(1);
+    // A final failure's block: the Gherkin step (or the hook) it failed in, the feature, the error, a
+    // rerun of that scenario alone; an attempt due a retry keeps its one error line.
+    expect(count(outcome.stdout, "  Error: boom (attempt 1)")).toBe(1);
+    expect(count(outcome.stdout, "  Error       Error: boom (attempt 2)")).toBe(
+      1,
+    );
+    expect(
+      count(outcome.stdout, '  Step        When a step fails with "boom"'),
+    ).toBe(1);
+    expect(outcome.stdout).toMatch(
+      /\n {2}Hook {8}After Hooks › .*failing After hook\n/,
+    );
+    expect(count(outcome.stdout, "  Feature     results.feature")).toBe(2);
+    // The zip the run was given rides along: the cell's artifacts setup skipped, recording none.
+    expect(
+      count(
+        outcome.stdout,
+        `  Rerun       E2E_CELL=x E2E_PLUGIN_ZIP=${shellWord(join(work, "missing.zip"))} npm run test:resultsprobe -- --grep='/ \\.features-gen/resultsprobe/x/results\\.feature\\.spec\\.js(?: @\\S+)* The results stream, end to end(?: @\\S+)* A scenario whose step fails on every attempt fails(?: @\\S+)*$/'`,
+      ),
+    ).toBe(1);
     // The worker's coloured output — forced into colour by Playwright — lands plain and masked, once
     // per attempt, as it comes: under a begin line naming the attempt, before the attempt's own
     // line; the chunk with no line end too.
@@ -962,13 +982,13 @@ test.describe("the results stream and the summary, through the real runner", () 
     expect(plainRun.rawStdout).toMatch(
       /^OK passed \d+\.\ds {2}The results stream, end to end > A scenario that passes$/m,
     );
-    // Up to the summary, which 7.2a leaves as it is (it still honours FORCE_COLOR on its own).
-    const beforeSummary = plainRun.rawStdout.slice(
-      0,
-      plainRun.rawStdout.lastIndexOf("\n", plainRun.rawStdout.indexOf("━━ ")),
+    // Every line, the summary's included: no colour whatever FORCE_COLOR says, ASCII glyphs.
+    expect(plainRun.rawStdout).toContain("[run] resultsprobe . x . plainmode");
+    expect(plainRun.rawStdout).toMatch(
+      /^== resultsprobe \. x == OK PASSED =+$/m,
     );
-    expect(beforeSummary).toContain("[run] resultsprobe . x . plainmode");
-    expect(beforeSummary).not.toContain("\u001b");
+    expect(plainRun.rawStdout).not.toContain("\u001b");
+    expect(plainRun.rawStdout).not.toContain("━");
 
     const bad = spawnSync(
       process.execPath,

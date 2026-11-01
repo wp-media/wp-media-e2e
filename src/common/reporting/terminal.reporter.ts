@@ -8,7 +8,9 @@ import type {
   TestResult,
 } from "@playwright/test/reporter";
 
+import { cellOfProject } from "../config/project-names";
 import { errorMessage } from "../guards";
+import { ARTIFACTS_ATTACHMENT } from "../setup/attachments";
 import {
   detectCapabilities,
   type Environment,
@@ -18,6 +20,12 @@ import {
 import { terminalWidth } from "../terminal/layout";
 import { realScheduler } from "../terminal/live";
 import { writeSafely, type ByteSink } from "../terminal/stream";
+import {
+  failureBlockLines,
+  failureFacts,
+  pluginPin,
+  type RerunSelection,
+} from "./failure-block";
 import { liveBlockRows, type RunningAttempt } from "./live-block";
 import {
   LiveSession,
@@ -36,6 +44,11 @@ import {
   type TestStatus,
 } from "./results";
 import { readRunDescription, type RunDescription } from "./run-description";
+import {
+  parsePluginFacts,
+  readJsonAttachment,
+  type PluginFact,
+} from "./setup-facts";
 import {
   OUTSIDE_TESTS_TITLE,
   beginLine,
@@ -86,6 +99,14 @@ import { WorkerOutput } from "./worker-output";
  * not intercept stdio: it prints there. `--reporter` replaces the whole configured stack, this
  * included. `--add-reporter` is not detected: an added printing reporter prints every line a second
  * time, and an added `list` prints errors unmasked — the caller's choice.
+ *
+ * A test's final failure — or an interrupted final attempt — prints a block under its line
+ * (`failure-block.ts`): the Gherkin step it failed in (never an API step, whose title can hold what a
+ * test typed), its `.feature` file, its first error, its screenshots and traces, and a command that
+ * runs it again on the same cell and plugin build — the release or commit the artifacts setup built,
+ * or the zip, ref and version the operator set. A failed setup gets its own block, its command naming
+ * the setup's project.
+ * One block per final failure: an attempt due a retry keeps its one error line.
  *
  * On a terminal that can hold one (`capabilities.live`: a TTY at least 20 columns wide whose `TERM` moves
  * the cursor, not under `CI` unless `E2E_OUTPUT=fancy`, not plain, not watch or UI mode), a live block
@@ -142,6 +163,8 @@ export interface TerminalDeps {
   readonly signals?: SignalEvents;
   /** The live block's clock and timers. */
   readonly scheduler?: LiveSessionDeps["scheduler"];
+  /** The working directory, which a failure's paths are shown from; `process.cwd()` when absent. */
+  readonly cwd?: string;
 }
 
 /**
@@ -260,6 +283,8 @@ export default class TerminalReporter implements Reporter {
   private dead = false;
   /** The warnings already told. */
   private readonly warned = new Set<Warning>();
+  /** The plugin under test per cell, as each cell's artifacts setup recorded it: a rerun's build. */
+  private readonly plugins = new Map<string, PluginFact>();
 
   /**
    * @param options - a {@link RunDescription} and `output` (`E2E_OUTPUT`), plus what Playwright adds.
@@ -398,6 +423,7 @@ export default class TerminalReporter implements Reporter {
     this.guard(() => {
       if (this.quiet()) return;
       const verdict = this.tally.attemptEnded(test, result);
+      this.recordPlugin(test, result);
       if (this.busy.get(result.parallelIndex)?.testId === test.id)
         this.busy.delete(result.parallelIndex);
       this.endOutput(OUTSIDE_TESTS, OUTSIDE);
@@ -642,7 +668,32 @@ export default class TerminalReporter implements Reporter {
   }
 
   /**
-   * A finished test's line and, when it failed or was interrupted, its first error's.
+   * Keeps the plugin under test an artifacts setup recorded — whether it passed or not — for the
+   * rerun commands of its cell's failures. Nothing for any other test.
+   *
+   * @param test - the test whose attempt ended.
+   * @param result - the attempt.
+   */
+  private recordPlugin(test: TestCase, result: TestResult): void {
+    if (setupOf(test) !== "artifacts") return;
+    const plugin = parsePluginFacts(
+      readJsonAttachment(result, ARTIFACTS_ATTACHMENT),
+    ).find((fact) => fact.role === "plugin");
+    if (plugin === undefined) return;
+    this.plugins.set(cellOfProject(this.projectOf(test)), plugin);
+  }
+
+  /**
+   * A test's project name; `""` when it has none.
+   *
+   * @param test - the test.
+   */
+  private projectOf(test: TestCase): string {
+    return test.parent.project()?.name ?? "";
+  }
+
+  /**
+   * A finished test's line and, when it failed or was interrupted, its failure block.
    *
    * @param test - the test.
    * @param result - its last attempt.
@@ -659,7 +710,8 @@ export default class TerminalReporter implements Reporter {
     // `test.fail()` that passed: failed, with no error to say why.
     const unexpected =
       failed && result.status === "passed" ? "passed unexpectedly" : undefined;
-    const note = this.notes(unexpected, after);
+    const timedOut = result.status === "timedOut" ? "timed out" : undefined;
+    const note = this.notes(unexpected, timedOut, after);
     const line = testLine(this.style, {
       verdict: verdictOf(status, wasDrainedTest(test)),
       durationMs: result.duration,
@@ -667,7 +719,59 @@ export default class TerminalReporter implements Reporter {
       attempt: { number: result.retry + 1, of: test.retries + 1 },
       ...(note !== undefined ? { note } : {}),
     });
-    return [line, ...(failed ? this.errorLines(result) : [])];
+    return [line, ...(failed ? this.blockLines(test, result) : [])];
+  }
+
+  /**
+   * The failure block of a test's last attempt; for a run whose options are missing, just its error
+   * line — the rerun command needs the product.
+   *
+   * @param test - the test.
+   * @param result - its last attempt.
+   */
+  private blockLines(test: TestCase, result: TestResult): string[] {
+    if ("missing" in this.run) return this.errorLines(result);
+    const { run } = this;
+    const project = this.projectOf(test);
+    const setup = setupOf(test) === undefined ? undefined : project;
+    const place = scenarioPlace(test, test.parent.project()?.testDir);
+    // A run of every cell reruns the test's own cell: alone, and with its pin applied.
+    const cell = run.cell ?? cellOfProject(project);
+    const pin = pluginPin(
+      this.plugins.get(cellOfProject(project)),
+      {
+        ...(run.pluginRef !== undefined ? { ref: run.pluginRef } : {}),
+        ...(run.pluginZip !== undefined ? { zip: run.pluginZip } : {}),
+        ...(run.pluginVersion !== undefined
+          ? { version: run.pluginVersion }
+          : {}),
+      },
+      run.cell !== undefined,
+    );
+    const selection: RerunSelection =
+      setup === undefined
+        ? // `titlePath()`: the root, the project, then the file and describes above the title.
+          { title: test.title, above: test.titlePath().slice(2, -1) }
+        : { project: setup };
+    return failureBlockLines(
+      this.style,
+      failureFacts(
+        result,
+        {
+          ...(setup !== undefined ? { setup } : {}),
+          ...(setup === undefined && place.file !== undefined
+            ? { feature: place.file }
+            : {}),
+          target: {
+            product: run.product,
+            ...(cell !== "" ? { cell } : {}),
+            ...(pin !== undefined ? { pin } : {}),
+          },
+          selection,
+        },
+        this.deps.cwd ?? process.cwd(),
+      ),
+    );
   }
 
   /**

@@ -33,7 +33,7 @@ End-to-end (E2E) tests for WP Media plugins: WP Rocket (performance), BackWPup (
 src/
 ├── common/                 # product-agnostic, shared by every product
 │   ├── config/             # env, sites loading, run-context, run-id.ts (RUN_ID, a run's report folder), run-env.ts (run-setting variable names), cell pin, drain, metadata, devices, file-owner rule, config factory
-│   ├── reporting/          # the suite's reporters (cell notice, results stream, terminal + its sink/lines/worker-output/mode/live-block/live-session, run facts, summary), their pure parts, report retention (retention, report-tree, run-pruning, prune-command), page-loads.ts (a failed scenario's lost requests)
+│   ├── reporting/          # the suite's reporters (cell notice, results stream, terminal + its sink/lines/worker-output/mode/live-block/live-session/failure-block, run facts, summary), their pure parts, report retention (retention, report-tree, run-pruning, prune-command), page-loads.ts (a failed scenario's lost requests)
 │   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ends a saved login)
 │   ├── setup/              # the auth setup's preflight (+ cell-plugin.ts: a broken copy of the cell's plugin), elevation/ownership banner, site info
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
@@ -46,7 +46,7 @@ src/
 │   ├── pages/              # cross-product page objects (plugins, site-health) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm, pin)
-│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), the live region's tmux driver (live-tmux*), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/)
+│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), the live region's tmux driver (live-tmux*), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/)
 │   └── wp/                 # WordPress over WP-CLI (exec, php, staging, plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
@@ -101,7 +101,10 @@ Full detail: **[execution-model.md](docs/architecture/execution-model.md)**.
   run's log keeps the hung scenario's last lines); on a live-capable TTY (not `CI` unless `fancy`), a
   bottom-pinned progress block from the first scenario's begin to `onEnd`, the runner's own
   `process.stdout`/`stderr` writes wrapped to print above it, masked (cleared on every stop but
-  `SIGKILL`); then the summary and verdict. It is the one writer:
+  `SIGKILL`); under each final failure a block (Gherkin step — never an API step's title — feature
+  file, error, screenshot/trace, a `Rerun` command — that scenario alone, its cell, the build tested —
+  built from the raw titles and never cut: refused, saying why, when unsafe); then the summary (with a
+  `Failed` list) and verdict. It is the one writer:
   other reporters print through its sink (`printLine`, `terminal-sink.ts`), never cut. `E2E_OUTPUT=
 auto|plain|fancy`; quiet for `--list`, `--ui` and `PW_TEST_REPORTER` (Playwright then adds its own);
   watch mode prints; `--reporter` replaces the whole stack; `--add-reporter` doubles the lines (not

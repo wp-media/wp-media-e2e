@@ -69,6 +69,13 @@ const SOCKET_DIR_PREFIX = "/tmp/e2e-lb-";
 /** How long a killed run's process group may take to be gone before its folders are removed anyway. */
 const GROUP_GONE_MS = 10_000;
 
+/**
+ * The rerun command the scenario that fails on every attempt prints, whole: its cell, its product,
+ * and a `--grep` that ends with its title and the tags that may follow it.
+ */
+const FAILING_RERUN =
+  /^ {2}Rerun {7}E2E_CELL=x .*npm run test:liveprobe -- --grep='\/ \S+live-block\\\.feature\\\.spec\\\.js\(\?: @\\S\+\)\* .+ A live block scenario that fails on every attempt fails\(\?: @\\S\+\)\*\$\/'$/;
+
 /** The fixture's scenario with a 120-character title. */
 const LONG_TITLE =
   "A scenario whose title runs long enough to need cutting in any live row, past one hundred and twenty columns of text, passes";
@@ -78,11 +85,11 @@ const BLOCK_ROW =
   /(?:^[█░#-]{10} )?\d+\/19 · \d+% · \d+ passed|^ {2}▸ .*· (?:live-[ab]|\d+s$)|^ {2}… \d+ more running/;
 
 /**
- * Whether a joined capture line is a permanent line the run prints: the suite's own, the workers'
- * gutter, the foreign writes, the summary, the shell's last word.
+ * Whether a joined capture line is a permanent line the run prints: the suite's own (a failure's
+ * block among them), the workers' gutter, the foreign writes, the summary, the shell's last word.
  */
 const PERMANENT =
-  /^(?:\[cell\] |━━ |— skipped |✔ |↻ |⚠ flaky |✘ |▸ | {2}│ | {2}Error: |\[foreign\] |\(node:\d+\) Warning: |\(Use `node |To open last HTML report| {2}npx playwright show-report| {2}(?:Result|Playwright|Cucumber|Allure) |LIVE EXITED )/;
+  /^(?:\[cell\] |━━ |— skipped |✔ |↻ |⚠ flaky |✘ |▸ | {2}│ | {2}Error: |\[foreign\] |\(node:\d+\) Warning: |\(Use `node |To open last HTML report| {2}npx playwright show-report| {2}(?:Result|Failed|Playwright|Cucumber|Allure|Step|Hook|Setup|Feature|Error|Screenshot|Trace|Rerun) +\S| {14}\S|LIVE EXITED )/;
 
 const run = promisify(execFile);
 
@@ -418,6 +425,12 @@ function problems(history: readonly string[], residueBound = 0): string[] {
   )
     found.push("the runner's warning is not there once");
   once("  │ [probe] a warning from the worker");
+  // The failing scenario's block ends with its rerun command: printed once, never cut or doubled.
+  const reruns = history.filter((line) => line.startsWith("  Rerun "));
+  if (reruns.length !== 1 || !FAILING_RERUN.test(reruns[0] ?? ""))
+    found.push(
+      `the Rerun line is not there once and whole: ${reruns.join(" | ")}`,
+    );
   if (
     !history.some((line) =>
       /^ {2}Result {6}1 failed · 1 flaky · 17 passed, in /.test(line),
@@ -615,7 +628,7 @@ test.describe("the live block in a real terminal (tmux)", () => {
     // the fixture's coloured write keeps its colour as written, and Playwright's HTML report hint is
     // coloured whatever NO_COLOR says (its own writer, after the block is gone).
     const ours =
-      /^(?:✔ |↻ |⚠ flaky |✘ |▸ |━━ | {2}│| {2}Error: |— skipped |\[cell\] | {2}(?:Result|Playwright|Cucumber|Allure) )/;
+      /^(?:✔ |↻ |⚠ flaky |✘ |▸ |━━ | {2}│| {2}Error: |— skipped |\[cell\] | {2}(?:Result|Failed|Playwright|Cucumber|Allure|Step|Hook|Setup|Feature|Error|Screenshot|Trace|Rerun) +\S| {14}\S)/;
     let checked = 0;
     for (const line of watched.seen) {
       const bare = stripVTControlCharacters(line);
