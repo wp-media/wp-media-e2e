@@ -5,6 +5,7 @@ import type { PlaywrightTestConfig, Project } from "@playwright/test";
 import { defineBddConfig } from "playwright-bdd";
 
 import { registerManifest } from "../artifacts/registry";
+import { readArtifactEnv } from "../artifacts/request";
 import {
   BDD_CONFIGS_ENV,
   assertNoForeignBddConfigs,
@@ -117,6 +118,24 @@ const SETUP_TRACE = {
   mode: "retain-on-failure",
   snapshots: { dom: false },
 } as const;
+
+/**
+ * The plugin build the operator chose (`E2E_PLUGIN_REF`, `E2E_PLUGIN_ZIP`, `E2E_PLUGIN_VERSION`), as
+ * the artifacts setup reads it: the terminal reporter names it in a failure's rerun command when the
+ * setup recorded no build, so the rerun tests the same one. Nothing acts on it in the runner. An unset
+ * or blank one is absent.
+ */
+function pluginOverrides(): Pick<
+  RunDescription,
+  "pluginRef" | "pluginZip" | "pluginVersion"
+> {
+  const { pluginRef, pluginZip, pluginVersion } = readArtifactEnv();
+  return {
+    ...(pluginRef !== undefined ? { pluginRef } : {}),
+    ...(pluginZip !== undefined ? { pluginZip } : {}),
+    ...(pluginVersion !== undefined ? { pluginVersion } : {}),
+  };
+}
 
 /**
  * What the run is called and the plugin ref it was asked for, from the two display-only variables an
@@ -349,6 +368,7 @@ export function createProductConfig(
         reportDir,
         reportPath: resolve(REPO_ROOT, reportDir),
         ...displayOnlyFacts(),
+        ...pluginOverrides(),
         reportsKeep: REPORTS_KEEP,
       },
       (selectedCellConfig?.sites ?? []).map((site) => siteLabel(site.baseURL)),

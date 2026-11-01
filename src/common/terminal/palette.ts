@@ -76,10 +76,19 @@ export type SymbolName = keyof typeof SYMBOLS;
 
 /**
  * A status, which always has a symbol, a word and a colour. `error` (a run that could not test) and
- * `killed` (a run stopped by SIGKILL) are the orchestrator's run statuses.
+ * `killed` (a run stopped by SIGKILL) are the orchestrator's run statuses; `could-not-test` (a setup
+ * failed, so nothing ran) and `interrupted` (the run was stopped by a signal) the suite's.
  */
 export type Status =
-  "passed" | "failed" | "flaky" | "stopped" | "warning" | "error" | "killed";
+  | "passed"
+  | "failed"
+  | "flaky"
+  | "stopped"
+  | "warning"
+  | "error"
+  | "killed"
+  | "could-not-test"
+  | "interrupted";
 
 /** How a status is shown. */
 interface StatusStyle {
@@ -102,6 +111,8 @@ export const STATUSES: Readonly<Record<Status, StatusStyle>> = {
   // Each shares its mark and colour with another status: only the word tells them apart.
   error: { symbol: "failed", token: "fail", markAlone: false },
   killed: { symbol: "stopped", token: "stop", markAlone: false },
+  "could-not-test": { symbol: "failed", token: "fail", markAlone: false },
+  interrupted: { symbol: "stopped", token: "stop", markAlone: false },
 };
 
 /** Styles and symbols for one stream, from its capabilities. */

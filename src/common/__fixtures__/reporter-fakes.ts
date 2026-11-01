@@ -18,6 +18,8 @@ export function step(
   options: {
     readonly error?: string;
     readonly steps?: readonly StepLike[];
+    /** Its duration; `-1` for one a crashed worker never ended. Absent: left out, read as ended. */
+    readonly duration?: number;
   } = {},
 ): StepLike {
   return {
@@ -26,6 +28,7 @@ export function step(
     ...(options.error !== undefined
       ? { error: { message: options.error } }
       : {}),
+    ...(options.duration !== undefined ? { duration: options.duration } : {}),
     steps: options.steps ?? [],
   };
 }

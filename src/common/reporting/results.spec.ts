@@ -12,6 +12,7 @@ import {
   MESSAGE_LIMIT,
   RunTally,
   cleanMessage,
+  failedStep,
   finalStatus,
   firstError,
   isNoTestsFound,
@@ -130,6 +131,17 @@ test.describe("cleanMessage", () => {
   test("strips ANSI codes and trailing whitespace", () => {
     expect(cleanMessage("Error: \u001b[31mboom\u001b[39m \n\n")).toBe(
       "Error: boom",
+    );
+  });
+
+  test("a format character inside a credential cannot defeat the mask: it goes first", () => {
+    // Masked first, the token's head alone matched and its tail showed once `plain` joined it.
+    const token = "ghp_A1b2C3d4E5f6G7h8I9\u200bj0K1l2M3n4O5p6Q7r8";
+    expect(cleanMessage(`Error: auth with ${token} failed\nnext`)).toBe(
+      "Error: auth with *** failed\nnext",
+    );
+    expect(cleanMessage("https://admin:pa\u202ess@h.example/")).toBe(
+      "https://***@h.example/",
     );
   });
 
@@ -426,12 +438,14 @@ test.describe("firstError — what a failure shows, and where", () => {
     });
   });
 
-  test("a crash in a Before hook names the hook that was running", () => {
+  test("a crash in a Before hook names the hook that was running: it never ended", () => {
     const steps = [
       step("Before Hooks", "hook", {
+        duration: -1,
         steps: [
           step("BeforeEach Hooks", "hook", {
-            steps: [step("BeforeEach hook", "test.step")],
+            duration: -1,
+            steps: [step("BeforeEach hook", "test.step", { duration: -1 })],
           }),
         ],
       }),
@@ -442,6 +456,63 @@ test.describe("firstError — what a failure shows, and where", () => {
       where: "last-step",
       step: "Before Hooks › BeforeEach Hooks › BeforeEach hook",
     });
+  });
+
+  test("a body that failed with no step, after its Before hooks ended: no step, never a closing hook", () => {
+    // The auth setup failing its preflight, as Playwright 1.63 reported it.
+    const message = "Error: [preflight] Transport verification failed";
+    const steps = [
+      step("Before Hooks", "hook", {
+        duration: 12,
+        steps: [
+          step("beforeEach hook", "hook", { duration: 1 }),
+          step('Fixture "browser"', "fixture", {
+            duration: 10,
+            steps: [step("Launch browser", "pw:api", { duration: 9 })],
+          }),
+        ],
+      }),
+      step("After Hooks", "hook", {
+        duration: 3,
+        steps: [
+          step("afterEach hook", "hook", { duration: 1 }),
+          step("afterEach hook", "hook", { duration: 1 }),
+        ],
+      }),
+      step("Worker Cleanup", "hook", {
+        duration: 5,
+        steps: [step('Fixture "browser"', "fixture", { duration: 5 })],
+      }),
+    ];
+    expect(firstError(attempt(steps, message))).toEqual({
+      message,
+      where: "test",
+    });
+    expect(failedStep(attempt(steps, message))).toBeUndefined();
+    // The same with no duration recorded (read as ended), or no Before Hooks at all.
+    const bare = [
+      step("Before Hooks", "hook"),
+      step("After Hooks", "hook"),
+      step("Worker Cleanup", "hook"),
+    ];
+    expect(failedStep(attempt(bare, message))).toBeUndefined();
+    expect(failedStep(attempt(bare.slice(1), message))).toBeUndefined();
+    // A hook that ended at once (0 ms) ended all the same.
+    const instant = [step("Before Hooks", "hook", { duration: 0 })];
+    expect(failedStep(attempt(instant, message))).toBeUndefined();
+  });
+
+  test("a crash in a closing hook is never named as running: it began after the body", () => {
+    const steps = [
+      beforeHooks(),
+      step("After Hooks", "hook", {
+        duration: -1,
+        steps: [step("AfterEach Hooks", "hook", { duration: -1 })],
+      }),
+    ];
+    expect(
+      failedStep(attempt(steps, "Error: worker process exited")),
+    ).toBeUndefined();
   });
 
   test("never names a Playwright API step, whose title can hold a typed value", () => {
@@ -730,5 +801,147 @@ test.describe("RunTally", () => {
     tally.begin([fake.test]);
     expect(tally.settle()).toEqual([]);
     expect(tally.scenarios).toMatchObject({ total: 1, didNotRun: 1 });
+  });
+});
+
+test.describe("failedStep — the step a failure block and the summary name", () => {
+  test("a failing Gherkin step: itself, never the API steps under it", () => {
+    const steps = [
+      beforeHooks(),
+      step("When the form is filled", "test.step", {
+        error: "Error: no",
+        steps: [step('Fill "s3cr3t"', "pw:api", { error: "Error: no" })],
+      }),
+      afterHooks(),
+    ];
+    expect(failedStep(attempt(steps, "Error: no"))).toEqual({
+      label: "Step",
+      path: ["When the form is filled"],
+      running: false,
+    });
+  });
+
+  test("a Background's failing step is a step too", () => {
+    const steps = [
+      beforeHooks({
+        error: "Error: bg",
+        inside: [
+          step("Background", "hook", {
+            error: "Error: bg",
+            steps: [
+              step("Given a background step", "test.step", {
+                error: "Error: bg",
+              }),
+            ],
+          }),
+        ],
+      }),
+    ];
+    expect(failedStep(attempt(steps, "Error: bg"))?.path).toEqual([
+      "Given a background step",
+    ]);
+  });
+
+  test("a timeout inside a step: the Gherkin step that was running, not its children", () => {
+    const steps = [
+      beforeHooks(),
+      step("When the backup runs", "test.step", {
+        steps: [step("waits for the job", "test.step")],
+      }),
+      afterHooks(),
+    ];
+    expect(failedStep(attempt(steps, "Test timeout"))).toEqual({
+      label: "Step",
+      path: ["When the backup runs"],
+      running: true,
+    });
+  });
+
+  test("a hook or a fixture: its path, labelled Hook", () => {
+    const steps = [
+      step("Before Hooks", "hook", {
+        error: "Error: fixture boom",
+        steps: [
+          step('Fixture "site"', "fixture", { error: "Error: fixture boom" }),
+        ],
+      }),
+    ];
+    expect(failedStep(attempt(steps, "Error: fixture boom"))).toEqual({
+      label: "Hook",
+      path: ["Before Hooks", 'Fixture "site"'],
+      running: false,
+    });
+  });
+
+  test("a setup's own test.step is a Step", () => {
+    const steps = [
+      step("preflight", "test.step", { error: "Error: unreachable" }),
+    ];
+    expect(failedStep(attempt(steps, "Error: unreachable"))).toEqual({
+      label: "Step",
+      path: ["preflight"],
+      running: false,
+    });
+  });
+
+  test("only an API step failed, or no step began: nothing to name", () => {
+    expect(
+      failedStep(
+        attempt(
+          [step('Fill "s3cr3t"', "pw:api", { error: "Error: no" })],
+          "Error: no",
+        ),
+      ),
+    ).toBeUndefined();
+    expect(failedStep(attempt([], "Error: crash"))).toBeUndefined();
+  });
+
+  test("a timeout inside a step, then an After hook failing in its clean-up: the step, running", () => {
+    const timeout = "Test timeout of 1500ms exceeded.";
+    const teardown = "Error: the job would not stop";
+    const closing = afterHooks({
+      error: teardown,
+      inside: [
+        step("AfterEach Hooks", "hook", {
+          error: teardown,
+          steps: [step("@plugin teardown", "test.step", { error: teardown })],
+        }),
+      ],
+    });
+    const steps = [
+      beforeHooks(),
+      step("When the backup runs", "test.step"),
+      closing,
+    ];
+    const result = {
+      errors: [{ message: timeout }, { message: teardown }],
+      steps,
+    };
+    expect(failedStep(result)).toEqual({
+      label: "Step",
+      path: ["When the backup runs"],
+      running: true,
+    });
+    // No step of the body began: neither the hook nor any step, and the first error stands.
+    const bodyless = { ...result, steps: [beforeHooks(), closing] };
+    expect(failedStep(bodyless)).toBeUndefined();
+    expect(firstError(bodyless)).toEqual({ message: timeout, where: "test" });
+  });
+
+  test("an After hook whose own error is the first: named, as the hook that failed", () => {
+    const teardown = "Error: uninstall failed";
+    const steps = [
+      beforeHooks(),
+      step("When the backup runs", "test.step"),
+      afterHooks({
+        error: teardown,
+        inside: [step("AfterEach Hooks", "hook", { error: teardown })],
+      }),
+    ];
+    expect(failedStep(attempt(steps, teardown))).toEqual({
+      label: "Hook",
+      path: ["After Hooks", "AfterEach Hooks"],
+      running: false,
+    });
   });
 });

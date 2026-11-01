@@ -10,6 +10,7 @@ import {
   MAX_COMBINING_MARKS,
   plain,
   redactSecrets,
+  withoutFormat,
 } from "./text";
 
 /** A string escaped this way must match itself, literally, and nothing else. */
@@ -312,6 +313,24 @@ test.describe("maskSiteUrl", () => {
       "https://a.test/wp;jsessionid=S3CR3T",
     ])
       expect(maskSiteUrl(maskSiteUrl(url))).toBe(maskSiteUrl(url));
+  });
+});
+
+test.describe("withoutFormat", () => {
+  test("drops invisible format characters only, joining what they split", () => {
+    expect(withoutFormat("ghp_\u200babc\u202ed\u2060e\u{e0067}")).toBe(
+      "ghp_abcde",
+    );
+    expect(withoutFormat("a\tb\u001b[0m漢字 👩💻")).toBe(
+      "a\tb\u001b[0m漢字 👩💻",
+    );
+  });
+
+  test("so a mask after it finds a token a format character split", () => {
+    const token = "ghp_A1b2C3d4E5f6G7h8I9\u200bj0K1l2M3n4O5p6Q7r8";
+    expect(redactSecrets(withoutFormat(`auth with ${token} failed`))).toBe(
+      "auth with *** failed",
+    );
   });
 });
 

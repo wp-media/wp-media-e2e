@@ -282,6 +282,22 @@ export function withoutControls(text: string): string {
 }
 
 /**
+ * `text` without its invisible format characters ({@link FORMAT}). Dropping one joins the text on its
+ * two sides — a zero-width space inside a token makes it whole again — so text is masked
+ * ({@link redactSecrets}) only after this, never before: a mask that ran first missed the token, and
+ * would leave its tail to show.
+ *
+ * @param text - any text.
+ * @example
+ * ```ts
+ * withoutFormat("ghp_\u200babc"); // "ghp_abc"
+ * ```
+ */
+export function withoutFormat(text: string): string {
+  return text.replace(FORMAT, "");
+}
+
+/**
  * A value as one line of plain text: {@link withoutControls}, then invisible format characters
  * dropped (the ZWJ of an emoji sequence too, which then shows as its parts), runs of combining marks
  * capped at {@link MAX_COMBINING_MARKS}, and the ends trimmed. What sites, setups and the
@@ -296,8 +312,7 @@ export function withoutControls(text: string): string {
  * ```
  */
 export function plain(text: string): string {
-  return withoutControls(text)
-    .replace(FORMAT, "")
+  return withoutFormat(withoutControls(text))
     .replace(EXCESS_MARKS, "$1")
     .trim();
 }

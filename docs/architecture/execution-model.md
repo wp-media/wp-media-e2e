@@ -137,11 +137,46 @@ Three always-on reporters of the suite's own, given the run's facts (`RunDescrip
   (`✔ 18.4s  Feature › Scenario`; the word — `✘ failed`, `⚠ flaky`, `■ stopped` (drained), `— skipped`,
   `■ interrupted` — kept unless a coloured terminal shows a mark no other status shares; `· attempt
   2/3` past the first attempt or on a failure with retries; `· retry not run` for one settled at the end;
-  `· passed unexpectedly` for a `test.fail()` that passed), its first error's line under a failure (past
-  a bare `Error:` label); a `↻ retry` line per attempt due a retry, with how it ended (`failed`, `timed
-  out`, `passed unexpectedly`, `not run: its group failed` — a failed `beforeAll` skipped it);
+  `· passed unexpectedly` for a `test.fail()` that passed; `· timed out`); a `↻ retry` line per attempt
+  due a retry, with how it ended (`failed`, `timed out`, `passed unexpectedly`, `not run: its group
+  failed` — a failed `beforeAll` skipped it) and its first error's line (past a bare `Error:` label);
   errors outside any test (`✘ error`, call log dropped, 12 lines at most; "No tests found" a `⚠
   warning`). Setups count as tests, not scenarios. Lines live in `terminal-lines.ts` (pure).
+  - **Failure blocks** (`failure-block.ts`, pure): under a test's final failure or interrupted final
+    attempt, aligned `Label  value` lines — `Step` (the failing Gherkin step; else `Hook` with the hook
+    or fixture's path; never a `pw:api`/`expect` title, which can quote what was typed — `failedStep`
+    in `results.ts`), `Feature` (the `.feature` file, no line: the reported location is the generated
+    spec), `Error` (the first line), each `Screenshot` and `Trace` path (from the working directory,
+    shell-quoted), and `Rerun`. When no step carries the error (a timeout, a crash), `Step` names the
+    body's last step begun, `· running when the attempt ended`: never `After Hooks` or `Worker
+    Cleanup` (they begin after the body), and a Before hook only if it never ended (a worker that died
+    in it, Playwright's `duration: -1`); a body that failed with no step of its own (a setup's plain
+    `throw`) gets no `Step` line.
+  - **The rerun command**: `E2E_CELL=<cell> [E2E_PLUGIN_REF=<ref> [E2E_PLUGIN_VERSION=<v>] |
+    E2E_PLUGIN_ZIP=<zip>] npm run test:<product> -- --grep=<pattern>` (or `--project=<setup>`). The
+    cell is the test's own — in a run of every cell too, so the rerun runs that cell alone and its pin
+    applies. The pin (`pluginPin`) is what the cell's artifacts setup recorded, in the form a pinned run
+    is handed ([plugin-artifacts.md](plugin-artifacts.md#pre-warming)): the operator's zip when it used
+    one, else `release:<tag>` for a release download, else `commit:<sha>` with the version its zip
+    declares; with no record (the setup failed or never ran), what the operator set (`pluginRef`,
+    `pluginZip`, `pluginVersion`, which the config factory hands the reporters) — only in a run that
+    targeted the cell, as a run of every cell ignores them. The pattern is the **raw** titles from
+    `titlePath()` — the generated spec's path, the Feature, any Rule or Outline, the scenario — each
+    regex-escaped and followed by `(?: @\S+)*`, joined by spaces, after a space and up to `$`,
+    between slashes: Playwright then matches it case-sensitively, with no flags, against
+    `_grepTitleWithTags()` (project, file, describes and title, each followed by its tags), so only
+    that scenario and its exact duplicates are selected — not `Create a backup encrypted` nor
+    `Untagged Create a backup`. Every control, format character, line separator, lone surrogate and
+    combining mark past the eighth in a run is written as a `\uXXXX` escape, so the command holds only
+    visible characters and still selects the test. Values are single-quoted when a shell would read
+    them otherwise (`=` included: zsh expands `=cmd` in an assignment). The command is never cut: one
+    quoting a credential's shape, holding a control (a zip path, ref or version can), or past 2,000
+    characters is refused, `Rerun  not shown: <why>`. A credential-shaped title also withholds the
+    `Screenshot`/`Trace` paths (`not shown: …`): Playwright names the folder after the title, cut and
+    hashed, past what masking can find. A failed setup's block opens with `Setup  <project> — no
+    scenario of its cell runs without it`. Every other value is plain, masked, then capped; the
+    glyphs are the palette's (ASCII under plain output). One block per final failure; an attempt due a
+    retry keeps its one error line.
   - **Worker output** (`onStdOut`/`onStdErr`; Playwright's `BaseReporter` only stores it, so without
     this the `[artifacts]`, `[site]`, `[auth]` lines and worker warnings vanish): printed **as it
     comes**, line by line, on a terminal and in a pipe alike, in a `  │` gutter — so a run SIGKILLed
@@ -222,14 +257,20 @@ Three always-on reporters of the suite's own, given the run's facts (`RunDescrip
   failed write warns once (through the terminal sink, else stderr), never fails the run. No `run.end` means the runner died (SIGTERM,
   SIGKILL); `mode: "list"`, or no tests, marks a run that ran nothing.
 - **The end-of-run summary** ([`reporting/run-summary.ts`](../../src/common/reporting/run-summary.ts)),
-  the last reporter, prints in `onExit`, below everything (Playwright's counts included), uncoloured
-  under `E2E_OUTPUT=plain` (its `output` option): the verdict
+  the last reporter, prints in `onExit`, below everything (Playwright's counts included), after a blank
+  line and with none after it. Its header is a heavy rule as wide as the terminal (`COLUMNS`, else 80,
+  in a pipe; never cutting its words); colours (by palette token: its `Styler`), the verdict's mark and
+  its own glyphs (frame, separators, breadcrumbs, dashes, ellipses) come from the terminal palette, so
+  `E2E_OUTPUT=plain` (its `output` option) makes it colourless with those glyphs ASCII (`== backwpup .
+  pro@nginx (pro) == x FAILED ==`, `F > S - When x`); the phrases it shares with the reports (the
+  counts, the plugin, the site) keep their `·`. The verdict
   (`✔ PASSED`, `✘ FAILED`, `✘ COULD NOT TEST` for a failed setup, `■ INTERRUPTED`, `■ STOPPED` when the
   drain skipped a scenario, `NO TESTS` only when no error came from outside a test — a spec that would
-  not load plans none either and is `FAILED`); the counts (drain skips as `stopped`) and duration; each
-  outside-test error (`Error`) and failed setup's first line; the plugin and sites tested (from the
-  setups' attachments, `setup-facts.ts`); the three reports as paths from the working directory (quoted
-  when a shell would split them). Site and setup text is printed plain (no escape sequence or control
+  not load plans none either and is `FAILED`); the counts (drain skips as `stopped`) and duration;
+  `Failed`: each scenario that failed for good, `Feature › Scenario — <failed step>` (`failedStep`),
+  the first ten, then `and N more`; each outside-test error (`Error`) and failed setup's first line; the plugin and sites tested (from the
+  setups' attachments, `setup-facts.ts`); the three reports as paths from the working directory (plain,
+  quoted when a shell would split them). Site and setup text is printed plain (no escape sequence or control
   character), credentials masked (`displayText`); an interrupted setup is not called failed. Silent for
   `--list`; a SIGTERM ends a run before any `onExit`. It first prunes the run's report group
   ([Report retention](#report-retention)); a `Pruned` line says what went, only when something did.

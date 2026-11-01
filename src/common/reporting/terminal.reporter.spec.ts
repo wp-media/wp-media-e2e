@@ -19,10 +19,12 @@ import {
   captureWrites,
   fakeSuite,
   fakeTest,
+  jsonAttachment,
   step,
   type FakeTest,
 } from "../__fixtures__/reporter-fakes";
 import { STOPPED_ANNOTATION } from "../config/drain";
+import { ARTIFACTS_ATTACHMENT } from "../setup/attachments";
 import { REPAINT_GAP_MS } from "../terminal/live";
 import type { RunDescription } from "./run-description";
 import { describeCounts } from "./run-summary";
@@ -140,6 +142,7 @@ function harness(
     argv: deps.argv ?? ["node", "cli.js", "test"],
     stdoutIntercepted: deps.stdoutIntercepted ?? false,
     warn: deps.warn ?? ((message) => warnings.push(message)),
+    cwd: deps.cwd ?? "/repo",
   });
   built.push(reporter);
   return {
@@ -157,6 +160,19 @@ function scenario(id: string, title: string, retries = 1): FakeTest {
     titles: ["demo.feature.spec.js", "Backups", title],
     retries,
   });
+}
+
+/**
+ * The `--grep` word a rerun prints, written out: each part (regex-escaped by the caller) followed by
+ * its tags, from the file to the title, after a space and up to the end — single-quoted.
+ */
+function grepWord(...parts: string[]): string {
+  return `--grep='/ ${parts.map((part) => `${part}(?: @\\S+)*`).join(" ")}$/'`;
+}
+
+/** {@link grepWord} for a {@link scenario}. */
+function demoGrep(title: string): string {
+  return grepWord("demo\\.feature\\.spec\\.js", "Backups", title);
 }
 
 /** The auth setup of the cell. */
@@ -223,7 +239,10 @@ test.describe("TerminalReporter — the run's lines in a pipe", () => {
       "↻ retry 8.1s  Backups › Delete a backup · attempt 1/2 · failed",
       "  Error: boom (attempt 1)",
       "✘ failed 8.1s  Backups › Delete a backup · attempt 2/2",
-      "  Error: boom (attempt 2)",
+      "  Step        When it breaks",
+      "  Feature     src/projects/demo/features/demo.feature",
+      "  Error       Error: boom (attempt 2)",
+      `  Rerun       E2E_CELL=x npm run test:demo -- ${demoGrep("Delete a backup")}`,
     ]);
     expect(h.warnings).toEqual([]);
   });
@@ -258,8 +277,12 @@ test.describe("TerminalReporter — the run's lines in a pipe", () => {
       "■ stopped 0.0s  Backups › Begins after the stop",
       "— skipped 0.0s  Backups › Is skipped",
       "■ interrupted 1.5s  Backups › Is interrupted · attempt 1/2",
-      "  Error: the run was interrupted",
+      "  Feature     src/projects/demo/features/demo.feature",
+      "  Error       Error: the run was interrupted",
+      `  Rerun       E2E_CELL=x npm run test:demo -- ${demoGrep("Is interrupted")}`,
       "✘ failed 0.2s  Backups › Crashes",
+      "  Feature     src/projects/demo/features/demo.feature",
+      `  Rerun       E2E_CELL=x npm run test:demo -- ${demoGrep("Crashes")}`,
     ]);
   });
 
@@ -276,7 +299,10 @@ test.describe("TerminalReporter — the run's lines in a pipe", () => {
       "▸ Backups › Never retried",
       "  │ late",
       "✘ failed 0.3s  Backups › Never retried · attempt 1/2 · retry not run",
-      "  Error: no baseline",
+      "  Step        When it breaks",
+      "  Feature     src/projects/demo/features/demo.feature",
+      "  Error       Error: no baseline",
+      `  Rerun       E2E_CELL=x npm run test:demo -- ${demoGrep("Never retried")}`,
     ]);
   });
 
@@ -302,6 +328,8 @@ test.describe("TerminalReporter — the run's lines in a pipe", () => {
     expect(h.lines().slice(1)).toEqual([
       "↻ retry 0.1s  Backups › Is expected to fail · attempt 1/2 · passed unexpectedly",
       "✘ failed 0.1s  Backups › Is expected to fail · attempt 2/2 · passed unexpectedly",
+      "  Feature     src/projects/demo/features/demo.feature",
+      `  Rerun       E2E_CELL=x npm run test:demo -- ${grepWord("f\\.spec\\.js", "Backups", "Is expected to fail")}`,
     ]);
   });
 
@@ -343,6 +371,362 @@ test.describe("TerminalReporter — the run's lines in a pipe", () => {
     begin(h, [scenario("a", "One")]);
     expect(h.lines()).toEqual([
       "[run] demo · every cell · run-1 · ref develop · 1 scenario",
+    ]);
+  });
+});
+
+test.describe("TerminalReporter — failure blocks", () => {
+  const COMMIT = "af1ab5c4d2e6f8a0b1c3d5e7f9a1b3c5d7e9f1a3";
+
+  /** The artifacts setup of a cell (`x` by default). */
+  function artifactsSetup(project = "artifacts:x"): FakeTest {
+    return fakeTest({
+      id: `artifacts-${project}`,
+      project,
+      titles: ["artifacts.setup.ts", "resolve and verify"],
+    });
+  }
+
+  /** Ends the artifacts setup, passing, with its record of the plugin. */
+  function resolved(
+    h: Harness,
+    setup: FakeTest,
+    artifact: Record<string, unknown>,
+  ): void {
+    end(h, setup, {
+      status: "passed",
+      attachments: [
+        jsonAttachment(ARTIFACTS_ATTACHMENT, {
+          ok: true,
+          roles: [{ role: "plugin", ok: true, checks: [], info: {}, artifact }],
+        }),
+      ],
+    });
+  }
+
+  test("a scenario's final failure: its step, feature, error, screenshots, trace, and a rerun of the commit tested", () => {
+    const h = harness();
+    const artifacts = artifactsSetup();
+    const fails = scenario("c", "Delete a backup", 0);
+    begin(h, [artifacts, fails]);
+    resolved(h, artifacts, {
+      ref: "develop",
+      commit: COMMIT,
+      source: "default-ref",
+    });
+    end(h, fails, {
+      ...failing("Error: boom"),
+      attachments: [
+        {
+          name: "screenshot",
+          path: "/repo/test-results/demo/x/c/test-failed-1.png",
+          contentType: "image/png",
+        },
+        {
+          name: "trace",
+          path: "/repo/test-results/demo/x/c/trace.zip",
+          contentType: "application/zip",
+        },
+        {
+          name: "video",
+          path: "/repo/test-results/demo/x/c/video.webm",
+          contentType: "video/webm",
+        },
+      ],
+    });
+    expect(h.lines().slice(2)).toEqual([
+      "✘ failed 8.1s  Backups › Delete a backup",
+      "  Step        When it breaks",
+      "  Feature     src/projects/demo/features/demo.feature",
+      "  Error       Error: boom",
+      "  Screenshot  test-results/demo/x/c/test-failed-1.png",
+      "  Trace       test-results/demo/x/c/trace.zip",
+      `  Rerun       E2E_CELL=x E2E_PLUGIN_REF=commit:${COMMIT} npm run test:demo -- ${demoGrep("Delete a backup")}`,
+    ]);
+  });
+
+  test("the operator's zip, when the artifacts setup used it", () => {
+    const h = harness({ ...RUN, pluginZip: "/my zips/demo.zip" });
+    const artifacts = artifactsSetup();
+    const fails = scenario("c", "Delete", 0);
+    begin(h, [artifacts, fails]);
+    resolved(h, artifacts, { zipFilename: "demo.zip", source: "env-zip" });
+    end(h, fails, failing("Error: boom"));
+    expect(h.lines().at(-1)).toBe(
+      `  Rerun       E2E_CELL=x E2E_PLUGIN_ZIP='/my zips/demo.zip' npm run test:demo -- ${demoGrep("Delete")}`,
+    );
+  });
+
+  test("no record of the build: the operator's ref and version", () => {
+    const h = harness({
+      ...RUN,
+      pluginRef: "feature/x",
+      pluginVersion: "9.99.99",
+    });
+    const fails = scenario("c", "Delete", 0);
+    begin(h, [fails]);
+    end(h, fails, failing("Error: boom"));
+    expect(h.lines().at(-1)).toBe(
+      `  Rerun       E2E_CELL=x E2E_PLUGIN_REF=feature/x E2E_PLUGIN_VERSION=9.99.99 npm run test:demo -- ${demoGrep("Delete")}`,
+    );
+  });
+
+  test("a release download reruns its tag, never the selector the operator gave", () => {
+    const h = harness({ ...RUN, pluginRef: "release:latest-stable" });
+    const artifacts = artifactsSetup();
+    const fails = scenario("c", "Delete", 0);
+    begin(h, [artifacts, fails]);
+    end(h, artifacts, {
+      status: "passed",
+      attachments: [
+        jsonAttachment(ARTIFACTS_ATTACHMENT, {
+          ok: true,
+          roles: [
+            {
+              role: "plugin",
+              ok: true,
+              checks: [],
+              info: { pin: "release:3.17.4" },
+              artifact: {
+                ref: "release:latest-stable",
+                commit: "release-3.17.4",
+                version: "3.17.4",
+                source: "env-ref",
+              },
+            },
+          ],
+        }),
+      ],
+    });
+    end(h, fails, failing("Error: boom"));
+    expect(h.lines().at(-1)).toBe(
+      `  Rerun       E2E_CELL=x E2E_PLUGIN_REF=release:3.17.4 npm run test:demo -- ${demoGrep("Delete")}`,
+    );
+  });
+
+  test("a run of every cell names the test's cell, and drops what the operator set: that run ignored it", () => {
+    const { cell: _cell, edition: _edition, ...everyCell } = RUN;
+    const h = harness({
+      ...everyCell,
+      reportCell: "_all",
+      pluginRef: "feature/x",
+      pluginZip: "/z.zip",
+      pluginVersion: "1.0",
+    });
+    const fails = scenario("c", "Delete", 0);
+    begin(h, [fails]);
+    end(h, fails, failing("Error: boom"));
+    expect(h.lines().at(-1)).toBe(
+      `  Rerun       E2E_CELL=x npm run test:demo -- ${demoGrep("Delete")}`,
+    );
+  });
+
+  test("each cell's own cell and build in a run of every cell", () => {
+    const { cell: _cell, edition: _edition, ...everyCell } = RUN;
+    const h = harness({ ...everyCell, reportCell: "_all" });
+    const artifactsY = artifactsSetup("artifacts:y");
+    const inY = fakeTest({
+      id: "y1",
+      project: "y",
+      titles: ["f.feature.spec.js", "F", "In y"],
+    });
+    const inX = fakeTest({
+      id: "x1",
+      project: "x",
+      titles: ["f.feature.spec.js", "F", "In x"],
+    });
+    begin(h, [artifactsY, inY, inX]);
+    resolved(h, artifactsY, { commit: COMMIT, source: "default-ref" });
+    end(h, inY, failing("Error: y"));
+    end(h, inX, failing("Error: x"));
+    const reruns = h.lines().filter((line) => line.startsWith("  Rerun"));
+    expect(reruns).toEqual([
+      `  Rerun       E2E_CELL=y E2E_PLUGIN_REF=commit:${COMMIT} npm run test:demo -- ${grepWord("f\\.feature\\.spec\\.js", "F", "In y")}`,
+      `  Rerun       E2E_CELL=x npm run test:demo -- ${grepWord("f\\.feature\\.spec\\.js", "F", "In x")}`,
+    ]);
+  });
+
+  test("a failed setup gets its own block: what it holds up, its step, its error, a rerun of its project", () => {
+    const h = harness();
+    const artifacts = artifactsSetup();
+    const auth = authSetup();
+    begin(h, [artifacts, auth, scenario("a", "Never runs")]);
+    resolved(h, artifacts, { commit: COMMIT, source: "default-ref" });
+    end(h, auth, {
+      status: "failed",
+      duration: 3_000,
+      errors: ["Error: [preflight] transport unreachable\n  details"],
+      steps: [
+        step("preflight", "test.step", {
+          error: "Error: [preflight] transport unreachable",
+        }),
+      ],
+    });
+    expect(h.lines().slice(2)).toEqual([
+      "✘ failed 3.0s  auth.setup.ts › authenticate site pool",
+      "  Setup       setup:x — no scenario of its cell runs without it",
+      "  Step        preflight",
+      "  Error       Error: [preflight] transport unreachable",
+      `  Rerun       E2E_CELL=x E2E_PLUGIN_REF=commit:${COMMIT} npm run test:demo -- --project=setup:x`,
+    ]);
+  });
+
+  test("a failed artifacts setup: the operator's ref, since it built nothing", () => {
+    const h = harness({ ...RUN, pluginRef: "develop" });
+    const artifacts = artifactsSetup();
+    begin(h, [artifacts]);
+    end(h, artifacts, {
+      status: "failed",
+      errors: ["Error: [artifacts] build failed"],
+      attachments: [
+        jsonAttachment(ARTIFACTS_ATTACHMENT, {
+          ok: false,
+          roles: [
+            {
+              role: "plugin",
+              ok: false,
+              checks: [{ name: "resolved", ok: false, detail: "no" }],
+            },
+          ],
+        }),
+      ],
+    });
+    expect(h.lines().at(-1)).toBe(
+      "  Rerun       E2E_CELL=x E2E_PLUGIN_REF=develop npm run test:demo -- --project=artifacts:x",
+    );
+  });
+
+  test("a final timeout says so; its block names the step that was running", () => {
+    const h = harness();
+    const slow = scenario("t", "Times out", 0);
+    begin(h, [slow]);
+    end(h, slow, {
+      status: "timedOut",
+      duration: 30_000,
+      errors: ["Test timeout of 30000ms exceeded."],
+      steps: [
+        step("Before Hooks", "hook"),
+        step("When the job runs", "test.step", {
+          steps: [step('Fill "x"', "pw:api")],
+        }),
+        step("After Hooks", "hook"),
+      ],
+    });
+    expect(h.lines().slice(1, 3)).toEqual([
+      "✘ failed 30.0s  Backups › Times out · timed out",
+      "  Step        When the job runs · running when the attempt ended",
+    ]);
+    expect(h.lines()).toContain(
+      "  Error       Test timeout of 30000ms exceeded.",
+    );
+  });
+
+  test("a value typed into a field never reaches the block: no API step title, no params", () => {
+    const h = harness();
+    const fails = scenario("s", "Log in", 0);
+    begin(h, [fails]);
+    end(h, fails, {
+      status: "failed",
+      errors: ["Error: expect(locator).toHaveText(expected) failed"],
+      steps: [
+        step("When I log in", "test.step", {
+          error: "Error: expect(locator).toHaveText(expected) failed",
+          steps: [
+            step('Fill "canary-1f2e3d"', "pw:api"),
+            step('Expect "toHaveText"', "expect", {
+              error: "Error: expect(locator).toHaveText(expected) failed",
+            }),
+          ],
+        }),
+      ],
+    });
+    expect(h.stdout.text()).not.toContain("canary");
+    expect(h.lines()).toContain("  Step        When I log in");
+  });
+
+  test("a flaky scenario and a passing one print no block; a retry keeps its one error line", () => {
+    const h = harness();
+    const flaky = scenario("f", "Flaky");
+    begin(h, [flaky]);
+    end(h, flaky, failing("Error: once"));
+    end(h, flaky, { status: "passed" });
+    expect(h.lines().slice(1)).toEqual([
+      "↻ retry 8.1s  Backups › Flaky · attempt 1/2 · failed",
+      "  Error: once",
+      "⚠ flaky 0.1s  Backups › Flaky · attempt 2/2",
+    ]);
+  });
+
+  test("one title in two features: each command selects its own; a duplicate in one feature prints the same", () => {
+    const h = harness();
+    const one = fakeTest({
+      id: "1",
+      titles: ["a.feature.spec.js", "A", "Same"],
+    });
+    const two = fakeTest({
+      id: "2",
+      titles: ["b.feature.spec.js", "B", "Same"],
+    });
+    const twin = fakeTest({
+      id: "3",
+      titles: ["b.feature.spec.js", "B", "Same"],
+    });
+    begin(h, [one, two, twin]);
+    end(h, one, failing("Error: 1"));
+    end(h, two, failing("Error: 2"));
+    end(h, twin, failing("Error: 3"));
+    const reruns = h.lines().filter((line) => line.startsWith("  Rerun"));
+    const inB = `  Rerun       E2E_CELL=x npm run test:demo -- ${grepWord("b\\.feature\\.spec\\.js", "B", "Same")}`;
+    expect(reruns).toEqual([
+      `  Rerun       E2E_CELL=x npm run test:demo -- ${grepWord("a\\.feature\\.spec\\.js", "A", "Same")}`,
+      inB,
+      inB,
+    ]);
+  });
+
+  test("a title with control characters: the head line plain, the command escaped, no control printed", () => {
+    const h = harness();
+    const nasty = scenario(
+      "n",
+      "Red \u001b[31malert\u001b[0m\u202e and 'quote' $x",
+      0,
+    );
+    begin(h, [nasty]);
+    end(h, nasty, failing("Error: boom"));
+    for (const line of h.lines()) {
+      expect(line).not.toMatch(/[\p{Cc}\p{Cf}]/u);
+    }
+    expect(h.lines()[1]).toBe(
+      "✘ failed 8.1s  Backups › Red alert and 'quote' $x",
+    );
+    expect(h.lines().at(-1)).toBe(
+      `  Rerun       E2E_CELL=x npm run test:demo -- ${demoGrep("Red \\u001b\\[31malert\\u001b\\[0m\\u202e and '\\''quote'\\'' \\$x")}`,
+    );
+  });
+
+  test("a narrow terminal (20 columns) changes nothing: permanent lines are never cut to it", () => {
+    const wide = harness();
+    const narrow = harness(RUN, { env: { COLUMNS: "20" } });
+    for (const h of [wide, narrow]) {
+      const fails = scenario(
+        "c",
+        "A scenario with a long title that runs past twenty",
+        0,
+      );
+      begin(h, [fails]);
+      end(h, fails, failing("Error: boom"));
+    }
+    expect(narrow.lines().slice(1)).toEqual(wide.lines().slice(1));
+  });
+
+  test("options missing a field: the failure prints its error line, no block", () => {
+    const h = harness({});
+    const fails = scenario("c", "Delete", 0);
+    begin(h, [fails]);
+    end(h, fails, failing("Error: boom"));
+    expect(h.lines()).toEqual([
+      "✘ failed 8.1s  Backups › Delete",
+      "  Error: boom",
     ]);
   });
 });
@@ -580,6 +964,8 @@ test.describe("TerminalReporter — worker output", () => {
       "▸ Backups › Runs long",
       "  │ partial",
       "■ interrupted 0.8s  Backups › Runs long",
+      "  Feature     src/projects/demo/features/demo.feature",
+      `  Rerun       E2E_CELL=x npm run test:demo -- ${demoGrep("Runs long")}`,
     ]);
   });
 
@@ -1057,7 +1443,10 @@ test.describe("TerminalReporter — the live block", () => {
     expect(h.scheduler.timers.size).toBe(0);
     // The settled test's lines come after the block is gone, as plain lines.
     expect(stripVTControlCharacters(h.stdout.all)).toMatch(
-      /\n✘ 8\.1s {2}Backups › Never retried · attempt 1\/2 · retry not run\n {2}Error: no baseline\n$/,
+      /\n✘ 8\.1s {2}Backups › Never retried · attempt 1\/2 · retry not run\n {2}Step {8}When it breaks\n {2}Feature {5}src\/projects\/demo\/features\/demo\.feature\n {2}Error {7}Error: no baseline\n {2}Rerun {7}E2E_CELL=x npm run test:demo -- (.+)\n$/,
+    );
+    expect(stripVTControlCharacters(h.stdout.all).split("\n").at(-2)).toBe(
+      `  Rerun       E2E_CELL=x npm run test:demo -- ${demoGrep("Never retried")}`,
     );
     await h.reporter.onExit();
     expect(h.stdout.blocking).toEqual([false, true]);
