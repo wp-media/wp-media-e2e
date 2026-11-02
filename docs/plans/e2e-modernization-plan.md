@@ -411,8 +411,8 @@ Phase 7 — Terminal output (done 2026-11-01). The suite and the orchestrator.
   read as unset 2, `FORCE_COLOR`'s off values case-sensitive 1, `UTF-8` with its dash unrecognised 1,
   an empty `LC_ALL` read as no locale at all (UTF-8) 1; flipping the orchestrator's `forceColorWithoutTty` is equivalent there (no screen
   opens on a pipe, so the flag only meets TTYs).
-- Measured facts that justify behaviour (ids kept from the full table at b88ed9a; 2026-10-23 to
-  11-01, Node 24.21/26.12, macOS unless said):
+- Measured facts that justify behaviour (ids kept from the full 7V1–7V91 table at b88ed9a, 7V92
+  on added since; 2026-10-23 to 11-02, Node 24.21/26.12, macOS unless said):
 
   | #    | Claim                                                                                                                                                                                                                                 | Evidence                                                                                                     |
   | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
@@ -462,11 +462,11 @@ Phase 7 — Terminal output (done 2026-11-01). The suite and the orchestrator.
   | 7V85 | Left unmigrated, on purpose: `orchestrator/tasks/run-lines.ts` and `notify/subscribe.ts` glyphs (the orchestrator keeps its piped bytes, Unicode included — 7.3's contract); Slack and Datator text (not a terminal); `results.ts`' ` › ` path (data in `results.jsonl`); the `__fixtures__` that emit SGR (they test the stripping); escapes in TSDoc examples; `run-summary.ts`' `describePlugin`/`describeSite` (` · `, ` — `: also the run facts' report titles and metadata) and `describeCounts` (` · `, the summary's `Result` only; takes the palette's separator since 7.4b). `capture-backwpup-fixtures.ts` is migrated but only type-checked: it needs a real Pro site. | grep, 2026-11-01 |
   | 7V87 | Audit A-F1 reproduced (a script rendering each printer with hostile input, `E2E_OUTPUT=plain`): a check's detail/hint (healthcheck), warm's errors, warnings and paths, the elevation/plugin-folder banners' transport and folders printed raw — 15 `ESC`, 13 `ghp_` tokens, 6 U+200B; a multi-line detail broke out of its indent. Same raw path in a run: `settleSiteLeftovers`' and the heal's `[preflight]` warnings (the terminal reporter cleans a worker's lines; `--reporter`/`PW_TEST_REPORTER` do not). Fix: `printableLine`/`printableLines` (`text.ts`: `plain` then `redactSecrets`, per line, indent kept — `suiteLine` now its capped form); `checkLines(…, "printed")` (detail's further lines under its first; the thrown `report` path unchanged); `warm-lines.ts`, the banners' `siteLine`, both `[preflight]` warnings, APVM's printed progress (`plain`). Found: `redactBuildText` let a U+200B inside a legacy (40-hex) token skip the value mask — now drops format characters first (reports too). After: 0/0/0. | repro, specs, 2026-11-01 |
   | 7V89 | U2 (invalid `E2E_OUTPUT` in healthcheck/warm: exit 1 with a stack trace): left — the suite reports a bad env value the same way (the config's throw, Playwright prints its stack), and so do the scripts' own (`HEALTHCHECK_CONCURRENCY=abc`). The message names the variable and the allowed values. | runs, 2026-11-01 |
-  | 7V90 | CI flake (run 41394142927, tmux 3.4: 6 residue lines > bound 5 after the 100×30→80×24 resize) reproduced: `live.tmux.spec.ts` failed 3/60 on macOS (tmux 3.8) and 3/60 on Ubuntu 24.04 (tmux 3.4) under CPU load, 0/40 idle. Cause: the driver redrew every 10 ms (50 ms throttle) while the spec resized; in all 5 logged failures a draw at the old width was written between `resize-window` and the driver's `resize` event, so tmux reflowed it too (its clear reached 8 of the 13 split lines) and the erase then left a second block's parts. Holding the `resize` handler 120 ms: 4/4 fail (9–12 lines), permanent lines intact; 0 ms: 0/10. Inherent (Node's sizes update only on `SIGWINCH`'s handler; bytes already queued are read at the new size), so not a `live.ts` bug: its TSDoc now says so. Fix, spec only: after each phase the driver redraws 15 times, then leaves a `L|ready <n>` block and writes nothing until the resize; the spec resizes on seeing it, and a window's rows are that block only (tighter: a burst row is residue). Pending-timer-at-resize ordering stays covered by `live.spec.ts` (fake scheduler). After: 0/160 macOS, 0/80 Linux, under load; mutants (resize writes nothing, erases one row, old `\r\x1b[J` erase) still fail. `live-block.run.spec.ts`'s narrowing test has the same exposure: deferred to Phase 10. Audit: the spec waits for the whole ready block on the pane, not just its first row (a partly read write could reopen the gap). | timing-logged probe driver, `--repeat-each`, 2026-11-02 |
+  | 7V92 | CI flake (run 41394142927, tmux 3.4: 6 residue lines > bound 5 after the 100×30→80×24 resize) reproduced: `live.tmux.spec.ts` failed 3/60 on macOS (tmux 3.8) and 3/60 on Ubuntu 24.04 (tmux 3.4) under CPU load, 0/40 idle. Cause: the driver redrew every 10 ms (50 ms throttle) while the spec resized; in all 5 logged failures a draw at the old width was written between `resize-window` and the driver's `resize` event, so tmux reflowed it too (its clear reached 8 of the 13 split lines) and the erase then left a second block's parts. Holding the `resize` handler 120 ms: 4/4 fail (9–12 lines), permanent lines intact; 0 ms: 0/10. Inherent (Node's sizes update only on `SIGWINCH`'s handler; bytes already queued are read at the new size), so not a `live.ts` bug: its TSDoc now says so. Fix, spec only: after each phase the driver redraws 15 times, then leaves a `L|ready <n>` block and writes nothing until the resize; the spec resizes on seeing it, and a window's rows are that block only (tighter: a burst row is residue). Pending-timer-at-resize ordering stays covered by `live.spec.ts` (fake scheduler). After: 0/160 macOS, 0/80 Linux, under load; mutants (resize writes nothing, erases one row, old `\r\x1b[J` erase) still fail. `live-block.run.spec.ts`'s narrowing test has the same exposure: deferred to Phase 10. Audit: the spec waits for the whole ready block on the pane, not just its first row (a partly read write could reopen the gap). | timing-logged probe driver, `--repeat-each`, 2026-11-02 |
 
 - Limits, accepted and documented: SIGKILL leaves a block or table (`clear`/`reset`); keys typed
   mid-run echo below the table; a narrowed block leaves bounded parts of the old one (7V24, 7V76), a
-  draw racing the resize signal its own too (7V90); a partial line held at close is written raw,
+  draw racing the resize signal its own too (7V92); a partial line held at close is written raw,
   permanent lines queue unbounded while a terminal is paused, a paused run lingers until resumed
   (7V54); Node's `NO_COLOR`-ignored warning under `FORCE_COLOR` (7V17); `--add-reporter` with a
   printing reporter doubles every line, an added `list` prints errors unmasked; a foreign coloured
@@ -522,15 +522,21 @@ Phase 10 — Cleanup & validation (open).
   leave a stale row; a narrowing below the table's width leaves the old table's top rows — both
   documented in the guide, not fixed (7V76). `table.tmux.spec.ts` covers one
   and three Ctrl-Cs, not two alone: a runner that ignores SIGINT waits for the 4-minute interrupt
-  budget; add it once the fake start takes a shorter budget. Its Linux run (tmux 3.4) is CI's first.
+  budget; add it once the fake start takes a shorter budget. On Linux (CI, tmux 3.4) all 7 pass (runs
+  41364712637, 2026-11-01; 41402620035, 2026-11-02).
 - Deferred (7.4a): `capture-backwpup-fixtures.ts`' migrated output is unverified live (needs a Pro
   site): check it on the next fixture capture.
-- Deferred (7V90): `live-block.run.spec.ts`'s "narrowed mid-run, 60×14 to 40×10" can meet the same
+- Deferred (7V92): `live-block.run.spec.ts`'s "narrowed mid-run, 60×14 to 40×10" can meet the same
   race as `live.tmux.spec.ts` did — a redraw (the block is redrawn ~2/s) written at the old size
   after the pane changed, before `SIGWINCH` is handled, leaving a second block's parts past its
   bound of 3. Not reproduced (audit: 0/10 on macOS under 12 busy loops). If it appears, resize only
   while the block is quiet (the whole block on the pane, nothing pending), as `live.tmux.spec.ts`
   does; never raise the bound.
+- Deferred (manual, not automatable): resize has been measured only in tmux 3.8/3.4 and xterm.js
+  (7V24, 7V92). Resize iTerm2 and macOS Terminal.app windows (narrower, wider, height only) while a
+  suite run shows its live block and while the orchestrator shows its table: every permanent line
+  must stay intact, leaving only the bounded residue in Phase 7's Limits. Record it as a 7V row; a
+  terminal that reflows differently is measured and decided there.
 - Deferred: `src/common/wp/exec.ssh.spec.ts` is flaky (~0.7 % of runs): ssh2 1.17.0's
   `generateKeyPairSync("ed25519")` yields a key its own `parseKey` rejects 0.34 % of the time
   (68/20,000). Regenerate until `parseKey` accepts it, or commit fixed test keys.
