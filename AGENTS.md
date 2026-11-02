@@ -46,7 +46,7 @@ src/
 │   ├── pages/              # cross-product page objects (plugins, site-health) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm + warm-lines.ts its output, pin)
-│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), the live region's tmux driver (live-tmux*), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/)
+│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/)
 │   └── wp/                 # WordPress over WP-CLI (exec, php, staging, plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
@@ -186,7 +186,9 @@ Schema: **[configuration.md](docs/guides/configuration.md)**.
 - **`.env`** (from `.env.example`, loaded by [`load-env.ts`](src/common/config/load-env.ts)):
   runtime flags and BackWPup storage credentials. Real env vars win; `E2E_LOAD_DOTENV=false` in the
   environment skips the file. Read env only through the typed accessors in
-  [`env.ts`](src/common/config/env.ts).
+  [`env.ts`](src/common/config/env.ts) — `outputModeEnv` for `E2E_OUTPUT` (`auto|plain|fancy`, the
+  suite's and its scripts' terminal output; [configuration.md → Terminal
+  output](docs/guides/configuration.md#terminal-output); the orchestrator reads no `E2E_*`).
 
 ## Fixtures
 

@@ -269,8 +269,8 @@ Three always-on reporters of the suite's own, given the run's facts (`RunDescrip
   in a pipe; never cutting its words); colours (by palette token: its `Styler`), the verdict's mark and
   its own glyphs (frame, separators, breadcrumbs, dashes, ellipses) come from the terminal palette, so
   `E2E_OUTPUT=plain` (its `output` option) makes it colourless with those glyphs ASCII (`== backwpup .
-  pro@nginx (pro) == x FAILED ==`, `F > S - When x`); the phrases it shares with the reports (the
-  counts, the plugin, the site) keep their `·`. The verdict
+  pro@nginx (pro) == x FAILED ==`, `F > S - When x`, `1 failed . 2 passed`); the phrases it shares
+  with the reports (the plugin, the site) keep their `·`. The verdict
   (`✔ PASSED`, `✘ FAILED`, `✘ COULD NOT TEST` for a failed setup, `■ INTERRUPTED`, `■ STOPPED` when the
   drain skipped a scenario, `NO TESTS` only when no error came from outside a test — a spec that would
   not load plans none either and is `FAILED`); the counts (drain skips as `stopped`) and duration;

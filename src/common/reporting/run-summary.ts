@@ -79,8 +79,8 @@ import {
  *
  * The rule is as wide as the terminal (`COLUMNS`, else 80, in a pipe); colours, the verdict's mark and
  * its own glyphs (frame, separators, breadcrumbs, dashes, ellipses) come from the terminal palette —
- * colourless, those glyphs ASCII, under `E2E_OUTPUT=plain`. The phrases it shares with the reports (the
- * counts, the plugin, the site) keep their own wording, `·` included.
+ * colourless, those glyphs ASCII, under `E2E_OUTPUT=plain` — the counts' separators too. The phrases
+ * it shares with the reports (the plugin, the site) keep their own wording, `·` included.
  * `Failed` lists the failed scenarios, each with the step it failed in — never an API step's title,
  * which can hold what a test typed — the first ten, then how many more.
  *
@@ -270,12 +270,14 @@ export function formatDuration(ms: number): string {
  * The scenarios' counts in one phrase, the worst first, a zero left out.
  *
  * @param counts - the scenarios' counts.
+ * @param separator - what joins the parts: the palette's (`.` under `E2E_OUTPUT=plain`); `·` by default.
  * @example
  * ```ts
  * describeCounts(counts); // "2 failed · 1 flaky · 11 passed · 3 did not run"
+ * describeCounts(counts, "."); // "2 failed . 1 flaky . 11 passed . 3 did not run"
  * ```
  */
-export function describeCounts(counts: Counts): string {
+export function describeCounts(counts: Counts, separator = "·"): string {
   const parts: [number, string][] = [
     [counts.failed, "failed"],
     [counts.interrupted, "interrupted"],
@@ -288,7 +290,7 @@ export function describeCounts(counts: Counts): string {
   const said = parts
     .filter(([count]) => count > 0)
     .map(([count, word]) => `${String(count)} ${word}`);
-  return said.length === 0 ? "no scenarios ran" : said.join(" · ");
+  return said.length === 0 ? "no scenarios ran" : said.join(` ${separator} `);
 }
 
 /**
@@ -525,7 +527,7 @@ export function renderSummary(
   return [
     headerLine(input, style, layout),
     ...labelled(style, "Result", [
-      `${describeCounts(input.scenarios)}, in ${formatDuration(input.durationMs)}`,
+      `${describeCounts(input.scenarios, layout.symbol("separator"))}, in ${formatDuration(input.durationMs)}`,
     ]),
     ...labelled(
       style,

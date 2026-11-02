@@ -158,7 +158,9 @@ On a terminal the same words are styled: the time dim, the scope in its task's c
 than the terminal wraps at its spaces, continuation lines under the message (a path or a command is
 never broken); an empty line opens each run's end and each stop's escalation. `NO_COLOR` drops the
 colour only; a C/POSIX or non-UTF-8 locale draws the table's symbols in ASCII (the lines keep their
-words).
+words). It reads no `E2E_OUTPUT` (`plain`/`fancy` change nothing here). The rules, the per-program
+table and what the runs it starts print into their `run.log`:
+[configuration.md → Terminal output](configuration.md#terminal-output).
 
 Where the terminal redraws in place (a TTY with a size, `TERM` set and not `dumb`, no `CI`), a
 status table sits below the lines, redrawn at most once a second and after a resize:

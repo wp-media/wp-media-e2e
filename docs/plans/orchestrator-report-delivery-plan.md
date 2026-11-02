@@ -1,6 +1,6 @@
 # Orchestrator Report Delivery — prepared download bundles
 
-Status: planned; a Phase 1 slice, not scheduled; R3 waits for modernization Phase 7's renderer.
+Status: planned; a Phase 1 slice, not scheduled; modernization Phase 7's renderer, which R3 needs, is done.
 Parent: the [orchestrator plan](orchestrator-plan.md) (§2 Reports, §3 Planned). Phase 0.5 left
 Allure generation out; this plan adds the missing delivery piece: one prepared download per run.
 

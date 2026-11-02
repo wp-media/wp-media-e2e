@@ -97,6 +97,8 @@ Credentials live only in sites files and never enter Playwright reports. Schema:
 
 Copy `.env.example` to `.env` and fill what you need (BackWPup storage credentials, optional runtime flags).
 Real environment variables always win; `E2E_LOAD_DOTENV=false` in the environment skips the file.
+Terminal output (`E2E_OUTPUT=auto|plain|fancy`, `NO_COLOR`, `FORCE_COLOR`, `TERM`, the locale; the
+orchestrator and its runs included): [configuration.md → Terminal output](docs/guides/configuration.md#terminal-output).
 
 ## Browsers
 
@@ -173,8 +175,8 @@ its screenshot and trace paths (its folder carries the title) are not shown.
 The run ends with a summary below everything: the verdict (`✘ COULD NOT TEST` when a setup failed,
 `■ STOPPED` when stopped), counts, the failed scenarios with their failed step (ten, then `and N
 more`), the plugin and sites tested, how to open each report, and which old reports it pruned. Its rule
-spans the terminal; `E2E_OUTPUT=plain` makes it colourless and its own glyphs ASCII (the phrases it
-shares with the reports keep their `·`).
+spans the terminal; `E2E_OUTPUT=plain` makes it colourless and its own glyphs ASCII, the counts'
+separators included (the plugin and site phrases it shares with the reports keep their `·`).
 
 **Old reports are pruned as each run ends**, for its cell only: at most `E2E_REPORTS_KEEP` (20; `0`
 lifts the cap, not the age rules), none older than 30 days except the cell's newest complete report,

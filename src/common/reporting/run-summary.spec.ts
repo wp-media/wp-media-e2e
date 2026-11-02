@@ -206,6 +206,13 @@ test.describe("the phrases", () => {
     expect(describeCounts(counts({}))).toBe("no scenarios ran");
   });
 
+  test("describeCounts: joins with the separator it is given, `·` by default", () => {
+    const some = counts({ total: 3, failed: 1, passed: 2 });
+    expect(describeCounts(some)).toBe("1 failed · 2 passed");
+    expect(describeCounts(some, ".")).toBe("1 failed . 2 passed");
+    expect(describeCounts(counts({}), ".")).toBe("no scenarios ran");
+  });
+
   test("describePlugin: a build, a release, a provided zip, a failure", () => {
     expect(
       describePlugin({
@@ -1009,6 +1016,8 @@ test.describe("the Failed list, the rule and the glyphs", () => {
     expect(lines[0]).toHaveLength(80);
     expect(lines).toEqual(
       expect.arrayContaining([
+        // The counts' separators are the layout's too: no `·` in an ASCII summary.
+        "  Result      1 failed . 1 did not run, in 14.2m",
         "  Failed      F > S - When x",
         "  Setup       setup:pro@nginx failed - no",
         "  Plugin      unknown - the artifacts setup failed",
