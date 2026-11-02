@@ -5,6 +5,7 @@ import {
   renderPluginDirWarning,
 } from "./elevation-report";
 import type { SiteElevation } from "./elevation-report";
+import { createPalette } from "../terminal/palette";
 
 /**
  * The run-level elevation warning, tested as what it is: a pure function from results to text.
@@ -106,21 +107,63 @@ test("is padded with a blank line above and below", () => {
   expect(lines.at(-1)).toBe("");
 });
 
+/** A coloured terminal's palette, an ASCII one (plain mode, a dumb terminal, a C locale). */
+const COLOUR = createPalette({ tty: true, color: true, unicode: true });
+const ASCII = createPalette({ tty: false, color: false, unicode: false });
+
 /**
- * Colour is asked for, and that is all this can pin.
- *
- * `styleText` decides at call time from the stream: interactively, and under CI runners that set
- * `FORCE_COLOR` (Playwright does, which is why this assertion holds here), the banner is yellow. In
- * the other documented use — `healthcheck > fleet.log`, or a cron pipe — it degrades to plain text
- * and the padding and the `⚠` are what make it stand out instead. Asserting the escape without
- * saying so would claim an operator experience that is only sometimes real.
+ * Unstyled by default: the banner is data until a printer styles it for its own stream. A worker's
+ * banner goes through the run's reporter, which strips escapes anyway; `healthcheck > fleet.log` must
+ * hold none. The padding and the `⚠` are what make it stand out there.
  */
-test("asks for colour, so it reads as a warning wherever colour survives", () => {
+test("is plain text by default, the warning carried by its mark", () => {
   const raw =
     renderElevationWarning([site("broken.test", "unavailable")]) ?? "";
-  expect(raw).toContain(ESC);
-  // What carries the warning when colour does not: these are unconditional.
-  expect(plain([site("broken.test", "unavailable")])).toContain("⚠");
+  expect(raw).not.toContain(ESC);
+  expect(raw).toContain(
+    "  ⚠  ELEVATION UNAVAILABLE — cleanup will be incomplete",
+  );
+  expect(raw).toContain("     → grant passwordless sudo");
+  expect(raw).toContain(
+    "       • leftover plugin data is NOT removed → the site",
+  );
+  expect(raw).toContain("  ←  ownership handover pending");
+});
+
+// Printed to a coloured terminal (the healthcheck on a TTY): the headline bold yellow, the remedies'
+// arrows yellow — and nothing else styled, so a copied line pastes clean.
+test("styles the headline and the remedies' arrows with a coloured palette", () => {
+  const raw =
+    renderElevationWarning([site("broken.test", "unavailable")], COLOUR) ?? "";
+  const lines = raw.split("\n");
+  expect(lines[1]).toBe(
+    `${ESC}[1m${ESC}[33m  ⚠  ELEVATION UNAVAILABLE — cleanup will be incomplete on 1 site(s)${ESC}[39m${ESC}[22m`,
+  );
+  expect(lines).toContain(
+    `     ${ESC}[33m→${ESC}[39m grant passwordless sudo, e.g. \`<user> ALL=(ALL) NOPASSWD:ALL\` in /etc/sudoers.d/`,
+  );
+  expect(lines).toContain(
+    `     ${ESC}[33m→${ESC}[39m or accept it deliberately: set \`transport.elevate: false\` on the site to`,
+  );
+  expect(raw.replace(ANSI, "")).toBe(
+    renderElevationWarning([site("broken.test", "unavailable")]),
+  );
+});
+
+// Plain mode, a dumb terminal or a C locale: every glyph has an ASCII spelling.
+test("spells every symbol in ASCII with an ASCII palette", () => {
+  const raw =
+    renderElevationWarning([site("broken.test", "unavailable")], ASCII) ?? "";
+  expect(raw).not.toContain(ESC);
+  expect(raw).toMatch(/^[\x20-\x7e\n]*$/);
+  expect(raw).toContain(
+    "  !  ELEVATION UNAVAILABLE - cleanup will be incomplete",
+  );
+  expect(raw).toContain("  <-  ownership handover pending");
+  expect(raw).toContain(
+    "       * leftover plugin data is NOT removed -> the site",
+  );
+  expect(raw).toContain("     -> grant passwordless sudo");
 });
 
 /**
@@ -206,6 +249,25 @@ test.describe("renderPluginDirWarning", () => {
     expect(banner.endsWith("\n")).toBe(true);
   });
 
+  test("is plain by default, styled and spelt by the palette it is given", () => {
+    const leftovers = sites([["/p/backwpup-pro: a folder"]]);
+    const raw = renderPluginDirWarning(leftovers) ?? "";
+    expect(raw).not.toContain(ESC);
+    expect(raw.split("\n")[1]).toBe(
+      "  ⚠  LEFTOVER PLUGIN FOLDERS — WordPress lists no plugin in them, on 1 site(s)",
+    );
+    const coloured = renderPluginDirWarning(leftovers, COLOUR) ?? "";
+    expect(coloured.split("\n")[1]).toBe(
+      `${ESC}[1m${ESC}[33m  ⚠  LEFTOVER PLUGIN FOLDERS — WordPress lists no plugin in them, on 1 site(s)${ESC}[39m${ESC}[22m`,
+    );
+    const ascii = renderPluginDirWarning(leftovers, ASCII) ?? "";
+    expect(ascii).toMatch(/^[\x20-\x7e\n]*$/);
+    expect(ascii).toContain("       * /p/backwpup-pro: a folder");
+    expect(ascii).toContain(
+      "A removal stopped part-way - a PHP-FPM restart, a reboot - leaves",
+    );
+  });
+
   test("masks credentials in a site's address", () => {
     const banner = renderPluginDirWarning([
       {
@@ -215,5 +277,46 @@ test.describe("renderPluginDirWarning", () => {
       },
     ]);
     expect(banner).not.toContain("secret");
+  });
+});
+
+/** What a sites file or a site may hold: a screen clear, an OSC 52 clipboard write, a token. */
+test.describe("site values are printed safe", () => {
+  const BEL = String.fromCharCode(7);
+  const TOKEN = "ghp_16CharsOrMoreAAAA";
+
+  test("the elevation banner: an address and a transport with escapes or a token", () => {
+    const raw =
+      renderElevationWarning([
+        {
+          baseURL: `https://site.test/${ESC}[2J`,
+          transport: `ssh: ${TOKEN}@site.test${ESC}]52;c;eA==${BEL}`,
+          support: "unavailable",
+          ownershipPending: false,
+        },
+      ]) ?? "";
+    expect(raw.split("\n")[3]).toBe(
+      "     https://site.test/  [ssh: ***@site.test]",
+    );
+    expect(raw).not.toContain(ESC);
+    expect(raw).not.toContain(TOKEN);
+  });
+
+  test("the leftover-folder banner: a folder's text line by line, its further lines indented", () => {
+    const raw =
+      renderPluginDirWarning([
+        {
+          baseURL: "https://site.test",
+          transport: `local: /var/${ESC}[2Jwww`,
+          leftovers: [
+            `/p/x${ESC}[2J: ${TOKEN.slice(0, 6)}\u200b${TOKEN.slice(6)}\n  owned by root`,
+          ],
+        },
+      ]) ?? "";
+    expect(raw.split("\n").slice(3, 6)).toEqual([
+      "     https://site.test  [local: /var/www]",
+      "       • /p/x: ***",
+      "           owned by root",
+    ]);
   });
 });

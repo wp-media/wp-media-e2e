@@ -32,20 +32,20 @@ End-to-end (E2E) tests for WP Media plugins: WP Rocket (performance), BackWPup (
 ```text
 src/
 ├── common/                 # product-agnostic, shared by every product
-│   ├── config/             # env, sites loading, run-context, run-id.ts (RUN_ID, a run's report folder), run-env.ts (run-setting variable names), cell pin, drain, metadata, devices, file-owner rule, config factory
+│   ├── config/             # env, sites loading, run-context, run-id.ts (RUN_ID, a run's report folder), run-env.ts (run-setting variable names), cell pin, drain, metadata, devices, file-owner rule, config factory, output.ts (palettes and printers for setup lines and scripts: `E2E_OUTPUT`-aware; a worker's never coloured)
 │   ├── reporting/          # the suite's reporters (cell notice, results stream, terminal + its sink/lines/worker-output/mode/live-block/live-session/failure-block, run facts, summary), their pure parts, report retention (retention, report-tree, run-pruning, prune-command), page-loads.ts (a failed scenario's lost requests)
 │   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ends a saved login)
-│   ├── setup/              # the auth setup's preflight (+ cell-plugin.ts: a broken copy of the cell's plugin), elevation/ownership banner, site info
+│   ├── setup/              # the auth setup's preflight (+ cell-plugin.ts: a broken copy of the cell's plugin), elevation/ownership banner, site info, check-lines.ts (one ✓/✗/→ check list for preflight, artifacts and healthcheck), healthcheck-lines.ts (the healthcheck's output, pure)
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
 │   ├── guards.ts           # type guards for narrowing `unknown`
-│   ├── text.ts             # string helpers: escapeRegExp, escapeHtml, redactSecrets/maskValues (credentials), maskSiteUrl (a baseURL shown safely), siteLabel (its host·port·path, for a progress row), withoutControls (well-formed, no escape or control), plain (one line: + no Cf, combining marks capped at 8)
+│   ├── text.ts             # string helpers: escapeRegExp, escapeHtml, redactSecrets/maskValues (credentials), maskSiteUrl (a baseURL shown safely), siteLabel (its host·port·path, for a progress row), withoutControls (well-formed, no escape or control), plain (one line: + no Cf, combining marks capped at 8), printableLine/printableLines (someone else's text to print: plain then masked, indent kept)
 │   ├── deadline.ts         # withinBudget: a time limit for a best-effort step
-│   ├── terminal/           # side-effect-free terminal output: capabilities.ts (colour/live/Unicode, one precedence; every input a parameter), palette.ts (semantic colours via styleText, symbols + ASCII fallback, a status's word unless a coloured terminal), layout.ts (plain text in: width 20–120, display width, grapheme-safe cutToWidth, padding, rules, 500-code-point capLine), stream.ts (unblockTerminal/stdoutTerminal: non-blocking TTY stdout; openLiveTerminal: that plus a no-op `error` listener, the only way to a live region; drainTerminal before exit; writeSafely, backlogBytes, TERMINAL_BACKLOG_BYTES), live.ts (the live region: byte-exact `\r\n` cursor contract, throttle, one repaint per print burst, SGR-only style, backlog bound, resize, close; dead after a failed write), stdio-capture.ts (while a block shows: the process's own stdout/stderr `write` cut into lines printed above it; bypassWriter for the region; restored exactly)
+│   ├── terminal/           # side-effect-free terminal output: capabilities.ts (colour/live/Unicode, one precedence; every input a parameter), palette.ts (semantic colours via styleText — `emphasis` for labels, `command` for commands —, symbols + ASCII fallback, a status's word unless a coloured terminal; TEXT_PALETTE for thrown text, paletteFor), layout.ts (plain text in: width 20–120, display width, grapheme-safe cutToWidth, padding, rules, 500-code-point capLine), stream.ts (unblockTerminal/stdoutTerminal: non-blocking TTY stdout; openLiveTerminal: that plus a no-op `error` listener, the only way to a live region; drainTerminal before exit; writeSafely, backlogBytes, TERMINAL_BACKLOG_BYTES), live.ts (the live region: byte-exact `\r\n` cursor contract, throttle, one repaint per print burst, SGR-only style, backlog bound, resize, close; dead after a failed write), stdio-capture.ts (while a block shows: the process's own stdout/stderr `write` cut into lines printed above it; bypassWriter for the region; restored exactly)
 │   ├── steps/              # generic step definitions
 │   ├── hooks/              # shared scenario hooks (*.hooks.ts) + their policy modules
 │   ├── pages/              # cross-product page objects (plugins, site-health) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
-│   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm, pin)
+│   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm + warm-lines.ts its output, pin)
 │   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), the live region's tmux driver (live-tmux*), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/)
 │   └── wp/                 # WordPress over WP-CLI (exec, php, staging, plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
 └── projects/
@@ -395,7 +395,10 @@ is checked with `holdsSecret`, both in the page.
 section at a time, their sites concurrently; each site prints as soon as it is done, with every
 check it ran (ownership and elevation reports included) and hints on failure; a summary per product
 ends it. The banner is the auth setup's renderer, printed to **stdout** so `healthcheck > fleet.log`
-keeps it. Placeholder cells are skipped. Exit `0` only if every real site passed. Tune with
+keeps it. Its lines (`setup/healthcheck-lines.ts`) are styled for stdout as a run's are: no escape
+when redirected unless `FORCE_COLOR`; `E2E_OUTPUT=plain`, `TERM=dumb` or a C locale spell its symbols in
+ASCII; a check's detail and hint, and the banners' site values, are printed plain and masked
+(`printableLines`). Placeholder cells are skipped. Exit `0` only if every real site passed. Tune with
 `HEALTHCHECK_CONCURRENCY`, `HEALTHCHECK_LOGIN_TIMEOUT_MS`; `healthcheck:ui` is the same, headed
 (`--headed`, or `HEALTHCHECK_HEADED=true`).
 

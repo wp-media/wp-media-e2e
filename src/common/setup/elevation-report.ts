@@ -1,6 +1,6 @@
-import { styleText } from "node:util";
-
-import { maskSiteUrl } from "../text";
+import { TEXT_PALETTE } from "../terminal/palette";
+import type { Palette } from "../terminal/palette";
+import { maskSiteUrl, printableLine, printableLines } from "../text";
 import type { ElevationSupport } from "../wp/exec";
 
 /**
@@ -19,7 +19,10 @@ import type { ElevationSupport } from "../wp/exec";
  *
  * Kept apart from `preflight.ts` because it is wanted in two places (the auth setup's pool
  * verification and the standalone fleet healthcheck) and because a pure results-in/string-out
- * function can be tested without a terminal, a transport, or a WordPress.
+ * function can be tested without a terminal, a transport, or a WordPress. Colour and symbols come
+ * from the caller's palette — the stream it prints to decides them; plain Unicode text by default.
+ * Both are printed, never thrown, so each site's values (address, transport, folders) are made safe
+ * to print ({@link siteLine}, {@link printableLines}).
  */
 
 /** One site's elevation state, as the banner needs to name it. */
@@ -43,9 +46,10 @@ export interface SiteElevation {
  * What every affected site loses without privileges, in the order an operator will notice it. Kept
  * as one list because they share a cause, and reporting them separately would invite fixing one.
  */
-const COSTS: readonly string[] = [
-  "leftover plugin data is NOT removed → the site accumulates it every scenario",
-  "`debug.log` may not be clearable between scenarios",
+const COSTS: readonly ((arrow: string) => string)[] = [
+  (arrow) =>
+    `leftover plugin data is NOT removed ${arrow} the site accumulates it every scenario`,
+  () => "`debug.log` may not be clearable between scenarios",
 ];
 
 /**
@@ -56,8 +60,8 @@ const COSTS: readonly string[] = [
  * nothing will be changed. Listing this unconditionally would contradict that line one paragraph
  * later, which is how a banner stops being read.
  */
-const OWNERSHIP_COST =
-  "plugin file ownership is NOT normalized → the web server cannot write into the plugin it is testing";
+const ownershipCost = (arrow: string): string =>
+  `plugin file ownership is NOT normalized ${arrow} the web server cannot write into the plugin it is testing`;
 
 /**
  * Renders the warning for whichever sites answered `unavailable`.
@@ -67,12 +71,14 @@ const OWNERSHIP_COST =
  * that matters.
  *
  * @param sites - every real site checked in this run, with the elevation each reported.
- * @returns the banner, already coloured and padded with blank lines above and below so it cannot be
- * lost in tightly-packed output — or `undefined` when no site needs it, which is the normal case and
- * must print nothing at all.
+ * @param palette - colour and symbols for the stream it is printed to; plain Unicode text by default.
+ * @returns the banner, styled by `palette` and padded with blank lines above and below so it cannot
+ * be lost in tightly-packed output — or `undefined` when no site needs it, which is the normal case
+ * and must print nothing at all.
  */
 export function renderElevationWarning(
   sites: readonly SiteElevation[],
+  palette: Palette = TEXT_PALETTE,
 ): string | undefined {
   const affected = sites.filter((site) => site.support === "unavailable");
   if (affected.length === 0) return undefined;
@@ -88,10 +94,12 @@ export function renderElevationWarning(
     hosts.size === affected.length
       ? `${String(affected.length)} site(s)`
       : `${String(affected.length)} site(s) across ${String(hosts.size)} host(s)`;
+  const { paint, symbol } = palette;
+  const arrow = symbol("arrow");
   lines.push(
-    styleText(
-      ["bold", "yellow"],
-      `  ⚠  ELEVATION UNAVAILABLE — cleanup will be incomplete on ${scope}`,
+    headline(
+      palette,
+      `ELEVATION UNAVAILABLE ${symbol("dash")} cleanup will be incomplete on ${scope}`,
     ),
   );
   lines.push("");
@@ -99,9 +107,10 @@ export function renderElevationWarning(
   for (const site of affected) {
     // Marked rather than listed twice: the operator needs one list of sites and one remedy, and the
     // marker is what ties the extra cost below to the sites it is true for.
-    const mark = site.ownershipPending ? "  ←  ownership handover pending" : "";
-    // The report becomes a setup's output, which the reports keep: a basic-auth `baseURL` is masked.
-    lines.push(`     ${maskSiteUrl(site.baseURL)}  [${site.transport}]${mark}`);
+    const mark = site.ownershipPending
+      ? `  ${symbol("backArrow")}  ownership handover pending`
+      : "";
+    lines.push(`${siteLine(site)}${mark}`);
   }
   lines.push("");
   // Both causes are named because `sudo` reports them identically — it will not say whether a user
@@ -110,26 +119,27 @@ export function renderElevationWarning(
     "     `sudo -n true` failed for this transport's user. Either it is not a sudoer, or",
   );
   lines.push(
-    "     sudo requires a password — sudo reports both identically, so this cannot tell",
+    `     sudo requires a password ${symbol("dash")} sudo reports both identically, so this cannot tell`,
   );
   lines.push("     them apart.");
   lines.push("");
   lines.push("     What this costs on each site above:");
+  const bullet = symbol("bullet");
   for (const cost of COSTS) {
-    lines.push(`       • ${cost}`);
+    lines.push(`       ${bullet} ${cost(arrow)}`);
   }
   if (pending.length > 0) {
-    lines.push(`       • ${OWNERSHIP_COST}`);
+    lines.push(`       ${bullet} ${ownershipCost(arrow)}`);
     lines.push(
       "         (on the sites marked above; the others already own their install)",
     );
   }
   lines.push("");
   lines.push(
-    `     ${styleText(["yellow"], "→")} grant passwordless sudo, e.g. \`<user> ALL=(ALL) NOPASSWD:ALL\` in /etc/sudoers.d/`,
+    `     ${paint("warn", arrow)} grant passwordless sudo, e.g. \`<user> ALL=(ALL) NOPASSWD:ALL\` in /etc/sudoers.d/`,
   );
   lines.push(
-    `     ${styleText(["yellow"], "→")} or accept it deliberately: set \`transport.elevate: false\` on the site to`,
+    `     ${paint("warn", arrow)} or accept it deliberately: set \`transport.elevate: false\` on the site to`,
   );
   lines.push("       silence this warning and keep the suite unprivileged.");
   lines.push("");
@@ -156,36 +166,71 @@ export interface SitePluginDirs {
  * pays for it.
  *
  * @param sites - every real site checked in this run, with its leftover folders.
+ * @param palette - colour and symbols for the stream it is printed to; plain Unicode text by default.
  * @returns the banner, padded like {@link renderElevationWarning}'s, or `undefined` when no site
  * holds one.
  */
 export function renderPluginDirWarning(
   sites: readonly SitePluginDirs[],
+  palette: Palette = TEXT_PALETTE,
 ): string | undefined {
   const affected = sites.filter((site) => site.leftovers.length > 0);
   if (affected.length === 0) return undefined;
 
   const lines: string[] = [""];
+  const { symbol } = palette;
   lines.push(
-    styleText(
-      ["bold", "yellow"],
-      `  ⚠  LEFTOVER PLUGIN FOLDERS — WordPress lists no plugin in them, on ${String(affected.length)} site(s)`,
+    headline(
+      palette,
+      `LEFTOVER PLUGIN FOLDERS ${symbol("dash")} WordPress lists no plugin in them, on ${String(affected.length)} site(s)`,
     ),
   );
   lines.push("");
   for (const site of affected) {
-    lines.push(`     ${maskSiteUrl(site.baseURL)}  [${site.transport}]`);
+    lines.push(siteLine(site));
     for (const leftover of site.leftovers) {
-      lines.push(`       • ${leftover}`);
+      const [first = "", ...rest] = printableLines(leftover);
+      lines.push(
+        `       ${symbol("bullet")} ${first}`,
+        ...rest.map((line) => `         ${line}`),
+      );
     }
   }
   lines.push("");
   lines.push(
-    "     A removal stopped part-way — a PHP-FPM restart, a reboot — leaves these, and each blocks",
+    `     A removal stopped part-way ${symbol("dash")} a PHP-FPM restart, a reboot ${symbol("dash")} leaves these, and each blocks`,
   );
   lines.push(
     "     every install of its plugin. The next @plugin scenario on the site removes it and says so.",
   );
   lines.push("");
   return lines.join("\n");
+}
+
+/**
+ * A site as a banner names it: its address and transport, each made safe to print — they come from a
+ * sites file and a site, and the banner becomes a setup's output, which the reports keep (a basic-auth
+ * `baseURL` is masked).
+ *
+ * @param site - the site's address and rendered transport.
+ * @returns `     address  [transport]`.
+ */
+function siteLine(site: {
+  readonly baseURL: string;
+  readonly transport: string;
+}): string {
+  return `     ${printableLine(maskSiteUrl(site.baseURL))}  [${printableLine(site.transport)}]`;
+}
+
+/**
+ * A banner's headline: the warning mark and the words, both bold and in the warning colour, so the
+ * line reads as a warning wherever colour survives — and by its mark wherever it does not.
+ *
+ * @param palette - colour and symbols.
+ * @param text - the headline's words.
+ * @returns `  ⚠  text`, styled.
+ */
+function headline(palette: Palette, text: string): string {
+  const { paint, symbol } = palette;
+  return paint("emphasis", paint("warn", `  ${symbol("warning")}  ${text}`));
 }

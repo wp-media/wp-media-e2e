@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
+import { createPalette } from "../terminal/palette";
 import { describeSiteInfo, parseSiteInfo, readSiteInfo } from "./site-info";
 
 /**
@@ -141,6 +142,25 @@ test.describe("describeSiteInfo", () => {
     expect(
       describeSiteInfo({ baseURL: "https://a.test", error: "timed out" }),
     ).toBe("https://a.test: versions unknown — timed out");
+  });
+
+  test("spells its separators in ASCII with an ASCII palette", () => {
+    const ascii = createPalette({ tty: false, color: false, unicode: false });
+    expect(
+      describeSiteInfo(
+        { baseURL: "https://a.test", versions: VERSIONS },
+        ascii,
+      ),
+    ).toBe(
+      "https://a.test: WordPress 7.1.3 . PHP 8.5.11 64bit (fpm-fcgi) . nginx/1.24.0 . " +
+        "database 8.0.46-0ubuntu0.24.04.4 (mysqli)",
+    );
+    expect(
+      describeSiteInfo(
+        { baseURL: "https://a.test", error: "timed out" },
+        ascii,
+      ),
+    ).toBe("https://a.test: versions unknown - timed out");
   });
 });
 

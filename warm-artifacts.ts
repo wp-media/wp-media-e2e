@@ -1,10 +1,19 @@
 import "./src/common/config/load-env";
 
-import { styleText } from "node:util";
-
 import { readArtifactEnv } from "./src/common/artifacts/request";
 import { createApvmWarmer, warmArtifacts } from "./src/common/artifacts/warm";
-import type { WarmSummary, WarmUnit } from "./src/common/artifacts/warm";
+import type { WarmUnit } from "./src/common/artifacts/warm";
+import {
+  nothingToWarmLine,
+  usageErrorLine,
+  warmFooter,
+  warmHeaderLines,
+  warmResultLines,
+  warmWarningLines,
+} from "./src/common/artifacts/warm-lines";
+import type { SkippedCell } from "./src/common/artifacts/warm-lines";
+import { consolePrinters } from "./src/common/config/output";
+import type { Printers } from "./src/common/config/output";
 import { isNonEmptyString } from "./src/common/guards";
 import { isPlaceholderSite } from "./src/common/config/sites";
 import type { ProductConfig } from "./src/common/config/types";
@@ -26,7 +35,8 @@ import { PRODUCTS } from "./src/projects/products";
  * a typo must never look like a primed cache.
  */
 
-const RULE = "─".repeat(72);
+// stdout and stderr, each styled as its stream and `E2E_OUTPUT` allow. Read once, after `.env` loads.
+const PRINTERS: Printers = consolePrinters();
 
 /** Reads a `--name=value` / `--name value` flag from argv, normalizing blank to `undefined`. */
 function readFlag(name: string): string | undefined {
@@ -51,12 +61,6 @@ function readFlag(name: string): string | undefined {
 /** Blank/absent → `undefined`; otherwise the trimmed value. */
 function normalize(value: string | undefined): string | undefined {
   return isNonEmptyString(value) ? value.trim() : undefined;
-}
-
-/** A cell excluded from warming because it has no real sites (placeholder-only). */
-interface SkippedCell {
-  readonly product: string;
-  readonly cell: string;
 }
 
 /** The result of turning the product configs (filtered) into warmable units. */
@@ -99,115 +103,24 @@ function discover(
   return { units, skippedCells };
 }
 
-/** Prints the banner and what is about to be warmed. */
-function printHeader(
-  units: readonly WarmUnit[],
-  skipped: readonly SkippedCell[],
-): void {
-  console.log(styleText(["bold", "cyan"], RULE));
-  console.log(
-    styleText(["bold", "cyan"], "  wp-media-e2e — Warm plugin artifacts"),
-  );
-  console.log(styleText(["bold", "cyan"], RULE));
-  console.log(
-    styleText(
-      ["dim"],
-      `  Priming APVM's cache for ${String(units.length)} cell(s): ` +
-        `${units.map((u) => u.label).join(", ") || "(none)"}.`,
-    ),
-  );
-  for (const s of skipped) {
-    console.log(
-      `  ${styleText(["yellow"], "⚠")} ${s.product}/${s.cell} — ` +
-        styleText(["yellow"], "skipped (placeholder-only, will not run)"),
-    );
-  }
-  console.log("");
+/**
+ * Prints lines to one of the script's streams.
+ *
+ * @param printer - `PRINTERS.out` or `PRINTERS.err`.
+ * @param lines - the lines, each printed with its line end.
+ */
+function printLines(printer: Printers["out"], lines: readonly string[]): void {
+  for (const line of lines) printer.print(line);
 }
 
-/** Prints the per-request outcomes, skips, plan failures, and planner warnings. */
-function printSummary(summary: WarmSummary): void {
-  for (const warning of summary.warnings) {
-    console.warn(`  ${styleText(["yellow"], "⚠")} ${warning}`);
-  }
-  for (const skip of summary.skipped) {
-    console.log(
-      `  ${styleText(["dim"], "•")} ${skip.label} ${skip.role}: ` +
-        styleText(["dim"], `provided zip (${skip.rawPath}) — nothing to warm.`),
-    );
-  }
-
-  for (const result of summary.results) {
-    const ref = `${result.params.project} ${result.params.gitRef}`;
-    const variant = result.params.variants?.length
-      ? ` [${result.params.variants.join(", ")}]`
-      : "";
-    const wantedBy = styleText(["dim"], `(${result.wantedBy.join(", ")})`);
-    if (result.ok) {
-      const note =
-        result.build?.fromCache === true ? "already cached" : "warmed";
-      console.log(
-        `  ${styleText(["green"], "✓")} ${ref}${variant} — ${note} ${wantedBy}`,
-      );
-      // What a run is given to repeat exactly this build, even after `develop` moves: the pin's
-      // ref as its `_REF`, and its version, when there is one, as its `_VERSION`.
-      if (result.build !== undefined) {
-        const { pin } = result.build;
-        const version =
-          pin.version !== undefined
-            ? `, version ${pin.version}`
-            : " (no version: a release's is its tag)";
-        console.log(
-          `      ${styleText(["dim"], `pin: ref ${pin.ref}${version}`)}`,
-        );
-      }
-    } else {
-      console.log(
-        `  ${styleText(["red", "bold"], "✗")} ${styleText(["bold"], `${ref}${variant}`)} ${wantedBy}`,
-      );
-      console.log(`      ${styleText(["red"], String(result.error))}`);
-    }
-  }
-
-  for (const failure of summary.planFailures) {
-    console.log(
-      `  ${styleText(["red", "bold"], "✗")} ${styleText(["bold"], failure.label)} — could not plan`,
-    );
-    console.log(`      ${styleText(["red"], failure.error)}`);
-  }
-}
-
-/** Prints the closing tally and returns the process exit code. */
-function printFooter(summary: WarmSummary): number {
-  const warmed = summary.results.filter((r) => r.ok).length;
-  const failed =
-    summary.results.filter((r) => !r.ok).length + summary.planFailures.length;
-
-  console.log("");
-  console.log(styleText(["bold"], RULE));
-  if (summary.ok) {
-    console.log(
-      styleText(
-        ["green", "bold"],
-        `  ${String(warmed)} request(s) warmed. Cache is primed.`,
-      ),
-    );
-    return 0;
-  }
-  console.log(
-    styleText(
-      ["red", "bold"],
-      `  ${String(failed)} warm request(s) failed; ${String(warmed)} succeeded. See details above.`,
-    ),
-  );
-  return 1;
-}
-
-/** Prints a fatal usage error and returns the exit code, so a typo never looks like success. */
+/**
+ * Prints a fatal usage error to stderr and returns the exit code, so a typo never looks like success.
+ *
+ * @param message - what was wrong.
+ * @param detail - what is known instead.
+ */
 function usageError(message: string, detail: string): number {
-  console.error(
-    styleText(["red", "bold"], `[artifacts:warm] ${message}`) + detail,
-  );
+  PRINTERS.err.print(usageErrorLine(message, detail, PRINTERS.err.palette));
   return 1;
 }
 
@@ -262,25 +175,24 @@ async function main(): Promise<void> {
   }
 
   const { units, skippedCells } = discover(PRODUCTS, productFilter, cellFilter);
-  printHeader(units, skippedCells);
+  const { out, err } = PRINTERS;
+  printLines(out, warmHeaderLines(units, skippedCells, out.palette));
 
   if (units.length === 0) {
-    console.log(
-      styleText(
-        ["yellow", "bold"],
-        "  Nothing to warm — every matched cell is placeholder/example data only, so no run will use it.",
-      ),
-    );
+    out.print(nothingToWarmLine(out.palette));
     return;
   }
 
   const summary = await warmArtifacts(
     units,
     readArtifactEnv(),
-    createApvmWarmer(),
+    createApvmWarmer(undefined, PRINTERS),
   );
-  printSummary(summary);
-  process.exitCode = printFooter(summary);
+  printLines(err, warmWarningLines(summary, err.palette));
+  printLines(out, warmResultLines(summary, out.palette));
+  const footer = warmFooter(summary, out.palette);
+  printLines(out, footer.lines);
+  process.exitCode = footer.exitCode;
 }
 
 await main();

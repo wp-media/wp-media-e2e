@@ -4,18 +4,20 @@
  * operator-provided zips, needs no WordPress, mutates nothing, and takes milliseconds.
  *
  * Aggregation is the user-visible contract: every role is verified even when an earlier one
- * failed to resolve or verify, and all findings are collected into one formatted report (same
- * {@link CheckResult} + `styleText` style as `setup/preflight.ts`). `resolve.ts` produces the
- * {@link RoleOutcome}s; `artifacts.setup.ts` renders the report and attaches the JSON summary.
+ * failed to resolve or verify, and all findings are collected into one formatted report (the same
+ * {@link CheckResult} lines as `setup/preflight.ts`, from `setup/check-lines.ts`). `resolve.ts`
+ * produces the {@link RoleOutcome}s; `artifacts.setup.ts` throws the report (plain text) and prints
+ * the success summary (in its palette).
  */
-
-import { styleText } from "node:util";
 
 import AdmZip from "adm-zip";
 
 import { errorMessage } from "../guards";
 import { escapeRegExp } from "../text";
 import type { CheckResult } from "../setup/preflight";
+import { checkLines } from "../setup/check-lines";
+import { TEXT_PALETTE } from "../terminal/palette";
+import type { Palette } from "../terminal/palette";
 import type { Edition } from "../config/types";
 import { resolveIdentity } from "./manifest";
 import type {
@@ -367,44 +369,38 @@ function renderInfo(
   return parts.length === 0 ? undefined : parts.join("  ");
 }
 
-/** The bold header line for a role: its name and the resolved filename (or a failed-resolution note). */
+/** The header line for a role: its name and the resolved filename (or a failed-resolution note). */
 function roleLabel(role: RoleReport): string {
   return `${role.role} — ${role.artifact?.zipFilename ?? "(resolution failed)"}`;
 }
 
-/** Appends a role's ✓/✗ header, its per-check lines with hints, and its info line to `lines`. */
+/**
+ * Appends a role's ✓/✗ header, its per-check lines with hints, and its info line to `lines`, as
+ * plain text: the report it belongs to is thrown.
+ *
+ * @param lines - the report so far.
+ * @param role - the role's outcome.
+ */
 function appendRole(lines: string[], role: RoleReport): void {
-  const mark = roleOk(role)
-    ? styleText(["green"], "✓")
-    : styleText(["bold", "red"], "✗");
-  lines.push(`  ${mark} ${styleText(["bold"], roleLabel(role))}`);
-
-  for (const check of role.checks) {
-    if (check.ok) {
-      lines.push(
-        `    ${styleText(["green"], "✓")} ${check.name}: ${check.detail}`,
-      );
-      continue;
-    }
-    lines.push(
-      `    ${styleText(["red"], "✗")} ${styleText(["bold"], check.name)}: ${check.detail}`,
-    );
-    if (check.hint !== undefined) {
-      for (const hintLine of check.hint.split("\n")) {
-        lines.push(`      ${styleText(["yellow"], "→")} ${hintLine}`);
-      }
-    }
-  }
-
+  const { symbol } = TEXT_PALETTE;
+  const mark = roleOk(role) ? symbol("check") : symbol("cross");
+  lines.push(`  ${mark} ${roleLabel(role)}`);
+  lines.push(...checkLines(role.checks, "    ", TEXT_PALETTE));
   const info = renderInfo(role.info);
-  if (info !== undefined) lines.push(`    ${styleText(["dim"], info)}`);
+  if (info !== undefined) lines.push(`    ${info}`);
   lines.push("");
 }
 
 /**
  * Formats the aggregated failure report thrown by the setup project: a per-role breakdown with
  * ✓/✗ on every check, expected-vs-found on mismatches, and actionable hints — mirroring the
- * pre-flight report so the two read as one family.
+ * pre-flight report so the two read as one family. Plain text: an error's message is data the
+ * reports keep, styled (if ever) by whoever prints it.
+ *
+ * @param report - every role's outcome.
+ * @param product - the product, for the headline.
+ * @param cell - the cell, for the headline.
+ * @returns the report, lines joined by `\n`.
  */
 export function formatFailureReport(
   report: ArtifactReport,
@@ -416,10 +412,7 @@ export function formatFailureReport(
   const lines: string[] = [];
 
   lines.push(
-    styleText(
-      ["bold"],
-      `[artifacts] Plugin artifact verification failed — ${String(failed)} of ${String(total)} role(s) for "${product}/${cell}" did not pass.`,
-    ),
+    `[artifacts] Plugin artifact verification failed — ${String(failed)} of ${String(total)} role(s) for "${product}/${cell}" did not pass.`,
   );
   lines.push("Fix the issues below before re-running:\n");
 
@@ -434,23 +427,33 @@ export function formatFailureReport(
   return lines.join("\n");
 }
 
-/** Formats the concise success summary logged when every role resolved and verified. */
+/**
+ * Formats the concise success summary logged when every role resolved and verified.
+ *
+ * @param report - every role's outcome.
+ * @param product - the product, for the headline.
+ * @param cell - the cell, for the headline.
+ * @param palette - colour and symbols for the stream it is printed to; plain Unicode text by default.
+ * @returns the summary, lines joined by `\n`.
+ */
 export function formatSuccessSummary(
   report: ArtifactReport,
   product: string,
   cell: string,
+  palette: Palette = TEXT_PALETTE,
 ): string {
+  const { paint, symbol } = palette;
   const lines: string[] = [
-    styleText(
-      ["bold"],
+    paint(
+      "emphasis",
       `[artifacts] Verified ${String(report.resolved.length)} artifact(s) for "${product}/${cell}":`,
     ),
   ];
   for (const role of report.roles) {
     const info = renderInfo(role.info);
     lines.push(
-      `  ${styleText(["green"], "✓")} ${role.role.padEnd(9)}${role.artifact?.zipFilename ?? ""}` +
-        (info !== undefined ? `  ${styleText(["dim"], `(${info})`)}` : ""),
+      `  ${paint("ok", symbol("check"))} ${role.role.padEnd(9)}${role.artifact?.zipFilename ?? ""}` +
+        (info !== undefined ? `  ${paint("dim", `(${info})`)}` : ""),
     );
   }
   return lines.join("\n");

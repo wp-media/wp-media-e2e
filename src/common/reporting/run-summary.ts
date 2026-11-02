@@ -357,7 +357,7 @@ function labelled(
 ): string[] {
   return values.map(
     (value, index) =>
-      `  ${style("command", (index === 0 ? label : "").padEnd(LABEL_WIDTH))}${value}`,
+      `  ${style("emphasis", (index === 0 ? label : "").padEnd(LABEL_WIDTH))}${value}`,
   );
 }
 
@@ -498,7 +498,7 @@ function headerLine(
     line: heavy,
     title: `${displayText(subject)} ${heavy}${heavy} ${mark}`,
   });
-  return style("command", style(verdict.token, line));
+  return style("emphasis", style(verdict.token, line));
 }
 
 /**

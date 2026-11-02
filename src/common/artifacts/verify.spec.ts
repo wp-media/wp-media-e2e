@@ -13,6 +13,7 @@ import {
   verifyResolved,
 } from "./verify";
 import type { CheckResult } from "../setup/preflight";
+import { createPalette } from "../terminal/palette";
 import type {
   ArtifactIdentity,
   ArtifactRole,
@@ -413,6 +414,85 @@ test.describe("report formatting", () => {
     expect(text).toContain('expected "backwpup-pro"');
     expect(text).toContain('found "backwpup"');
     expect(text).toContain("drop the override");
+    // Thrown, so plain text — though this worker runs under FORCE_COLOR=1 — in the pre-flight's shape.
+    expect(text).not.toContain(String.fromCharCode(27));
+    const lines = text.split("\n");
+    expect(lines[0]).toBe(
+      '[artifacts] Plugin artifact verification failed — 1 of 1 role(s) for "backwpup/pro@nginx" did not pass.',
+    );
+    expect(lines).toContain("  ✗ plugin — bwu-free-on-pro.zip");
+    expect(lines.some((line) => /^ {4}✗ \S/.test(line))).toBe(true);
+    expect(lines.some((line) => line.startsWith("      → "))).toBe(true);
+    expect(lines.at(-1)).toBe(
+      "All roles failed. Resolve the issues above and re-run.",
+    );
+  });
+
+  // A role that passed is still listed, with its own mark and its info line under its checks.
+  test("failure report marks a passing role ✓ beside a failed one, each info line indented", () => {
+    const zip = makeZip("wpr-prev-ok.zip", {
+      "wp-rocket/wp-rocket.php": pluginFile("WP Rocket", "3.16.5"),
+    });
+    const report = verifyResolved(
+      [
+        {
+          role: "plugin",
+          kind: "failed",
+          error: "APVM build failed: boom",
+          hint: "check the ref",
+        },
+        resolved("previous", zip),
+      ],
+      WPR_MANIFEST,
+      undefined,
+    );
+    const lines = formatFailureReport(report, "wp-rocket", "nginx").split("\n");
+    expect(lines).toContain("  ✗ plugin — (resolution failed)");
+    expect(lines).toContain("  ✓ previous — wpr-prev-ok.zip");
+    const previous = lines.indexOf("  ✓ previous — wpr-prev-ok.zip");
+    const info = lines
+      .slice(previous + 1)
+      .find((line) => line.includes("version="));
+    expect(info).toMatch(/^ {4}source=\S/);
+  });
+
+  test("success summary: plain by default, styled and spelt by the palette it is given", () => {
+    const zip = makeZip("wpr-palette.zip", {
+      "wp-rocket/wp-rocket.php": pluginFile("WP Rocket", "3.17.4"),
+    });
+    const report = verifyResolved(
+      [resolved("plugin", zip)],
+      WPR_MANIFEST,
+      undefined,
+    );
+    const plain = formatSuccessSummary(report, "wp-rocket", "nginx").split(
+      "\n",
+    );
+    expect(plain[0]).toBe(
+      '[artifacts] Verified 1 artifact(s) for "wp-rocket/nginx":',
+    );
+    expect(plain[1]).toMatch(/^ {2}✓ plugin {3}wpr-palette\.zip {2}\(.*\)$/);
+
+    const coloured = formatSuccessSummary(
+      report,
+      "wp-rocket",
+      "nginx",
+      createPalette({ tty: true, color: true, unicode: true }),
+    ).split("\n");
+    expect(coloured[0]).toBe(`\x1b[1m${plain[0] ?? ""}\x1b[22m`);
+    expect(
+      coloured[1]?.startsWith(
+        "  \x1b[32m✓\x1b[39m plugin   wpr-palette.zip  \x1b[2m(",
+      ),
+    ).toBe(true);
+
+    const ascii = formatSuccessSummary(
+      report,
+      "wp-rocket",
+      "nginx",
+      createPalette({ tty: false, color: false, unicode: false }),
+    ).split("\n");
+    expect(ascii[1]).toMatch(/^ {2}ok plugin /);
   });
 
   test("success summary lists each role's filename and version", () => {

@@ -561,13 +561,13 @@ test.describe("renderSummary", () => {
 
   test("colours go through the styler it is given, by token: the header bold in its verdict's colour", () => {
     const styled = renderSummary(input(), (token, text) => `<${token}>${text}`);
-    expect(styled[0]).toMatch(/^<command><ok>━━ backwpup/);
-    expect(styled[1]).toMatch(/^ {2}<command>Result/);
+    expect(styled[0]).toMatch(/^<emphasis><ok>━━ backwpup/);
+    expect(styled[1]).toMatch(/^ {2}<emphasis>Result/);
     const failed = renderSummary(
       input({ status: "failed", scenarios: counts({ total: 1, failed: 1 }) }),
       (token, text) => `<${token}>${text}`,
     );
-    expect(failed[0]).toMatch(/^<command><fail>━━ backwpup/);
+    expect(failed[0]).toMatch(/^<emphasis><fail>━━ backwpup/);
   });
 });
 

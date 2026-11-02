@@ -2,11 +2,13 @@ import { test, expect } from "@playwright/test";
 
 import {
   createPalette,
+  paletteFor,
   SERIES_FORMATS,
   STATUSES,
   SYMBOLS,
   type Status,
   type SymbolName,
+  TEXT_PALETTE,
   type Token,
 } from "./palette";
 
@@ -51,6 +53,7 @@ const TOKEN_SGR: readonly (readonly [Token, string, string])[] = [
   ["id", "\x1b[36m", "\x1b[39m"],
   ["dim", "\x1b[2m", "\x1b[22m"],
   ["command", "\x1b[1m", "\x1b[22m"],
+  ["emphasis", "\x1b[1m", "\x1b[22m"],
 ];
 
 /** Every symbol's `[Unicode, ASCII]` spelling, typed out: a changed spelling is a deliberate edit here. */
@@ -68,6 +71,9 @@ const SPELLINGS: Readonly<Record<SymbolName, readonly [string, string]>> = {
   separator: ["·", "."],
   dash: ["—", "-"],
   arrow: ["→", "->"],
+  backArrow: ["←", "<-"],
+  bullet: ["•", "*"],
+  notEqual: ["≠", "!="],
   vertical: ["│", "|"],
   branch: ["├", "+"],
   lastBranch: ["└", "+"],
@@ -305,5 +311,36 @@ test.describe("series", () => {
     expect(on.series(0, "")).toBe("");
     for (const index of [-1, 1.5, Number.NaN, Infinity])
       expect(on.series(index, "bpng")).toBe("bpng");
+  });
+});
+
+test.describe("TEXT_PALETTE", () => {
+  test("never colours and always spells in Unicode: a thrown report is data, whatever the terminal", () => {
+    for (const [token] of TOKEN_SGR) {
+      expect(TEXT_PALETTE.paint(token, "x")).toBe("x");
+    }
+    expect(TEXT_PALETTE.symbol("arrow")).toBe("→");
+    expect(TEXT_PALETTE.status("passed")).toBe("✔ passed");
+  });
+});
+
+test.describe("paletteFor", () => {
+  test("is the palette of the stream's capabilities", () => {
+    const tty = { isTTY: true, columns: 80, rows: 24 };
+    const env = { TERM: "xterm", LANG: "C" };
+    expect(paletteFor({ env, stream: tty }).paint("emphasis", "x")).toBe(
+      "\x1b[1mx\x1b[22m",
+    );
+    expect(paletteFor({ env, stream: tty }).symbol("bullet")).toBe("*");
+    expect(
+      paletteFor({ env, stream: tty, mode: "plain" }).paint("ok", "x"),
+    ).toBe("x");
+    expect(
+      paletteFor({
+        env: { ...env, FORCE_COLOR: "1" },
+        stream: { isTTY: false },
+        forceColorWithoutTty: false,
+      }).paint("ok", "x"),
+    ).toBe("x");
   });
 });

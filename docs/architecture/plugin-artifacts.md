@@ -149,7 +149,9 @@ APVM (`apvm-napi`, pinned to a `cli/vX.Y.Z` tag in `package.json`) ships prebuil
 Rust toolchain, no build step) and is driven **only** through this Node library, never the `apvm` CLI:
 a CLI-only capability waits for a library release. BackWPup builds from a **private** repo, so it needs
 a GitHub token (`GITHUB_TOKEN`, `GH_TOKEN`, or `gh auth login`), asserted **before** any clone; every
-string APVM emits is scrubbed of tokens and URL userinfo before reaching a console or report.
+string APVM emits is scrubbed of tokens and URL userinfo before reaching a console or report
+(`redactBuildText`: invisible format characters dropped first, so none hides a token); a printed
+progress line is one `plain` line, and warm's printed errors go through `printableLines`.
 
 ## Identity preflight
 
@@ -182,8 +184,9 @@ Ground truth: APVM's builders (`crates/core/src/build/plugins/`) and `wp-media/b
 slug) and whose `free` task rewrites the header.
 
 **Aggregation is the user-visible contract.** Every role is resolved and verified even after an
-earlier failure; errors and mismatches are collected into one report (the `CheckResult` + `styleText`
-style of [`preflight.ts`](../../src/common/setup/preflight.ts)): each artifact with ✓/✗ per check,
+earlier failure; errors and mismatches are collected into one report (the `CheckResult` lines of
+[`preflight.ts`](../../src/common/setup/preflight.ts), `setup/check-lines.ts`; plain text, since it is
+thrown): each artifact with ✓/✗ per check,
 expected vs found, and a hint (e.g. a wrong-edition zip on a `pro` cell). One `Error` at the end fails
 the setup, skipping the BDD project. On success the same data prints one line per role and is attached
 to the test as JSON, so it lands in the HTML/Allure report.
