@@ -1,10 +1,15 @@
-import { spawn } from "node:child_process";
-import { accessSync, constants, writeFileSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { test, expect, type TestInfo } from "@playwright/test";
 
+import {
+  ptyRunner,
+  runToEnd,
+  scriptArgv,
+  shellQuote,
+} from "../__fixtures__/pty";
 import {
   isCi,
   type OutputMode,
@@ -15,8 +20,7 @@ import {
  * The capabilities and the palette on a **real** pseudo-terminal. A hand-built `{ isTTY: true }`
  * stream is no terminal to Node: `styleText` refuses it or takes another branch (each case measures
  * that contrast), so what Node does on a terminal is only measured through `script`, which runs the
- * probe on a pty. Both BSD `script` (macOS) and util-linux's (CI's Ubuntu, which takes `-qec`) give a
- * pty 0 columns and 0 rows when their own input is no terminal, until `stty` sizes it (measured).
+ * probe on a pty (`__fixtures__/pty.ts`), sized by `stty`.
  *
  * Each case is its own test, so the runner's worker count bounds how many probes start at once and
  * each probe's time limit comes from its test's.
@@ -30,9 +34,6 @@ const PROBE_MARGIN_MS = 5_000;
 
 /** A probe's limit when its test has none (`timeout: 0`). */
 const UNBOUNDED_TEST_PROBE_MS = 60_000;
-
-/** How long a timed-out probe gets between SIGTERM and SIGKILL. */
-const KILL_GRACE_MS = 2_000;
 
 /** The size `stty` gives the pty in a sized case. */
 const SIZE = { columns: 100, rows: 30 } as const;
@@ -115,113 +116,6 @@ function expectedSample(
   if (capabilities.color)
     return capabilities.unicode ? SAMPLE.colourUnicode : SAMPLE.colourAscii;
   return capabilities.unicode ? SAMPLE.plainUnicode : SAMPLE.plainAscii;
-}
-
-/**
- * `value` as one single-quoted POSIX shell word.
- *
- * @param value - any text.
- */
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'\\''`)}'`;
-}
-
-/** The `script` executable on `PATH`, or `undefined`. */
-function findScript(): string | undefined {
-  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
-    const candidate = join(dir, "script");
-    try {
-      accessSync(candidate, constants.X_OK);
-      return candidate;
-    } catch {
-      // Not in this folder.
-    }
-  }
-  return undefined;
-}
-
-/**
- * The argv running `command` (a shell line) on a pty: BSD `script` on macOS, util-linux's on Linux;
- * `undefined` elsewhere.
- *
- * @param script - the `script` executable.
- * @param command - the shell line to run on the pty.
- */
-function scriptArgv(
-  script: string,
-  command: string,
-): readonly string[] | undefined {
-  if (process.platform === "darwin")
-    return [script, "-q", "/dev/null", "/bin/sh", "-c", command];
-  if (process.platform === "linux")
-    return [script, "-qec", command, "/dev/null"];
-  return undefined;
-}
-
-/** What a finished child wrote. */
-interface ChildOutput {
-  readonly stdout: string;
-  readonly stderr: string;
-}
-
-/**
- * Runs `file` to its end within `limitMs`. Standard input is `/dev/null`: `script` refuses a socket
- * there (`execFile` gives it one), and a terminal would make the run interactive. The time limit is
- * our own timer, never `spawn`'s `timeout`: util-linux `script` exits 0 on SIGTERM, which would pass
- * a killed probe off as a finished one. Past the limit the child gets SIGTERM, then SIGKILL.
- *
- * @param file - the executable.
- * @param args - its arguments.
- * @param env - its whole environment.
- * @param limitMs - how long it may run.
- * @throws {@link Error} naming the time limit or the exit status, with the child's standard error.
- */
-function runToEnd(
-  file: string,
-  args: readonly string[],
-  env: Readonly<Record<string, string>>,
-  limitMs: number,
-): Promise<ChildOutput> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(file, args, { env, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-    let killer: NodeJS.Timeout | undefined;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      killer = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS);
-    }, limitMs);
-    child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
-      stdout += chunk;
-    });
-    child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
-      stderr += chunk;
-    });
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      clearTimeout(killer);
-      reject(error);
-    });
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      clearTimeout(killer);
-      if (timedOut)
-        reject(
-          new Error(
-            `${file} timed out after ${String(limitMs / 1000)}s; stderr: ${stderr}; stdout: ${stdout}`,
-          ),
-        );
-      else if (code === 0) resolve({ stdout, stderr });
-      else
-        reject(
-          new Error(
-            `${file} ended with ${signal ?? `exit ${String(code)}`}; stderr: ${stderr}; stdout: ${stdout}`,
-          ),
-        );
-    });
-  });
 }
 
 /** One measured environment. */
@@ -527,20 +421,17 @@ const CASES: readonly MeasuredCase[] = [
 ];
 
 test.describe("on a real pty", () => {
-  const script = findScript();
-  // `script` only where this spec knows its arguments.
-  const runner =
-    script !== undefined && scriptArgv(script, "true") !== undefined
-      ? script
-      : undefined;
-  const missing = `needs util-linux or BSD \`script\` on PATH (macOS or Linux); found ${script ?? "none"} on ${process.platform}`;
+  const runner = ptyRunner();
   // Locally a missing `script` skips; under CI it fails, so the matrix is never silently absent.
-  test.skip(runner === undefined && !isCi(process.env), missing);
+  test.skip(
+    "missing" in runner && !isCi(process.env),
+    "missing" in runner ? runner.missing : "",
+  );
 
   /** The `script` to run, or a failure naming what is missing. */
   function requireScript(): string {
-    if (runner === undefined) throw new Error(missing);
-    return runner;
+    if ("missing" in runner) throw new Error(runner.missing);
+    return runner.script;
   }
 
   for (const ptyCase of CASES) {

@@ -126,7 +126,9 @@ const URL_PARTS = /^([a-z][a-z\d+.-]*:)[\\/]{2}([^\\/]*)(.*)$/is;
  * hold anything pasted there (a password with a space included). An `@` after the authority's end
  * (`https://user:12/pw@host/`: a password holding `/`, `\\` or `%2F` the parser reads as the host and
  * a path) means everything before its last `@` may be a user and password: only what follows it is
- * shown, after `***@`. The same when applied again.
+ * shown, after `***@`. The same when applied again. Accepted limit: a credential written plainly into
+ * the host or path (`https://host.test/key-abc123/`) still shows, unless a later {@link redactSecrets}
+ * knows its shape.
  *
  * @param baseURL - the site's address, as its sites file writes it.
  * @returns the address to show.

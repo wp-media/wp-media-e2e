@@ -139,7 +139,7 @@ accessors in [`env.ts`](../../src/common/config/env.ts) (`env`, `requireEnv`, `i
 | `E2E_LOAD_DOTENV`        | `true`                     | `false`/`0` in the environment skips `.env` (below).                            |
 | `E2E_RETRIES`            | `2`                        | Retries per failed scenario (0–10; below).                                      |
 | `E2E_REPORTS_KEEP`       | `20`                       | Reports a cell keeps (0–10000; below).                                          |
-| `E2E_OUTPUT`             | `auto`                     | Terminal output: `auto`, `plain` (no colour, ASCII marks) or `fancy`; else fails. |
+| `E2E_OUTPUT`             | `auto`                     | Terminal output: `auto`, `plain` or `fancy` ([below](#terminal-output)); else fails. |
 | `CI`                     | _(unset)_                  | Non-empty enables `forbidOnly`.                                                 |
 | `PRODUCT`                | `wp-rocket`                | Product for the bare `playwright.config.ts` (below).                            |
 | `REPORT_MODE`            | _(unset)_ → self-contained | `rich` → external attachments + embedded trace viewer (serve over http).        |
@@ -169,6 +169,9 @@ accessors in [`env.ts`](../../src/common/config/env.ts) (`env`, `requireEnv`, `i
   than 30 days but the newest complete report (kept up to 182 days). `0` = no cap (the age rules still
   apply; nothing turns pruning off). Outside 0–10000 the run fails at start naming it. Also
   `report:prune`'s default `--keep` ([retention](../architecture/execution-model.md#report-retention)).
+- **`E2E_OUTPUT`** ([Terminal output](#terminal-output)): read by the suite and its scripts
+  (healthcheck, artifact warm, fixture capture), never by the orchestrator. Case-insensitive, blank =
+  `auto`; anything else fails the run as its config loads, naming the variable.
 - **`PRODUCT`**: a name listed in [`products.ts`](../../src/projects/products.ts) (whitespace ignored);
   any other fails the run.
 - **`RUN_ID`**: one folder name — no `/` or `\`, not hidden, no control character, ≤ 255 bytes — else
@@ -185,6 +188,47 @@ accessors in [`env.ts`](../../src/common/config/env.ts) (`env`, `requireEnv`, `i
 
 Each `*_ROOT` is repository-relative or absolute (a root on another disk stays there), and
 `<product>/<cell>` is always appended.
+
+### Terminal output
+
+What a terminal shows is decided once per stream, from `E2E_OUTPUT` and the standard variables
+(`src/common/terminal/capabilities.ts`); nothing styled ever reaches a log, a report or
+`results.jsonl`.
+
+- **Modes**: `auto` — styled with a live block on a terminal, plain lines otherwise; `plain` — no
+  colour, no cursor movement, ASCII marks and rules (the summary's Plugin and Site phrases, shared
+  with the reports, keep their `·` and `—`); `fancy` — as `auto`, and live even under `CI`, but never
+  colour where the rules below say no, never cursor movement without a terminal.
+- **Colour**, first match wins: `plain`; a pipe or file for the orchestrator; `FORCE_COLOR` set
+  (`0`/`false` off, anything else — empty too — on; it beats `NO_COLOR`, and Node then warns once);
+  a non-empty `NO_COLOR`, any `NODE_DISABLE_COLORS`, `TERM` `dumb`, unset or empty, or a pipe: off; a
+  terminal: on. `CI` never turns colour off.
+- **Live** (the suite's block, the orchestrator's table): a terminal with a size (≥ 20 columns, at
+  least one row), `TERM` set and not `dumb`, not `CI` (`true` unless empty, `0` or `false`) unless `fancy`,
+  never `--list`, `--ui` or watch mode. Scripts are never live.
+- **Symbols**: ASCII under `plain`, `TERM=dumb`, or a locale (first non-empty of `LC_ALL`,
+  `LC_CTYPE`, `LANG`) without a UTF-8 codeset (`C`, `POSIX`, `en_US`, `*.ISO-8859-1`); unset is UTF-8.
+- **Width**: the terminal's columns, else `COLUMNS` (digits only, > 0), else 80; clamped 20–120.
+
+| Sink / env                    | Colour                                                  | Live                | Symbols   | Width            |
+| ----------------------------- | ------------------------------------------------------- | ------------------- | --------- | ---------------- |
+| TTY, UTF-8, no `CI`           | unless `NO_COLOR`/`NODE_DISABLE_COLORS`/`FORCE_COLOR=0` | yes                 | Unicode   | its columns      |
+| TTY, `CI`                     | as above                                                | no (`fancy`: yes)   | Unicode   | its columns      |
+| TTY, `NO_COLOR`               | no, unless `FORCE_COLOR`                                | yes                 | Unicode   | its columns      |
+| TTY, `TERM=dumb`              | no, unless `FORCE_COLOR`                                | no                  | ASCII     | its columns      |
+| TTY, `TERM` unset or empty    | no, unless `FORCE_COLOR`                                | no                  | by locale | its columns      |
+| TTY, C/POSIX/non-UTF-8 locale | as the precedence says                                  | by `TERM` and `CI`  | ASCII     | its columns      |
+| Pipe/file (`fancy` too)       | no, unless `FORCE_COLOR` (never for the orchestrator)   | no                  | by locale | `COLUMNS`, or 80 |
+| `plain`                       | no                                                      | no                  | ASCII     | as its sink      |
+
+A locale changes only the symbols, never colour or live. Per program: the suite's reporters and the
+scripts follow the table; the scripts' rules stay 72 columns. The orchestrator reads no `E2E_*` (so
+`plain` and `fancy` do nothing to it), never colours a pipe, wraps only on a terminal, and keeps its
+lines' own glyphs (`✔`, `·`) in any locale — its table's marks follow the locale.
+**The orchestrator's runs** get no `E2E_OUTPUT`, `TERM`, `CI` or colour variable (their environment
+is an allowlist: [orchestrator.md](orchestrator.md#what-a-run-is)) and print into `run.log`, a file:
+`auto` on no terminal — no colour, no live block, symbols by the `LANG` the orchestrator passes on.
+`compat.pty.spec.ts` proves each row for each program on a real pty and a pipe.
 
 ### Plugin artifacts (build & verify)
 

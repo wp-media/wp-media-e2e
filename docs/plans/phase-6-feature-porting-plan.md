@@ -1,6 +1,6 @@
 # Phase 6 — Feature porting: BackWPup first
 
-Status: paused after 6H.0 for modernization Phase 7 — terminal output (decided 2026-10-22), then
+Status: paused after 6H.0 for modernization Phase 7 — terminal output (done 2026-11-01), then
 Phase 11 — shared SSH server profiles; resumes at 6H. Done: 6A–6F, 6G.0, 6G and 6G.1 (shipped inside
 6G, 2026-10-05), 6H.0 (2026-10-21). Deferred: 6H.2 (needs storage credentials).
 
@@ -24,8 +24,8 @@ in [authoring-tests.md](../guides/authoring-tests.md) and `AGENTS.md`.
   (6E.0: the leftover-footprint sweep); 6F the WP-CLI surface (6F.0–6F.4); 6G.0 errors that never
   quote an argv; 6G restore (6G.1: hashed restore directories); 6H.0 a half-removed plugin folder
   costs one scenario, never all later ones.
-- Next: modernization Phase 7 — terminal output for the suite and the orchestrator — then Phase 11 —
-  shared SSH server profiles — before 6H (decided 2026-10-22). Neither touches the port.
+- Next: modernization Phase 11 — shared SSH server profiles — before 6H (decided 2026-10-22; Phase 7,
+  terminal output, done 2026-11-01). It does not touch the port.
 - Open: 6H (storage config and skip gate), 6I (Free upsell scenario, parity gate) and **6I.1 restore
   parity** (Free upload counterparts to Pro's five UI restores), 6J (shared: keep the staging area off
   the web), 6K (restore `.zip` and `.tar.gz`). 6H.2, the storage round-trips, waits for credentials and
