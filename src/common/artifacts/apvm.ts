@@ -8,13 +8,13 @@
  * the native dependency. `resolve.ts` (a run) and `warm.ts` (pre-warming) are its callers.
  */
 
-import { styleText } from "node:util";
-
 import { Apvm } from "apvm-napi";
 import type { JsBuildEvent } from "apvm-napi";
 
 import { env } from "../config/env";
-import { maskValues, redactSecrets } from "../text";
+import { workerPrinters } from "../config/output";
+import type { Printers } from "../config/output";
+import { maskValues, plain, redactSecrets, withoutFormat } from "../text";
 import type { ArtifactOrigin } from "./types";
 
 /**
@@ -91,12 +91,14 @@ export function assertToken(
  * A build's or a warm's text with every credential masked: by shape ({@link redactSecrets}), and the
  * GitHub tokens this process holds by value — a legacy token is 40 hex digits, which no pattern can
  * tell from a commit. A token APVM reads from its own config or `gh` is masked by shape alone.
+ * Invisible format characters go first: one inside a token hides it from both masks, and a printer
+ * that later drops it would show the token whole.
  *
  * @param text - what APVM, git or a build step said.
  */
 export function redactBuildText(text: string): string {
   return redactSecrets(
-    maskValues(text, [env("GITHUB_TOKEN"), env("GH_TOKEN")]),
+    maskValues(withoutFormat(text), [env("GITHUB_TOKEN"), env("GH_TOKEN")]),
   );
 }
 
@@ -120,15 +122,22 @@ export interface BuildReporter {
  * reason and the last {@link OUTPUT_TAIL} output lines can be attached to the error.
  *
  * Redaction placement follows where the text *escapes*: lines printed as they arrive are
- * scrubbed on arrival, while the buffer — private to this closure and only ever read by
+ * scrubbed on arrival (made one {@link plain} line first: no escape reaches the terminal), while the buffer — private to this closure and only ever read by
  * {@link BuildReporter.failureContext} — is scrubbed once on the way out. A build emits tens of
  * thousands of output lines and at most one failure context, so this is the same guarantee for a
  * fraction of the work.
  *
  * @param label - short identifier for the artifact being built (e.g. `plugin develop`), prefixed
  * onto each line so parallel-free serial builds still read clearly.
+ * @param printers - where progress (`out`) and warnings (`err`) go, each with its stream's palette.
+ * By default a test worker's: `console.log`/`console.warn`, colourless (the run's reporter prints a
+ * worker's output) with the run's symbols. A script printing to a terminal passes its own.
  */
-export function createBuildReporter(label: string): BuildReporter {
+export function createBuildReporter(
+  label: string,
+  printers: Printers = workerPrinters(),
+): BuildReporter {
+  const { out, err: warn } = printers;
   const tail: string[] = [];
   let failureReason: string | undefined;
 
@@ -138,17 +147,17 @@ export function createBuildReporter(label: string): BuildReporter {
       return;
     switch (event.type) {
       case "phase_started":
-        console.log(
-          `  ${styleText(["dim"], `[${label}]`)} ${String(event.phase)}` +
+        out.print(
+          `  ${out.palette.paint("dim", `[${label}]`)} ${String(event.phase)}` +
             (event.message !== undefined
-              ? `: ${redactBuildText(event.message)}`
+              ? `: ${redactBuildText(plain(event.message))}`
               : ""),
         );
         break;
       case "warning":
         if (event.message !== undefined) {
-          console.warn(
-            `  ${styleText(["yellow"], `[${label}] warning:`)} ${redactBuildText(event.message)}`,
+          warn.print(
+            `  ${warn.palette.paint("warn", `[${label}] warning:`)} ${redactBuildText(plain(event.message))}`,
           );
         }
         break;

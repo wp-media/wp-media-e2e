@@ -11,16 +11,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  buildReport,
+  settleSiteLeftovers,
   verifyPool,
   verifySite,
   warnAboutElevation,
   warnAboutPluginDirs,
 } from "./preflight";
 import { resetOwnershipCaches } from "../wp/ownership";
-import type { CheckResult } from "./preflight";
+import type { CheckResult, SitePreflightResult } from "./preflight";
 import type { HealCellPlugin } from "./cell-plugin";
 import type { ClearedPluginDir } from "../wp/plugin";
 import type { SiteConfig } from "../config/types";
+import { createPalette } from "../terminal/palette";
 
 // A stub `wp` on PATH exercises the real exec layer + preflight with deterministic exit codes —
 // no WordPress, no database. Behaviour is chosen per test via two env vars:
@@ -176,6 +179,29 @@ test.describe("verifyPool — settling leftovers before the gates", () => {
       "[preflight] http://localhost:8100: left as found — a copy is left",
     );
   });
+
+  // Printed, never thrown: what the site said (escapes, a token) reaches no terminal as it is.
+  test("a refusal's text is printed plain and masked, line by line", async () => {
+    const ESC = String.fromCharCode(27);
+    const token = "ghp_16CharsOrMoreAAAA";
+    const warnings: string[] = [];
+    const warn = console.warn;
+    console.warn = (message: string) => warnings.push(message);
+    try {
+      await settleSiteLeftovers(localSite(), () =>
+        Promise.reject(
+          new Error(
+            `${ESC}[2Jrefused ${token.slice(0, 6)}\u200b${token.slice(6)}\n  ${ESC}]52;c;eA==\u0007at x`,
+          ),
+        ),
+      );
+    } finally {
+      console.warn = warn;
+    }
+    expect(warnings).toEqual([
+      "[preflight] http://localhost:8100: left as found — refused ***\n  at x",
+    ]);
+  });
 });
 
 test.describe("verifyPool — admin locale gate", () => {
@@ -215,6 +241,8 @@ test.describe("verifyPool — admin locale gate", () => {
     expect(message).toContain("fr_FR");
     // The hint must name the fix, since the cause is a site setting and not a code problem.
     expect(message).toContain("Site Language");
+    // Thrown as plain text, though this worker runs under FORCE_COLOR=1: reports keep the message.
+    expect(message).not.toContain(String.fromCharCode(27));
   });
 
   test("names a site in its report by maskSiteUrl: a baseURL that is no URL is never printed", async () => {
@@ -822,6 +850,28 @@ test.describe("verifySite — a broken copy of the cell's plugin", () => {
     expect(result.healedCellPlugin).toBe(detail);
   });
 
+  // Said on stderr as the pool is verified: a credential in what the site holds is masked.
+  test("says it removed the copy, a token in its folder's path masked", async () => {
+    const token = "ghp_16CharsOrMoreAAAA";
+    const hostile = {
+      ...cleared,
+      dir: { ...cleared.dir, path: `/srv/site/${token}/backwpup-pro` },
+    } as ClearedPluginDir;
+    const warnings: string[] = [];
+    const warn = console.warn;
+    console.warn = (message: string) => warnings.push(message);
+    try {
+      await verifyPool([localSite()], "backwpup", "local", [SLUG], (t, slug) =>
+        heal(t, slug).then(() => hostile),
+      );
+    } finally {
+      console.warn = warn;
+    }
+    const said = warnings.find((line) => line.includes("removed")) ?? "";
+    expect(said).toContain("removed /srv/site/***/backwpup-pro: a folder");
+    expect(said).not.toContain(token);
+  });
+
   test("without heal, only reports it, in place of the locale check, and changes nothing", async () => {
     const result = await verifySite(localSite(), 0, [SLUG]);
 
@@ -891,5 +941,98 @@ test.describe("verifySite — a broken copy of the cell's plugin", () => {
     expect(printed.join("\n")).toMatch(
       /\[preflight\] http:\/\/localhost:8100: WordPress cannot boot with the cell's plugin "backwpup-pro"/,
     );
+  });
+});
+
+test.describe("buildReport — the report a failed pool throws", () => {
+  test("is plain text, exactly: each failed site, every check, the hints", () => {
+    const report = buildReport(
+      [
+        {
+          index: 1,
+          baseURL: "https://user:pw-0001@site.test",
+          transport: { mode: "local", rootDir: "/var/www/site" },
+          checks: [
+            { name: "rootDir", ok: true, detail: "exists" },
+            {
+              name: "WP-CLI",
+              ok: false,
+              detail: "not on PATH",
+              hint: "Install WP-CLI",
+            },
+          ],
+        },
+      ],
+      2,
+      "backwpup",
+      "local",
+    );
+    expect(report.split("\n")).toEqual([
+      '[preflight] Transport verification failed — 1 of 2 site(s) in "backwpup/local" could not be verified.',
+      "Fix the issues below before re-running the suite:",
+      "",
+      "  ✗ Site 1 — https://***@site.test  [local: /var/www/site]",
+      "    ✓ rootDir: exists",
+      "    ✗ WP-CLI: not on PATH",
+      "      → Install WP-CLI",
+      "",
+      "1 of 2 site(s) passed. Resolve the issues above and re-run.",
+    ]);
+  });
+
+  test("says when every site failed", () => {
+    const report = buildReport(
+      [
+        {
+          index: 0,
+          baseURL: "https://a.test",
+          transport: { mode: "local", rootDir: "/a" },
+          checks: [{ name: "x", ok: false, detail: "y" }],
+        },
+      ],
+      1,
+      "wp-rocket",
+      "nginx",
+    );
+    expect(
+      report.endsWith(
+        "All sites failed pre-flight. Resolve the issues above and re-run.",
+      ),
+    ).toBe(true);
+  });
+});
+
+test.describe("the run-level warnings take the printer's palette", () => {
+  const unavailable: SitePreflightResult = {
+    index: 0,
+    baseURL: "http://broken.test",
+    transport: { mode: "local", rootDir: "/var/www/broken" },
+    checks: [],
+    elevation: "unavailable",
+    ownershipPending: false,
+    leftoverPluginDirs: ["/p/backwpup: a folder"],
+  };
+
+  test("a coloured palette styles both banners; the default (a worker's) never does", () => {
+    const colour = createPalette({ tty: true, color: true, unicode: true });
+    const styled: string[] = [];
+    warnAboutElevation([unavailable], (m) => styled.push(m), colour);
+    warnAboutPluginDirs([unavailable], (m) => styled.push(m), colour);
+    expect(styled).toHaveLength(2);
+    for (const banner of styled) expect(banner).toContain("\x1b[33m");
+
+    // This worker runs under FORCE_COLOR=1, which a worker's palette ignores.
+    const plain: string[] = [];
+    warnAboutElevation([unavailable], (m) => plain.push(m));
+    warnAboutPluginDirs([unavailable], (m) => plain.push(m));
+    expect(plain).toHaveLength(2);
+    for (const banner of plain) expect(banner).not.toContain("\x1b");
+  });
+
+  test("an ASCII palette spells the banners' symbols in ASCII", () => {
+    const ascii = createPalette({ tty: false, color: false, unicode: false });
+    const printed: string[] = [];
+    warnAboutElevation([unavailable], (m) => printed.push(m), ascii);
+    expect(printed[0]).toContain("  !  ELEVATION UNAVAILABLE");
   });
 });

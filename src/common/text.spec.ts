@@ -9,6 +9,8 @@ import {
   NOT_A_SITE_URL,
   MAX_COMBINING_MARKS,
   plain,
+  printableLine,
+  printableLines,
   redactSecrets,
   withoutFormat,
 } from "./text";
@@ -459,5 +461,40 @@ test.describe("maskValues", () => {
     ).toBe("a *** b");
     // A value overlapping itself.
     expect(maskValues("[aaaaaaaaaaa]", ["aaaaaaaa"])).toBe("[***]");
+  });
+});
+
+/** Someone else's text as printed lines: nothing drives the terminal, no credential shows. */
+test.describe("printableLine / printableLines", () => {
+  const ESC = String.fromCharCode(27);
+  const BEL = String.fromCharCode(7);
+  const TOKEN = "ghp_16CharsOrMoreAAAA";
+
+  test("drops CSI and OSC 52 sequences and masks a token", () => {
+    expect(
+      printableLine(`fatal ${ESC}]52;c;cHduZWQ=${BEL}${ESC}[2J ${TOKEN} end`),
+    ).toBe("fatal  *** end");
+  });
+
+  test("masks a token a format character splits: plain first, then the mask", () => {
+    const split = `${TOKEN.slice(0, 8)}\u200b${TOKEN.slice(8)}`;
+    expect(printableLine(`key ${split}`)).toBe("key ***");
+    // The other order would leave the joined token in clear.
+    expect(plain(redactSecrets(`key ${split}`))).toBe(`key ${TOKEN}`);
+  });
+
+  test("keeps a line's indent (a tab as one space), trims its end; no words is empty", () => {
+    expect(printableLine("  \tat x  ")).toBe("   at x");
+    expect(printableLine(`   ${ESC}[31m `)).toBe("");
+    expect(printableLine("")).toBe("");
+  });
+
+  test("splits on \\n and \\r\\n, each line made safe; empty text is one empty line", () => {
+    expect(printableLines(`one\r\n  ${ESC}[2Jtwo\n${TOKEN}`)).toEqual([
+      "one",
+      "  two",
+      "***",
+    ]);
+    expect(printableLines("")).toEqual([""]);
   });
 });

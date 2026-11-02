@@ -2,6 +2,7 @@ import { test as setup } from "@playwright/test";
 import type { TestInfo } from "@playwright/test";
 
 import { getPool, readRouting } from "../config/metadata";
+import { workerPalette } from "../config/output";
 import { ARTIFACTS_ATTACHMENT } from "../setup/attachments";
 import { isPlaceholderSite } from "../config/sites";
 import { isCellTargeted } from "../config/run-context";
@@ -88,7 +89,7 @@ setup(
     // Success: persist for worker processes, memoize in-process, and log a concise summary.
     await writeResolutionFile(artifactsDir, report.resolved);
     registerArtifacts(product, cell, report.artifacts);
-    console.log(formatSuccessSummary(report, product, cell));
+    console.log(formatSuccessSummary(report, product, cell, workerPalette()));
   },
 );
 

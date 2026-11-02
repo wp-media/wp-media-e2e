@@ -1,6 +1,11 @@
 import { test, expect } from "@playwright/test";
 
+import type { JsBuildPhase } from "apvm-napi";
+
 import { createBuildReporter, redactBuildText, requiresToken } from "./apvm";
+import type { Printers } from "../config/output";
+import { createPalette } from "../terminal/palette";
+import type { Palette } from "../terminal/palette";
 
 /** The APVM boundary's pure parts (masking by shape is `text.ts`'s `redactSecrets`). */
 
@@ -27,6 +32,11 @@ test.describe("redactBuildText", () => {
       expect(redactBuildText("https://u:p@github.com/o/r.git")).toBe(
         "https://***@github.com/o/r.git",
       );
+      // A format character inside a token hides it from neither mask.
+      expect(
+        redactBuildText(`for ${LEGACY.slice(0, 9)}\u200b${LEGACY.slice(9)}`),
+      ).toBe("for ***");
+      expect(redactBuildText("ghp_16Chars\u2060OrMoreAAAA")).toBe("***");
     } finally {
       for (const [name, value] of [
         ["GITHUB_TOKEN", saved.gh],
@@ -74,6 +84,89 @@ test.describe("createBuildReporter", () => {
     expect(context).toContain("line-59");
     expect(context).toContain("line-20"); // 60 - 40 = the oldest kept line
     expect(context).not.toContain("line-19");
+  });
+
+  // The phases as APVM sends them: a const enum's string values, which isolated modules cannot name.
+  const CLONE = "Clone" as JsBuildPhase;
+  const BUILD = "Build" as JsBuildPhase;
+
+  /** Printers that keep what they are given, on `palette`. */
+  function capture(palette: Palette): { printers: Printers; lines: string[] } {
+    const lines: string[] = [];
+    return {
+      lines,
+      printers: {
+        out: { palette, print: (line) => lines.push(`out:${line}`) },
+        err: { palette, print: (line) => lines.push(`err:${line}`) },
+      },
+    };
+  }
+
+  test("prints a phase to out and a warning to err, styled by their palettes, a token scrubbed", () => {
+    const colour = capture(
+      createPalette({ tty: true, color: true, unicode: true }),
+    );
+    const reporter = createBuildReporter("plugin develop", colour.printers);
+    reporter.onProgress(null, {
+      type: "phase_started",
+      phase: CLONE,
+      message: `from ${TOKEN}`,
+    });
+    reporter.onProgress(null, { type: "warning", message: "slow" });
+    expect(colour.lines).toEqual([
+      "out:  \x1b[2m[plugin develop]\x1b[22m Clone: from ***",
+      "err:  \x1b[33m[plugin develop] warning:\x1b[39m slow",
+    ]);
+
+    const plain = capture(
+      createPalette({ tty: false, color: false, unicode: false }),
+    );
+    const quiet = createBuildReporter("plugin develop", plain.printers);
+    quiet.onProgress(null, { type: "phase_started", phase: BUILD });
+    expect(plain.lines).toEqual(["out:  [plugin develop] Build"]);
+  });
+
+  test("each line on its own printer's palette, an event's escapes and line breaks dropped", () => {
+    const colour = createPalette({ tty: true, color: true, unicode: true });
+    const none = createPalette({ tty: false, color: false, unicode: true });
+    const lines: string[] = [];
+    const reporter = createBuildReporter("plugin develop", {
+      out: { palette: colour, print: (line) => lines.push(`out:${line}`) },
+      err: { palette: none, print: (line) => lines.push(`err:${line}`) },
+    });
+    reporter.onProgress(null, {
+      type: "phase_started",
+      phase: CLONE,
+      message: "a\x1b[2J\nb",
+    });
+    reporter.onProgress(null, {
+      type: "warning",
+      message: "\x1b]52;c;eA==\x07slow",
+    });
+    expect(lines).toEqual([
+      "out:  \x1b[2m[plugin develop]\x1b[22m Clone: a b",
+      "err:  [plugin develop] warning: slow",
+    ]);
+  });
+
+  test("by default prints as a test worker: console.log and console.warn, never coloured", () => {
+    const printed: string[] = [];
+    const { log, warn } = console;
+    console.log = (line: string) => printed.push(line);
+    console.warn = (line: string) => printed.push(line);
+    try {
+      // This worker runs under FORCE_COLOR=1, which a worker's palette ignores.
+      const reporter = createBuildReporter("plugin develop");
+      reporter.onProgress(null, { type: "phase_started", phase: CLONE });
+      reporter.onProgress(null, { type: "warning", message: "slow" });
+    } finally {
+      console.log = log;
+      console.warn = warn;
+    }
+    expect(printed).toEqual([
+      "  [plugin develop] Clone",
+      "  [plugin develop] warning: slow",
+    ]);
   });
 
   test("is empty when nothing noteworthy happened, and ignores transport errors", () => {

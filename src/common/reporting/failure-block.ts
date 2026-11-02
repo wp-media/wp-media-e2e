@@ -428,7 +428,7 @@ export function failureBlockLines(
   const add = (label: string, value: string): void => {
     if (value === "") return;
     lines.push(
-      `${INDENT}${palette.paint("command", padEnd(label, LABEL_WIDTH))}${value}`,
+      `${INDENT}${palette.paint("emphasis", padEnd(label, LABEL_WIDTH))}${value}`,
     );
   };
   if (facts.setup !== undefined) {

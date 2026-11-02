@@ -2,6 +2,8 @@ import type { Page } from "@playwright/test";
 
 import { errorMessage } from "../guards";
 import { SiteHealthPage } from "../pages/site-health.page";
+import { TEXT_PALETTE } from "../terminal/palette";
+import type { Palette } from "../terminal/palette";
 import { maskSiteUrl, plain, redactSecrets } from "../text";
 
 /**
@@ -92,17 +94,24 @@ export function parseSiteInfo(text: string): SiteVersions {
 }
 
 /**
- * One line naming a site's versions, for the terminal.
+ * One line naming a site's versions, for the terminal only (`site-info.json` keeps the entry, not
+ * this line): its separators and dash are the palette's, so ASCII under `E2E_OUTPUT=plain`.
  *
+ * @param entry - the site's versions, or why they are unknown.
+ * @param palette - the symbols of the stream it is printed to; plain Unicode by default.
  * @example
  * ```ts
  * describeSiteInfo(entry);
  * // "https://bwu2.example: WordPress 7.1.3 · PHP 8.5.11 64bit (fpm-fcgi) · nginx/1.24.0 · database 8.0.46 (mysqli)"
  * ```
  */
-export function describeSiteInfo(entry: SiteInfoEntry): string {
+export function describeSiteInfo(
+  entry: SiteInfoEntry,
+  palette: Palette = TEXT_PALETTE,
+): string {
+  const { symbol } = palette;
   if ("error" in entry) {
-    return `${entry.baseURL}: versions unknown — ${entry.error}`;
+    return `${entry.baseURL}: versions unknown ${symbol("dash")} ${entry.error}`;
   }
   const v = entry.versions;
   const unknown = "unknown";
@@ -114,7 +123,7 @@ export function describeSiteInfo(entry: SiteInfoEntry): string {
       v.databaseExtension === undefined ? "" : ` (${v.databaseExtension})`
     }`,
   ];
-  return `${entry.baseURL}: ${parts.join(" · ")}`;
+  return `${entry.baseURL}: ${parts.join(` ${symbol("separator")} `)}`;
 }
 
 /**

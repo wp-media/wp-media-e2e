@@ -207,7 +207,14 @@ Three always-on reporters of the suite's own, given the run's facts (`RunDescrip
     read and validated by the config factory — a bad value fails the run as its config loads) decides
     colour and Unicode; a pipe, a file or the orchestrator's `run.log` (its environment carries no
     colour variable, its stdout is a file) get plain bytes, `FORCE_COLOR` honoured. Nothing styled
-    reaches `results.jsonl` or the reports.
+    reaches `results.jsonl` or the reports. Setup projects' lines (`[artifacts]`, the elevation and
+    plugin-folder banners, APVM's progress) use `workerPalette` (`config/output.ts`): never coloured,
+    ASCII under `plain`, `TERM=dumb` or a C locale; a thrown report (`buildReport`,
+    `formatFailureReport`) is plain Unicode text (`TEXT_PALETTE`) — the printer styles, never the
+    data. Labels are the `emphasis` token, commands `command`. What a site or tool wrote that is
+    printed rather than thrown (a check's detail and hint, warm's errors, APVM's progress, the
+    banners' site values) goes through `printableLines` (`text.ts`): `plain` then `redactSecrets`,
+    per line, indent kept.
   - **Live block** ([`live-block.ts`](../../src/common/reporting/live-block.ts) rows,
     [`live-session.ts`](../../src/common/reporting/live-session.ts) lifecycle): only when
     `capabilities.live` — a TTY ≥ 20 columns whose `TERM` moves the cursor, not `plain`, not `CI`

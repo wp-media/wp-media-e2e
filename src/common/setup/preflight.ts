@@ -1,5 +1,4 @@
 import { existsSync, statSync } from "node:fs";
-import { styleText } from "node:util";
 
 import { execa } from "execa";
 
@@ -21,9 +20,13 @@ import {
   renderPluginDirWarning,
 } from "./elevation-report";
 import type { SiteElevation } from "./elevation-report";
+import { checkLines } from "./check-lines";
+import { workerPalette } from "../config/output";
+import { TEXT_PALETTE } from "../terminal/palette";
+import type { Palette } from "../terminal/palette";
 import { errorMessage } from "../guards";
 import { isPlaceholderSite } from "../config/sites";
-import { maskSiteUrl } from "../text";
+import { maskSiteUrl, printableLine, printableLines } from "../text";
 import type {
   DockerTransport,
   LocalTransport,
@@ -979,7 +982,9 @@ export async function verifyPool(
   // Changed a site before any scenario: always said, on a passing pool too.
   for (const { baseURL, healedCellPlugin } of results) {
     if (healedCellPlugin !== undefined) {
-      console.warn(`[preflight] ${maskSiteUrl(baseURL)}: ${healedCellPlugin}`);
+      console.warn(
+        `[preflight] ${printableLine(maskSiteUrl(baseURL))}: ${printableLines(healedCellPlugin).join("\n")}`,
+      );
     }
   }
 
@@ -1009,8 +1014,9 @@ export async function settleSiteLeftovers(
   try {
     await settle(site);
   } catch (error) {
+    // Printed, never thrown: an error's text (a site's output) is made safe line by line.
     console.warn(
-      `[preflight] ${maskSiteUrl(site.baseURL)}: left as found — ${errorMessage(error)}`,
+      `[preflight] ${printableLine(maskSiteUrl(site.baseURL))}: left as found — ${printableLines(errorMessage(error)).join("\n")}`,
     );
   }
 }
@@ -1031,10 +1037,14 @@ export async function settleSiteLeftovers(
  * Playwright setup project, where the banner is an aside to a test run. The fleet healthcheck passes
  * `console.log` instead: its whole output *is* the report, and a documented `healthcheck > fleet.log`
  * would otherwise capture every line except this one.
+ * @param palette - colour and symbols for `print`'s stream: by default a worker's (colourless — the
+ * run's reporter prints a worker's output — with the run's symbols); the healthcheck passes its
+ * stdout's.
  */
 export function warnAboutElevation(
   results: readonly SitePreflightResult[],
   print: (message: string) => void = console.warn,
+  palette: Palette = workerPalette(),
 ): void {
   const banner = renderElevationWarning(
     results.flatMap((result): SiteElevation[] =>
@@ -1049,6 +1059,7 @@ export function warnAboutElevation(
             },
           ],
     ),
+    palette,
   );
   if (banner !== undefined) print(banner);
 }
@@ -1059,10 +1070,12 @@ export function warnAboutElevation(
  *
  * @param results - every site verified in this run.
  * @param print - where to send it; see {@link warnAboutElevation}.
+ * @param palette - colour and symbols for `print`'s stream; see {@link warnAboutElevation}.
  */
 export function warnAboutPluginDirs(
   results: readonly SitePreflightResult[],
   print: (message: string) => void = console.warn,
+  palette: Palette = workerPalette(),
 ): void {
   const banner = renderPluginDirWarning(
     results.map((result) => ({
@@ -1070,50 +1083,42 @@ export function warnAboutPluginDirs(
       transport: transportLabel(result.transport),
       leftovers: result.leftoverPluginDirs ?? [],
     })),
+    palette,
   );
   if (banner !== undefined) print(banner);
 }
 
 // ── Error report formatting ───────────────────────────────────────────────────
 
-function buildReport(
-  failed: SitePreflightResult[],
+/**
+ * The report a failed pool throws: each failed site, every check it ran, and the hints. Plain text
+ * (`TEXT_PALETTE`): it becomes an error's message, which reports and `results.jsonl` keep and the
+ * run's reporter prints — styling is the printer's, never the data's.
+ *
+ * @param failed - the sites with a failed check.
+ * @param total - how many real sites the pool verified.
+ * @param product - the product, for the headline.
+ * @param cell - the cell, for the headline.
+ * @returns the report, lines joined by `\n`.
+ */
+export function buildReport(
+  failed: readonly SitePreflightResult[],
   total: number,
   product: string,
   cell: string,
 ): string {
+  const { symbol } = TEXT_PALETTE;
   const lines: string[] = [];
 
   lines.push(
-    styleText(
-      ["bold"],
-      `[preflight] Transport verification failed — ${String(failed.length)} of ${String(total)} site(s) in "${product}/${cell}" could not be verified.`,
-    ),
+    `[preflight] Transport verification failed — ${String(failed.length)} of ${String(total)} site(s) in "${product}/${cell}" could not be verified.`,
   );
   lines.push("Fix the issues below before re-running the suite:\n");
 
   for (const result of failed) {
     const label = `Site ${String(result.index)} — ${maskSiteUrl(result.baseURL)}  [${transportLabel(result.transport)}]`;
-    lines.push(
-      `  ${styleText(["bold", "red"], "✗")} ${styleText(["bold"], label)}`,
-    );
-
-    for (const check of result.checks) {
-      if (check.ok) {
-        lines.push(
-          `    ${styleText(["green"], "✓")} ${check.name}: ${check.detail}`,
-        );
-      } else {
-        lines.push(
-          `    ${styleText(["red"], "✗")} ${styleText(["bold"], check.name)}: ${check.detail}`,
-        );
-        if (check.hint !== undefined) {
-          for (const hintLine of check.hint.split("\n")) {
-            lines.push(`      ${styleText(["yellow"], "→")} ${hintLine}`);
-          }
-        }
-      }
-    }
+    lines.push(`  ${symbol("cross")} ${label}`);
+    lines.push(...checkLines(result.checks, "    ", TEXT_PALETTE));
     lines.push("");
   }
 

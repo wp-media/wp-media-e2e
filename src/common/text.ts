@@ -316,3 +316,37 @@ export function plain(text: string): string {
     .replace(EXCESS_MARKS, "$1")
     .trim();
 }
+
+/**
+ * One line someone else wrote (WP-CLI's output, an error, a site's value) as safe to print:
+ * {@link plain}, then {@link redactSecrets} — in that order, since a format character inside a
+ * credential would hide it from the mask — with its leading spaces kept (a tab counts as one), so an
+ * indented line stays indented. A line with no words is empty.
+ *
+ * @param text - one line; a newline in it becomes a space (split first with {@link printableLines}).
+ * @example
+ * ```ts
+ * printableLine("  \u001b[2Jtoken ghp_\u200bAbC…"); // "  token ***"
+ * ```
+ */
+export function printableLine(text: string): string {
+  const spaced = withoutControls(text);
+  const words = redactSecrets(plain(spaced));
+  if (words === "") return "";
+  return `${/^ */.exec(spaced)?.[0] ?? ""}${words}`;
+}
+
+/**
+ * Text someone else wrote, one {@link printableLine} per line, for a printer that lays out
+ * continuation lines itself.
+ *
+ * @param text - any text; `\n` ends a line (a `\r` before it is a control: dropped at the line's end).
+ * @returns at least one line (`[""]` for empty text).
+ * @example
+ * ```ts
+ * printableLines("fatal\n  \u001b]52;c;eA==\u0007at x"); // ["fatal", "  at x"]
+ * ```
+ */
+export function printableLines(text: string): string[] {
+  return text.split("\n").map(printableLine);
+}

@@ -1,4 +1,4 @@
-import { redactSecrets, plain, withoutControls } from "../text";
+import { plain, printableLine } from "../text";
 import type { TerminalCapabilities } from "../terminal/capabilities";
 import { capLine, rule } from "../terminal/layout";
 import {
@@ -147,12 +147,9 @@ export function cleanLine(text: string, ellipsis: string): string {
  * @param text - one line a suite reporter wrote.
  */
 export function suiteLine(text: string): string {
-  const spaced = withoutControls(text);
-  const words = redactSecrets(plain(spaced));
-  // A line of nothing but spaces is empty: an indent alone shows nothing.
-  if (words === "") return "";
-  const indent = /^ */.exec(spaced)?.[0] ?? "";
-  return `${indent.slice(0, MAX_INDENT)}${words}`;
+  const line = printableLine(text);
+  const indent = /^ */.exec(line)?.[0] ?? "";
+  return `${indent.slice(0, MAX_INDENT)}${line.slice(indent.length)}`;
 }
 
 /**
@@ -418,5 +415,5 @@ export function runHeaderLine(
     title: words,
   });
   // The words in bold, the glyphs as they are; a function, so a `$` in the words is no pattern.
-  return ruled.replace(words, () => palette.paint("command", words));
+  return ruled.replace(words, () => palette.paint("emphasis", words));
 }

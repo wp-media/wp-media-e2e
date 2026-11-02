@@ -1,6 +1,7 @@
 import { styleText } from "node:util";
 
-import type { TerminalCapabilities } from "./capabilities";
+import { detectCapabilities } from "./capabilities";
+import type { CapabilityInputs, TerminalCapabilities } from "./capabilities";
 
 /**
  * The terminal's semantic colours and symbols. A palette styles text that is already final — plain,
@@ -12,8 +13,12 @@ import type { TerminalCapabilities } from "./capabilities";
  * under `CI` keeps the colour the capabilities granted. With colour off, `paint` returns its text unchanged and nothing emits an escape.
  */
 
-/** What a piece of text means, which picks its style. */
-export type Token = "ok" | "fail" | "warn" | "stop" | "id" | "dim" | "command";
+/**
+ * What a piece of text means, which picks its style. `command` is something to run; `emphasis` a
+ * label or heading that must stand out (both bold, so a reader of the code knows which is which).
+ */
+export type Token =
+  "ok" | "fail" | "warn" | "stop" | "id" | "dim" | "command" | "emphasis";
 
 /** Named ANSI colours and bold/dim only: no 256-colour, truecolor or background. */
 const TOKEN_FORMATS: Readonly<Record<Token, Parameters<typeof styleText>[0]>> =
@@ -26,6 +31,7 @@ const TOKEN_FORMATS: Readonly<Record<Token, Parameters<typeof styleText>[0]>> =
     // Metadata and paths.
     dim: "dim",
     command: "bold",
+    emphasis: "bold",
   };
 
 /**
@@ -70,8 +76,14 @@ export const SYMBOLS = {
   separator: { unicode: "·", ascii: "." },
   /** Between a list item and its detail, and an empty table cell. */
   dash: { unicode: "—", ascii: "-" },
-  /** From one state or value to the next. */
+  /** From one state or value to the next; also a hint under a failed check. */
   arrow: { unicode: "→", ascii: "->" },
+  /** Points back at the item it follows: a mark beside a list item. */
+  backArrow: { unicode: "←", ascii: "<-" },
+  /** A list item. */
+  bullet: { unicode: "•", ascii: "*" },
+  /** Two things that differ (where `=` says they match). */
+  notEqual: { unicode: "≠", ascii: "!=" },
   /** Tree drawing: a vertical line, a branch, the last branch. */
   vertical: { unicode: "│", ascii: "|" },
   branch: { unicode: "├", ascii: "+" },
@@ -174,6 +186,31 @@ export function createPalette(
   const series = (index: number, text: string): string =>
     capabilities.color ? seriesPaint(index, text) : text;
   return { paint, symbol, status, series };
+}
+
+/**
+ * The palette for text that is data, not a terminal's: a thrown error's message, a report. No colour —
+ * whoever prints it decides that — and Unicode symbols, since reports are UTF-8 whatever the terminal.
+ */
+export const TEXT_PALETTE: Palette = createPalette({
+  tty: false,
+  color: false,
+  unicode: true,
+});
+
+/**
+ * The palette for a stream, decided by {@link detectCapabilities}: a shorthand for callers that need
+ * nothing else from the capabilities.
+ *
+ * @param inputs - the environment, the stream and the caller's mode, screen context and pipe policy.
+ * @returns the palette for that stream.
+ * @example
+ * ```ts
+ * paletteFor({ env: { TERM: "xterm" }, stream: { isTTY: false } }).paint("ok", "done"); // "done"
+ * ```
+ */
+export function paletteFor(inputs: CapabilityInputs): Palette {
+  return createPalette(detectCapabilities(inputs));
 }
 
 /**

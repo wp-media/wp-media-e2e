@@ -1,29 +1,34 @@
 import "./src/common/config/load-env";
 
-import { styleText } from "node:util";
-
 import { chromium } from "@playwright/test";
 import type { Browser } from "@playwright/test";
 
 import { loginViaUi } from "./src/common/auth/login";
 import { boolEnv, intEnv } from "./src/common/config/env";
+import { consolePrinters } from "./src/common/config/output";
+import type { Printer } from "./src/common/config/output";
 import { isPlaceholderSite } from "./src/common/config/sites";
-import type {
-  ProductConfig,
-  SiteInput,
-  Transport,
-} from "./src/common/config/types";
+import type { ProductConfig, SiteInput } from "./src/common/config/types";
 import {
-  transportLabel,
   verifySite,
   warnAboutElevation,
   warnAboutPluginDirs,
 } from "./src/common/setup/preflight";
+import {
+  headerLines,
+  productHeaderLines,
+  productTallyLine,
+  siteResultLines,
+  skipLine,
+  summaryLines,
+} from "./src/common/setup/healthcheck-lines";
+import type {
+  CellSkip,
+  SiteResult,
+} from "./src/common/setup/healthcheck-lines";
 import { resolveIdentity } from "./src/common/artifacts/manifest";
 import type { CheckResult } from "./src/common/setup/preflight";
-import type { ElevationSupport } from "./src/common/wp/exec";
 import { disposeConnections } from "./src/common/wp/exec";
-import { redactSecrets } from "./src/common/text";
 import { PRODUCTS } from "./src/projects/products";
 
 /**
@@ -72,7 +77,9 @@ const LOGIN_TIMEOUT_MS = intEnv(
 const HEADED =
   process.argv.includes("--headed") || boolEnv("HEALTHCHECK_HEADED", false);
 
-const RULE = "─".repeat(72);
+// Where the report goes: stdout, styled as its stream and `E2E_OUTPUT` allow (`healthcheck >
+// fleet.log` gets no escape). Read once, after `.env` is loaded.
+const OUT: Printer = consolePrinters().out;
 
 // ── Discovery ────────────────────────────────────────────────────────────────────
 
@@ -84,13 +91,6 @@ interface SiteTask {
   readonly index: number;
   /** The slug the cell installs as — whose folder the check looks at, and its @plugin scenarios clear. */
   readonly slugs: readonly string[];
-}
-
-/** A cell that has no real sites to check (placeholder-only, or the product declares no cells). */
-interface CellSkip {
-  readonly product: string;
-  readonly cell: string;
-  readonly reason: string;
 }
 
 /** Everything to do for one product: the sites to check and the cells that were skipped. */
@@ -144,34 +144,6 @@ function discover(products: readonly ProductConfig[]): ProductPlan[] {
 }
 
 // ── Per-site checking ────────────────────────────────────────────────────────────
-
-/** The full outcome for one site: its identity, every check run against it, timing, and pass/fail. */
-interface SiteResult {
-  readonly product: string;
-  readonly cell: string;
-  readonly index: number;
-  readonly baseURL: string;
-  readonly transport: Transport;
-  readonly checks: CheckResult[];
-  readonly durationMs: number;
-  readonly ok: boolean;
-  /**
-   * What privileges this site's transport reached, when it got far enough to be asked. Carried so
-   * the fleet run can close with the same elevation warning a suite run prints, from the same
-   * renderer — a fleet monitor is exactly where "half the fleet cannot clean up after itself" should
-   * be impossible to miss.
-   */
-  readonly elevation?: ElevationSupport;
-  /**
-   * Whether this site's files actually need handing to another owner. Carried for the same reason
-   * {@link SitePreflightResult} carries it: the run-level banner states the ownership cost only for
-   * the sites where it is true, and a fleet check that dropped it would quietly claim the cost for
-   * none of them.
-   */
-  readonly ownershipPending?: boolean;
-  /** Folders at the cell's slug that WordPress lists no plugin in, for the closing warning. */
-  readonly leftoverPluginDirs?: readonly string[];
-}
 
 /** Logs in through the WordPress UI in a throwaway browser context; never persists state. */
 async function checkLogin(
@@ -309,206 +281,22 @@ async function runProduct(
 
 // ── Reporting ────────────────────────────────────────────────────────────────────
 
-/** The human-readable identity of a site, e.g. `backwpup/pro@nginx · site[0] https://… [ssh: user@host]`. */
-function siteLabel(
-  result: Pick<
-    SiteResult,
-    "product" | "cell" | "index" | "baseURL" | "transport"
-  >,
-): string {
-  return `${result.product}/${result.cell} · site[${String(result.index)}] ${redactSecrets(result.baseURL)} [${transportLabel(result.transport)}]`;
-}
-
-/** Prints the top banner and the fleet-wide counts about to be checked. */
-function printHeader(plans: readonly ProductPlan[]): void {
-  const siteCount = plans.reduce((n, p) => n + p.tasks.length, 0);
-  const cellCount = new Set(
-    plans.flatMap((p) => p.tasks.map((t) => `${t.product}/${t.cell}`)),
-  ).size;
-  const productCount = plans.length;
-
-  console.log(styleText(["bold", "cyan"], RULE));
-  console.log(styleText(["bold", "cyan"], "  wp-media-e2e — Health Check"));
-  console.log(styleText(["bold", "cyan"], RULE));
-  console.log(
-    styleText(
-      ["dim"],
-      `  Preflight (transport + WordPress) and login checks across ${String(siteCount)} ` +
-        `site(s) in ${String(cellCount)} cell(s), ${String(productCount)} product(s).`,
-    ),
-  );
-  console.log("");
-}
-
-/** Prints a per-product section divider so each product's output is visually self-contained. */
-function printProductHeader(product: string): void {
-  const prefix = `── ${product} `;
-  const fill = "─".repeat(Math.max(0, RULE.length - prefix.length));
-  console.log(styleText(["bold", "magenta"], `${prefix}${fill}`));
-  console.log("");
-}
-
-/** Prints one skipped cell (placeholder-only) — informational, never a failure. */
-function printSkip(skip: CellSkip): void {
-  console.log(
-    `  ${styleText(["yellow", "bold"], "⚠")} ${skip.product}/${skip.cell} — ` +
-      `${styleText(["yellow"], "skipped")}: ${skip.reason}`,
-  );
-}
-
-/** Prints one check as an indented ✓/✗ line, with its hint (failures only) on further-indented → lines. */
-function printCheckLine(check: CheckResult): void {
-  if (check.ok) {
-    console.log(
-      `      ${styleText(["green"], "✓")} ${check.name}: ${check.detail}`,
-    );
-    return;
-  }
-  console.log(
-    `      ${styleText(["red"], "✗")} ${styleText(["bold"], check.name)}: ${check.detail}`,
-  );
-  if (check.hint !== undefined) {
-    for (const hintLine of check.hint.split("\n")) {
-      console.log(`        ${styleText(["yellow"], "→")} ${hintLine}`);
-    }
-  }
+/**
+ * Prints lines to stdout.
+ *
+ * @param lines - the lines, each printed with its line end.
+ */
+function printLines(lines: readonly string[]): void {
+  for (const line of lines) OUT.print(line);
 }
 
 /**
- * Prints one site's result the moment it is known. Passes AND failures both enumerate their
- * individual checks, so a green site still shows exactly WHAT was verified (SSH, rootDir,
- * WordPress, login), not merely that it passed — with an `n/m checks` tally on the headline.
+ * Prints one site's result the moment it is known.
+ *
+ * @param result - the site's result.
  */
 function printSiteResult(result: SiteResult): void {
-  const label = siteLabel(result);
-  const duration = styleText(
-    ["dim"],
-    `(${(result.durationMs / 1000).toFixed(1)}s)`,
-  );
-  const passedChecks = result.checks.filter((c) => c.ok).length;
-  const tally = styleText(
-    ["dim"],
-    `${String(passedChecks)}/${String(result.checks.length)} checks`,
-  );
-
-  if (result.ok) {
-    console.log(
-      `  ${styleText(["green", "bold"], "✔")} ${label} · ${tally} ${duration}`,
-    );
-  } else {
-    console.log(
-      `  ${styleText(["red", "bold"], "✖")} ${styleText(["bold"], label)} · ${tally} ${duration}`,
-    );
-  }
-
-  for (const check of result.checks) printCheckLine(check);
-  console.log("");
-}
-
-/** Prints a product's own tally right after its section — passed/failed sites and skipped cells. */
-function printProductSubSummary(
-  plan: ProductPlan,
-  results: readonly SiteResult[],
-): void {
-  const failed = results.filter((r) => !r.ok).length;
-  const passed = results.length - failed;
-  const skipNote =
-    plan.skips.length > 0
-      ? `, ${String(plan.skips.length)} cell(s) skipped`
-      : "";
-
-  let summary: string;
-  if (results.length === 0) {
-    const note =
-      plan.skips.length > 0
-        ? ` (${String(plan.skips.length)} cell(s) skipped)`
-        : "";
-    summary = styleText(["yellow"], `no real sites to check${note}`);
-  } else if (failed === 0) {
-    summary = styleText(
-      ["green", "bold"],
-      `${String(passed)}/${String(results.length)} site(s) passed${skipNote}`,
-    );
-  } else {
-    summary =
-      `${styleText(["red", "bold"], `${String(failed)} failed`)}, ` +
-      `${String(passed)}/${String(results.length)} passed${skipNote}`;
-  }
-
-  console.log(`  ${styleText(["bold"], `${plan.product}:`)} ${summary}`);
-}
-
-/** Prints the final per-product breakdown + fleet totals, and returns whether the fleet is healthy. */
-function printOverallSummary(
-  plans: readonly ProductPlan[],
-  allResults: readonly SiteResult[],
-  elapsedMs: number,
-): boolean {
-  const failed = allResults.filter((r) => !r.ok);
-  const passed = allResults.length - failed.length;
-  const totalSkips = plans.reduce((n, p) => n + p.skips.length, 0);
-  const nameWidth = Math.max(0, ...plans.map((p) => p.product.length));
-
-  console.log(styleText(["bold"], RULE));
-  console.log(styleText(["bold"], "  Summary"));
-  console.log(styleText(["bold"], RULE));
-
-  // Per-product breakdown — never mixes one product's sites with another's.
-  for (const plan of plans) {
-    const results = allResults.filter((r) => r.product === plan.product);
-    const productFailed = results.filter((r) => !r.ok).length;
-    const productPassed = results.length - productFailed;
-    const icon =
-      productFailed > 0
-        ? styleText(["red", "bold"], "✖")
-        : results.length > 0
-          ? styleText(["green", "bold"], "✔")
-          : styleText(["yellow", "bold"], "⚠");
-    const parts = [
-      `${String(productPassed)}/${String(results.length)} site(s) passed`,
-    ];
-    if (plan.skips.length > 0) {
-      parts.push(`${String(plan.skips.length)} cell(s) skipped`);
-    }
-    console.log(
-      `  ${icon} ${styleText(["bold"], plan.product.padEnd(nameWidth))}  ${parts.join(" · ")}`,
-    );
-  }
-
-  console.log("");
-  console.log(
-    `  ${styleText(["green", "bold"], String(passed))} passed, ` +
-      `${styleText(failed.length > 0 ? ["red", "bold"] : ["dim"], String(failed.length))} failed, ` +
-      `${styleText(["yellow", "bold"], String(totalSkips))} skipped ` +
-      styleText(["dim"], `— ${(elapsedMs / 1000).toFixed(1)}s total`),
-  );
-  console.log("");
-
-  if (failed.length > 0) {
-    console.log(
-      styleText(
-        ["red", "bold"],
-        `  ${String(failed.length)} of ${String(allResults.length)} site(s) failed. See details above.`,
-      ),
-    );
-  } else if (allResults.length > 0) {
-    console.log(
-      styleText(
-        ["green", "bold"],
-        `  All ${String(allResults.length)} checked site(s) are healthy.`,
-      ),
-    );
-  } else {
-    console.log(
-      styleText(
-        ["yellow", "bold"],
-        "  No real sites were configured to check (placeholder/example data only).",
-      ),
-    );
-  }
-  console.log("");
-
-  return failed.length === 0;
+  printLines(siteResultLines(result, OUT.palette));
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────────
@@ -517,7 +305,7 @@ async function main(): Promise<void> {
   const startedAt = Date.now();
   const plans = discover(PRODUCTS);
 
-  printHeader(plans);
+  printLines(headerLines(plans, OUT.palette));
 
   const totalTasks = plans.reduce((n, p) => n + p.tasks.length, 0);
   // Only pay for a browser when there is at least one real site to log into. `HEADED` shows the
@@ -530,18 +318,17 @@ async function main(): Promise<void> {
   try {
     // Products run sequentially so each section's live output stays contiguous; sites within a
     // product run concurrently via `limit`.
-    for (const plan of plans) {
-      printProductHeader(plan.product);
-      for (const skip of plan.skips) printSkip(skip);
-      if (plan.skips.length > 0) console.log("");
+    for (const [index, plan] of plans.entries()) {
+      printLines(productHeaderLines(plan.product, index, OUT.palette));
+      printLines(plan.skips.map((skip) => skipLine(skip, OUT.palette)));
+      if (plan.skips.length > 0) OUT.print("");
 
       let results: SiteResult[] = [];
       if (plan.tasks.length > 0 && browser !== null) {
         results = await runProduct(browser, plan, limit);
       }
       allResults.push(...results);
-      printProductSubSummary(plan, results);
-      console.log("");
+      printLines([productTallyLine(plan, results, OUT.palette), ""]);
     }
 
     // Inside the `try`, so a failure while printing a later product still leaves the operator with
@@ -550,19 +337,17 @@ async function main(): Promise<void> {
     // screen that is not a verdict. Rendered by the same function a suite run uses, so a fleet check
     // and a run can never disagree — but sent to **stdout**, because unlike a suite run this
     // program's entire output is the report, and `healthcheck > fleet.log` must not drop it.
-    warnAboutElevation(allResults, console.log);
-    warnAboutPluginDirs(allResults, console.log);
+    warnAboutElevation(allResults, OUT.print, OUT.palette);
+    warnAboutPluginDirs(allResults, OUT.print, OUT.palette);
   } finally {
     if (browser !== null) await browser.close();
     disposeConnections();
   }
 
-  const healthy = printOverallSummary(
-    plans,
-    allResults,
-    Date.now() - startedAt,
+  printLines(
+    summaryLines(plans, allResults, Date.now() - startedAt, OUT.palette),
   );
-  process.exit(healthy ? 0 : 1);
+  process.exit(allResults.every((result) => result.ok) ? 0 : 1);
 }
 
 await main();
