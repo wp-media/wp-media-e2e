@@ -9,12 +9,14 @@ import { test, expect } from "@playwright/test";
 
 import {
   DONE_LINE,
-  drawnWaitRows,
+  drawnReadyRows,
   EXITED_PREFIX,
   expectedPermanentLines,
   LIVE_MARK,
   NOT_LIVE_LINE,
   phaseDoneLine,
+  readyBlock,
+  readyLine,
   residueBound,
   SOCKET_DIR_PREFIX,
   type PaneSize,
@@ -26,16 +28,20 @@ import { isCi } from "./capabilities";
 /**
  * The live region on a **real** terminal: tmux runs the driver (`live-tmux-driver.ts`) in a pane,
  * which draws, prints (some lines wrapping) and redraws taller and shorter blocks over 4 phases of
- * 21 cycles, a 50 ms throttle often pending. Between phases the driver keeps redrawing an 8-row block
- * while the spec resizes the pane: wider and taller, back, then shorter only. Captured with wrapped
- * lines joined (`capture-pane -J`, history included), every permanent line must be there, once, whole
- * and in order; no live row may be left, except right after a resize, where only parts of the old
- * block may stay, no more than {@link residueBound} allows (what tmux's reflow moves out of the
- * region's reach; measured, and documented in `live.ts`).
+ * 21 cycles, a 50 ms throttle often pending. After each phase the driver redraws an 8-row block,
+ * then leaves one drawn ({@link readyLine} its first row) and writes nothing; once the pane shows
+ * that whole block, the spec resizes it: wider and taller, back, then shorter only. Quiet, so no
+ * draw at the old size reaches the pane after it changed — such a draw's residue depends on when
+ * `SIGWINCH` is handled, not on the region, and once made a capture fail under CPU load. Captured
+ * with wrapped lines joined (`capture-pane -J`, history included), every permanent line must be
+ * there, once, whole and in order; no live row may be left, except right after a resize, where only
+ * parts of the old block may stay, no more than {@link residueBound} allows (what tmux's reflow
+ * moves out of the region's reach; measured, and documented in `live.ts`).
  *
- * Every tmux server is the spec's own (a socket in a fresh folder, no user config) and never outlives
- * it: killed after each test and in its `finally`; the driver kills it too when the spec's process is
- * gone or a phase stalls; a crashed driver's pane stays readable for 20 s, then ends the server.
+ * Every tmux server is the spec's own (a socket in a fresh folder, no user config) and never
+ * outlives it: killed after each test and in its `finally`; the driver kills it too when the spec's
+ * process is gone or a phase stalls; a crashed driver's pane stays readable for 20 s, then ends the
+ * server.
  *
  * tmux is not on GitHub's `ubuntu-24.04` image: CI installs it. Locally a missing tmux skips; under
  * `CI` it fails, so the check is never silently absent.
@@ -178,6 +184,31 @@ class Pane {
   }
 
   /**
+   * Waits until the pane's last lines are `rows`: a block drawn whole, none of it still unread.
+   *
+   * @param rows - the block, as drawn.
+   * @throws {@link Error} at once when the driver ended or refused, else after
+   *   {@link MARKER_WAIT_MS}; with the pane.
+   */
+  async waitForBlock(rows: readonly string[]): Promise<void> {
+    const deadline = performance.now() + MARKER_WAIT_MS;
+    for (;;) {
+      const lines = await this.capture();
+      if (JSON.stringify(lines.slice(-rows.length)) === JSON.stringify(rows))
+        return;
+      const ended = lines.some(
+        (shown) => shown === NOT_LIVE_LINE || shown.startsWith(EXITED_PREFIX),
+      );
+      if (ended || performance.now() > deadline)
+        throw new Error(
+          `The pane never ended with the block:\n${rows.join("\n")}\n` +
+            `It showed:\n${lines.join("\n")}`,
+        );
+      await delay(50);
+    }
+  }
+
+  /**
    * Resizes the pane.
    *
    * @param size - its new columns and rows.
@@ -277,7 +308,7 @@ function resizesOf(start: PaneSize, larger: PaneSize): readonly PaneSize[] {
 }
 
 /**
- * Each resize's window: after phase `n`'s line, the wait block drawn in the size before it.
+ * Each resize's window: after phase `n`'s line, its ready block drawn in the size before it.
  *
  * @param start - the pane's first size.
  * @param resizes - the sizes, in order.
@@ -291,7 +322,7 @@ function windowsOf(
   resizes.forEach((after, index) => {
     windows.set(phaseDoneLine(index + 1), {
       bound: residueBound(before, after),
-      rows: drawnWaitRows(before),
+      rows: drawnReadyRows(before, index + 1),
     });
     before = after;
   });
@@ -322,9 +353,14 @@ for (const [start, larger] of [
     const resizes = resizesOf(start, larger);
     try {
       await pane.start(start);
+      let before: PaneSize = start;
       for (const [index, size] of resizes.entries()) {
-        await pane.waitFor(phaseDoneLine(index + 1));
+        await pane.waitFor(readyLine(index + 1));
+        // The whole block, not just its first row: an 8-row write tmux read only in part would draw
+        // its rest after the resize, at the old size.
+        await pane.waitForBlock(readyBlock(before, index + 1));
         await pane.resize(size);
+        before = size;
       }
       await pane.waitFor(DONE_LINE);
       const lines = await pane.capture();
@@ -382,18 +418,20 @@ test.describe("the capture's oracle", () => {
   test("finds more lines than the bound, and a line that is no part of the old block", () => {
     const window = windows.get(phaseDoneLine(1));
     const bound = window?.bound ?? 0;
-    const tooMany = Array.from(
-      { length: bound + 1 },
-      () => `${LIVE_MARK}wait a`,
-    );
+    const tooMany = Array.from({ length: bound + 1 }, () => readyLine(1));
     expect(
       captureProblems(withAfter(phaseDoneLine(1), tooMany), windows),
     ).toHaveLength(1);
     expect(
       captureProblems(
-        withAfter(phaseDoneLine(1), [
-          `${LIVE_MARK}wait a   ${LIVE_MARK}cycle 3`,
-        ]),
+        withAfter(phaseDoneLine(1), [`${readyLine(1)}   ${LIVE_MARK}cycle 3`]),
+        windows,
+      ),
+    ).toHaveLength(1);
+    // The burst before the ready block was cleared by its draw: none of it may stay.
+    expect(
+      captureProblems(
+        withAfter(phaseDoneLine(1), [`${LIVE_MARK}wait a`]),
         windows,
       ),
     ).toHaveLength(1);

@@ -1,8 +1,11 @@
 /**
  * For the live region's tmux spec: runs in a tmux pane, drives a live region on the pane's real
- * standard output — draws, prints (some wrapping), taller and shorter blocks — in phases; between
- * them it keeps redrawing a tall block, a throttle timer pending most of the time, until the spec
- * resizes the pane. `argv[2]`: the number of phases; `argv[3]`: the spec's PID.
+ * standard output — draws, prints (some wrapping), taller and shorter blocks — in phases. Between
+ * them it redraws a tall block faster than the throttle allows, then leaves a last one drawn and
+ * writes nothing until the region hears of the spec's resize: a draw at the old size reaching the
+ * pane after it changed (`SIGWINCH` is handled only once the driver's event loop gets to it) would
+ * be reflowed too, leaving more than the resize's own residue. `argv[2]`: the number of phases;
+ * `argv[3]`: the spec's PID.
  *
  * It never outlives its spec: when the spec's process is gone, or a phase passes its deadline, it
  * kills its own tmux server (its PID is in `$TMUX`) and removes the server's socket folder. After its
@@ -24,7 +27,9 @@ import {
   permanentLine,
   phaseDoneLine,
   printsAt,
+  readyRows,
   SOCKET_DIR_PREFIX,
+  WAIT_TICKS,
   waitRows,
 } from "./live-tmux";
 
@@ -123,11 +128,13 @@ for (let phase = 1; phase <= phases; phase++) {
   region.print(phaseDoneLine(phase));
   if (phase === phases) break;
   const seen = resizes.count;
-  // A tall block at every resize, redrawn faster than the throttle allows.
-  for (let tick = 0; resizes.count === seen; tick++) {
+  for (let tick = 0; tick < WAIT_TICKS; tick++) {
     region.update(waitRows(tick));
     await delay(10);
   }
+  // The block every resize meets; the spec resizes once the pane shows it, the region then quiet.
+  region.update(readyRows(phase));
+  while (resizes.count === seen) await delay(10);
 }
 region.close();
 process.stdout.write(`${DONE_LINE}\n`);

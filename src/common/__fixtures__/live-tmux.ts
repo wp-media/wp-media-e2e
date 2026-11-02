@@ -71,13 +71,35 @@ export function liveRows(i: number): readonly string[] {
 export const WAIT_HEIGHT = 8;
 
 /**
- * The tall block the driver keeps redrawing while it waits for a resize, so every resize meets one.
- * Its first row alternates between two texts, so each update is a real redraw.
+ * The tall block the driver redraws, faster than the throttle allows, after each phase. Its first
+ * row alternates between two texts, so each update is a real redraw.
  *
  * @param tick - the redraw's number.
  */
 export function waitRows(tick: number): readonly string[] {
   return block(`${LIVE_MARK}wait ${tick % 2 === 0 ? "a" : "b"}`, WAIT_HEIGHT);
+}
+
+/** How many times the driver redraws the {@link waitRows} block before its {@link readyRows}. */
+export const WAIT_TICKS = 15;
+
+/**
+ * The first row of the block the driver leaves drawn after phase `phase`, writing nothing more
+ * until the resize reaches it: the spec resizes once the pane shows that whole block. Unique per
+ * phase, so a resize's residue of an earlier one never reads as the signal.
+ *
+ * @param phase - the phase, from 1.
+ */
+export const readyLine = (phase: number): string =>
+  `${LIVE_MARK}ready ${String(phase)}`;
+
+/**
+ * The block the driver leaves drawn after phase `phase`, the one each resize meets.
+ *
+ * @param phase - the phase, from 1.
+ */
+export function readyRows(phase: number): readonly string[] {
+  return block(readyLine(phase), WAIT_HEIGHT);
 }
 
 /** What a phase of the driver does: its cycles, each an update, every third also a print. */
@@ -114,19 +136,40 @@ export interface PaneSize {
 }
 
 /**
- * The wait block's rows (both first rows) as the region draws them in a pane of `size`: capped at
- * `rows - 1`, each cut to the width (at most {@link MAX_WIDTH}). What a resize may leave is a part of
- * one of these.
+ * The rows of a block as the region draws them in a pane of `size`: capped at `rows - 1`, each cut
+ * to the width (at most {@link MAX_WIDTH}).
+ *
+ * @param rows - the block.
+ * @param size - the pane it is drawn in.
+ */
+function drawn(rows: readonly string[], size: PaneSize): readonly string[] {
+  const width = Math.min(size.columns, MAX_WIDTH);
+  return rows.slice(0, size.rows - 1).map((row) => cutToWidth(row, width, "…"));
+}
+
+/**
+ * Phase `phase`'s {@link readyRows} as drawn in a pane of `size`, in order: the pane's last lines
+ * once the whole block is on it.
+ *
+ * @param size - the pane the block is drawn in.
+ * @param phase - the phase, from 1.
+ */
+export function readyBlock(size: PaneSize, phase: number): readonly string[] {
+  return drawn(readyRows(phase), size);
+}
+
+/**
+ * Phase `phase`'s {@link readyRows} as drawn in a pane of `size`, each once: what the resize after
+ * that phase may leave is a part of one of these.
  *
  * @param size - the pane the block was drawn in.
+ * @param phase - the phase, from 1.
  */
-export function drawnWaitRows(size: PaneSize): readonly string[] {
-  const width = Math.min(size.columns, MAX_WIDTH);
-  const rows = [
-    ...waitRows(0).slice(0, size.rows - 1),
-    ...waitRows(1).slice(0, 1),
-  ];
-  return [...new Set(rows.map((row) => cutToWidth(row, width, "…")))];
+export function drawnReadyRows(
+  size: PaneSize,
+  phase: number,
+): readonly string[] {
+  return [...new Set(readyBlock(size, phase))];
 }
 
 /**
@@ -151,26 +194,26 @@ export function wrappedLines(row: string, columns: number): number {
 }
 
 /**
- * The most lines of the wait block a resize from `before` to `after` may leave, as measured (tmux 3.4
- * and 3.8, xterm.js 5.5): the parts a narrowing splits off beyond the block's height, the rows a
- * shorter pane pushes into history, and — tmux 3.8 only, its reflow of wide characters on widening —
- * up to half the block. "Writes nothing", "erases one row" and "erases to the end from the top-left"
- * (tmux then scrolls the screen into history) each leave more.
+ * The most lines of a {@link readyRows} block (any phase's: they differ only in a short first row)
+ * a resize from `before` to `after` may leave, as measured (tmux 3.4 and 3.8, xterm.js 5.5): the
+ * parts a narrowing splits off beyond the block's height, the rows a shorter pane pushes into
+ * history, and — tmux 3.8 only, its reflow of wide characters on widening — up to half the block.
+ * "Writes nothing", "erases one row" and "erases to the end from the top-left" (tmux then scrolls
+ * the screen into history) each leave more. Only when nothing is drawn between the resize and the
+ * region hearing of it: a draw in that gap, at the old size, is reflowed too and leaves its own
+ * parts.
  *
  * @param before - the pane the block was drawn in.
  * @param after - the pane after the resize.
  */
 export function residueBound(before: PaneSize, after: PaneSize): number {
-  const width = Math.min(before.columns, MAX_WIDTH);
-  const drawn = waitRows(0)
-    .slice(0, before.rows - 1)
-    .map((row) => cutToWidth(row, width, "…"));
-  const parts = drawn.reduce(
+  const rows = drawn(readyRows(1), before);
+  const parts = rows.reduce(
     (sum, row) => sum + wrappedLines(row, after.columns),
     0,
   );
-  const reached = Math.min(drawn.length, after.rows - 1);
+  const reached = Math.min(rows.length, after.rows - 1);
   const widened =
-    after.columns > before.columns ? Math.ceil(drawn.length / 2) : 0;
+    after.columns > before.columns ? Math.ceil(rows.length / 2) : 0;
   return Math.max(0, parts - reached) + widened;
 }
