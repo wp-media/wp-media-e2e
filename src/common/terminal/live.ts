@@ -35,7 +35,9 @@ import {
  *   the old block with it. What stays (measured in tmux 3.4 and 3.8, xterm.js 5.5): a narrowed
  *   block's split parts above the erased rows, rows a shorter pane pushed into history, and, in tmux
  *   3.8 only, up to half of a widened block holding wide (CJK) rows, which its reflow moves above the
- *   cursor. Never a permanent line.
+ *   cursor. A draw the terminal reads after its size changed but written before the region heard
+ *   of it (`SIGWINCH` waits for the event loop, longer under load) is reflowed as well and leaves
+ *   its own parts: no program can close that gap. Never a permanent line.
  * - The cursor is never hidden, so a region a SIGKILL ends leaves a usable terminal.
  * - The region starts on a clean line: whoever wrote before it ended with a line end.
  *
