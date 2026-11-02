@@ -5,6 +5,7 @@ import type { PlaywrightTestConfig, Project } from "@playwright/test";
 import { defineBddConfig } from "playwright-bdd";
 
 import { registerManifest } from "../artifacts/registry";
+import { readArtifactEnv } from "../artifacts/request";
 import {
   BDD_CONFIGS_ENV,
   assertNoForeignBddConfigs,
@@ -51,6 +52,7 @@ import {
   seedSelectedCells,
   selectedCells,
 } from "./run-context";
+import { siteLabel } from "../text";
 import { VISUAL_EXPECT, snapshotPathTemplateFor } from "./visual";
 import type { Edition, ProductConfig, SiteConfig, SitePool } from "./types";
 
@@ -116,6 +118,24 @@ const SETUP_TRACE = {
   mode: "retain-on-failure",
   snapshots: { dom: false },
 } as const;
+
+/**
+ * The plugin build the operator chose (`E2E_PLUGIN_REF`, `E2E_PLUGIN_ZIP`, `E2E_PLUGIN_VERSION`), as
+ * the artifacts setup reads it: the terminal reporter names it in a failure's rerun command when the
+ * setup recorded no build, so the rerun tests the same one. Nothing acts on it in the runner. An unset
+ * or blank one is absent.
+ */
+function pluginOverrides(): Pick<
+  RunDescription,
+  "pluginRef" | "pluginZip" | "pluginVersion"
+> {
+  const { pluginRef, pluginZip, pluginVersion } = readArtifactEnv();
+  return {
+    ...(pluginRef !== undefined ? { pluginRef } : {}),
+    ...(pluginZip !== undefined ? { pluginZip } : {}),
+    ...(pluginVersion !== undefined ? { pluginVersion } : {}),
+  };
+}
 
 /**
  * What the run is called and the plugin ref it was asked for, from the two display-only variables an
@@ -335,20 +355,24 @@ export function createProductConfig(
       selectedCellConfig && selectedCellConfig.sites.length > 0
         ? selectedCellConfig.sites.length
         : 1,
-    reporter: reporters({
-      product: product.name,
-      ...(selected !== undefined ? { cell: selected } : {}),
-      ...(selectedCellConfig?.edition !== undefined
-        ? { edition: selectedCellConfig.edition }
-        : {}),
-      pinned: pin !== undefined,
-      runId: RUN_ID,
-      reportCell: selected ?? NO_CELL,
-      reportDir,
-      reportPath: resolve(REPO_ROOT, reportDir),
-      ...displayOnlyFacts(),
-      reportsKeep: REPORTS_KEEP,
-    }),
+    reporter: reporters(
+      {
+        product: product.name,
+        ...(selected !== undefined ? { cell: selected } : {}),
+        ...(selectedCellConfig?.edition !== undefined
+          ? { edition: selectedCellConfig.edition }
+          : {}),
+        pinned: pin !== undefined,
+        runId: RUN_ID,
+        reportCell: selected ?? NO_CELL,
+        reportDir,
+        reportPath: resolve(REPO_ROOT, reportDir),
+        ...displayOnlyFacts(),
+        ...pluginOverrides(),
+        reportsKeep: REPORTS_KEEP,
+      },
+      (selectedCellConfig?.sites ?? []).map((site) => siteLabel(site.baseURL)),
+    ),
     // Committed-baseline visual checks (`toHaveScreenshot`): comparison tolerance + where the
     // per-product/cell baselines live. WP Rocket's A/B check (visual/ab.ts) diffs live renders and
     // does NOT use this — it is the wiring for the general committed-baseline capability.

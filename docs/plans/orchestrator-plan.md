@@ -184,7 +184,7 @@ Output and logs
 - The orchestrator's own log — triggers, queue, starts, stops, errors.
 - Live progress comes from the suite's results stream (0E); live counts and `run.finished` are
   both built from it. The terminal rendering — live table, colors, plain fallback — is modernization
-  Phase 7 (next): its shared renderer styles this process too. The table tails each run's
+  Phase 7 (done): its shared renderer styles this process too. The table tails each run's
   `results.jsonl`; the loop hands it the run's report folder and next-run time (Phase 7's seam),
   never stdout, which is the run's log. The orchestrator's log and each run's log stay plain text,
   with no ANSI, for `grep`, Slack tails and the dashboard's log view.

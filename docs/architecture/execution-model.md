@@ -57,11 +57,12 @@ a `.env` nor an inherited variable reaches it. The healthcheck and the artifact 
 they span cells (`--cell` narrows the warm).
 
 **The `[cell]` notice.** Nothing else on the terminal names a run's cell, so the first reporter
-([`reporting/cell-notice.ts`](../../src/common/reporting/cell-notice.ts)) prints one line before
-`Running …`: product and cell, whether `E2E_CELL` or `--project` chose it (so whether another cell may
-run beside it), the workers (counted as Playwright's own line counts them) and the report folder. A
-reporter, because only the runner process runs reporters (the config runs in every process). A
-command-line `--reporter` replaces the configured reporters, the notice with them.
+([`reporting/cell-notice.ts`](../../src/common/reporting/cell-notice.ts)) prints one line before the
+terminal reporter's `[run]` header: product and cell, whether `E2E_CELL` or `--project` chose it (so
+whether another cell may run beside it), the workers (counted as Playwright's "Running … using N
+workers" would) and the report folder. A reporter, because only the runner process runs reporters (the
+config runs in every process). It prints through the terminal reporter's sink (below). A command-line
+`--reporter` replaces the configured reporters, the notice with them.
 
 ### Reading the selection from a worker
 
@@ -124,10 +125,133 @@ Before hook stops whatever the plugin still does before removing it (`ProductCon
 within its own enforced budget (`LEFT_WORK_ALLOWANCE_MS`: past it, or work that will not stop, fails),
 so recovery from a kill is complete.
 
-## Watching a run: the results stream and the summary
+## Watching a run: the terminal, the results stream and the summary
 
-Two always-on reporters of the suite's own, given the run's facts (`RunDescription`,
+Three always-on reporters of the suite's own, given the run's facts (`RunDescription`,
 `reporting/run-description.ts`) as options by the config factory:
+
+- **The terminal reporter** ([`reporting/terminal.reporter.ts`](../../src/common/reporting/terminal.reporter.ts)),
+  in Playwright's `list`'s place (after the stream): after the `[cell]` notice, a header —
+  `[run] product · cell (edition) · RUN_ID · ref <E2E_REQUESTED_REF> · N scenarios`, on a terminal with
+  Unicode the same words in a `━━` rule; one line per test at its final attempt
+  (`✔ 18.4s  Feature › Scenario`; the word — `✘ failed`, `⚠ flaky`, `■ stopped` (drained), `— skipped`,
+  `■ interrupted` — kept unless a coloured terminal shows a mark no other status shares; `· attempt
+  2/3` past the first attempt or on a failure with retries; `· retry not run` for one settled at the end;
+  `· passed unexpectedly` for a `test.fail()` that passed; `· timed out`); a `↻ retry` line per attempt
+  due a retry, with how it ended (`failed`, `timed out`, `passed unexpectedly`, `not run: its group
+  failed` — a failed `beforeAll` skipped it) and its first error's line (past a bare `Error:` label);
+  errors outside any test (`✘ error`, call log dropped, 12 lines at most; "No tests found" a `⚠
+  warning`). Setups count as tests, not scenarios. Lines live in `terminal-lines.ts` (pure).
+  - **Failure blocks** (`failure-block.ts`, pure): under a test's final failure or interrupted final
+    attempt, aligned `Label  value` lines — `Step` (the failing Gherkin step; else `Hook` with the hook
+    or fixture's path; never a `pw:api`/`expect` title, which can quote what was typed — `failedStep`
+    in `results.ts`), `Feature` (the `.feature` file, no line: the reported location is the generated
+    spec), `Error` (the first line), each `Screenshot` and `Trace` path (from the working directory,
+    shell-quoted), and `Rerun`. When no step carries the error (a timeout, a crash), `Step` names the
+    body's last step begun, `· running when the attempt ended`: never `After Hooks` or `Worker
+    Cleanup` (they begin after the body), and a Before hook only if it never ended (a worker that died
+    in it, Playwright's `duration: -1`); a body that failed with no step of its own (a setup's plain
+    `throw`) gets no `Step` line.
+  - **The rerun command**: `E2E_CELL=<cell> [E2E_PLUGIN_REF=<ref> [E2E_PLUGIN_VERSION=<v>] |
+    E2E_PLUGIN_ZIP=<zip>] npm run test:<product> -- --grep=<pattern>` (or `--project=<setup>`). The
+    cell is the test's own — in a run of every cell too, so the rerun runs that cell alone and its pin
+    applies. The pin (`pluginPin`) is what the cell's artifacts setup recorded, in the form a pinned run
+    is handed ([plugin-artifacts.md](plugin-artifacts.md#pre-warming)): the operator's zip when it used
+    one, else `release:<tag>` for a release download, else `commit:<sha>` with the version its zip
+    declares; with no record (the setup failed or never ran), what the operator set (`pluginRef`,
+    `pluginZip`, `pluginVersion`, which the config factory hands the reporters) — only in a run that
+    targeted the cell, as a run of every cell ignores them. The pattern is the **raw** titles from
+    `titlePath()` — the generated spec's path, the Feature, any Rule or Outline, the scenario — each
+    regex-escaped and followed by `(?: @\S+)*`, joined by spaces, after a space and up to `$`,
+    between slashes: Playwright then matches it case-sensitively, with no flags, against
+    `_grepTitleWithTags()` (project, file, describes and title, each followed by its tags), so only
+    that scenario and its exact duplicates are selected — not `Create a backup encrypted` nor
+    `Untagged Create a backup`. Every control, format character, line separator, lone surrogate and
+    combining mark past the eighth in a run is written as a `\uXXXX` escape, so the command holds only
+    visible characters and still selects the test. Values are single-quoted when a shell would read
+    them otherwise (`=` included: zsh expands `=cmd` in an assignment). The command is never cut: one
+    quoting a credential's shape, holding a control (a zip path, ref or version can), or past 2,000
+    characters is refused, `Rerun  not shown: <why>`. A credential-shaped title also withholds the
+    `Screenshot`/`Trace` paths (`not shown: …`): Playwright names the folder after the title, cut and
+    hashed, past what masking can find. A failed setup's block opens with `Setup  <project> — no
+    scenario of its cell runs without it`. Every other value is plain, masked, then capped; the
+    glyphs are the palette's (ASCII under plain output). One block per final failure; an attempt due a
+    retry keeps its one error line.
+  - **Worker output** (`onStdOut`/`onStdErr`; Playwright's `BaseReporter` only stores it, so without
+    this the `[artifacts]`, `[site]`, `[auth]` lines and worker warnings vanish): printed **as it
+    comes**, line by line, on a terminal and in a pipe alike, in a `  │` gutter — so a run SIGKILLed
+    mid-scenario (the orchestrator's escalation) leaves the hung scenario's last whole lines in
+    `run.log`. Parallel workers interleave: whenever the next output line's source (a test's attempt,
+    or output outside any test) is not the last line's, a begin line names it first (`▸ Feature ›
+    Scenario`, `· attempt 2/3` past the first, `▸ outside any test`); the attempt's own line still
+    comes at its end, after its open lines. Cut into lines by `worker-output.ts` per source and
+    stream (stdout and stderr apart; UTF-8 decoded per source). Output outside any test names no
+    worker (Playwright gives none), so each of its chunks is a line of its own, never joined to
+    another worker's. Bounds: 200 lines per stream of a test's attempt (then `… N more lines of
+    output not shown: the HTML report keeps them`), and of output outside any test until a test ends
+    (then the count alone: no report keeps it); a line is held up to 64 KiB, a memory bound — past it,
+    it loses the word the cut fell in (a credential has no whitespace, so no half of one survives) and
+    ends `[cut: the line was too long]`. Each line is made plain (`plain`; workers run with
+    `FORCE_COLOR=1`), masked whole (`redactSecrets`), then capped at 500 code points — so is every
+    title and error. `--quiet` drops worker output, as `list` did. A global timeout ends the run
+    before the running tests: their open lines print with their own late `onTestEnd`, a test that
+    never ends has its open line printed in `onExit`. Output stays bounded: the 64 KiB log tail a
+    failed run's reason quotes keeps `bddgen`'s cause.
+  - **One writer** ([`reporting/terminal-sink.ts`](../../src/common/reporting/terminal-sink.ts)): it
+    registers a sink as it is built; the `[cell]` notice and the stream's and run facts' warnings print
+    through it (`printLine`), on stdout, plain and masked but **never cut** (`suiteLine`: the suite's
+    own few lines, which name paths and commands). With no sink (a reporter alone, `--list`, `--ui`,
+    `PW_TEST_REPORTER`) they write their stream as before. The registry hangs on `globalThis` (a
+    reporter module loaded twice still finds it); the sink is released in `onExit`.
+  - **Styling**: `detectCapabilities` (`src/common/terminal/`) with `E2E_OUTPUT` (`auto|plain|fancy`,
+    read and validated by the config factory — a bad value fails the run as its config loads) decides
+    colour and Unicode; a pipe, a file or the orchestrator's `run.log` (its environment carries no
+    colour variable, its stdout is a file) get plain bytes, `FORCE_COLOR` honoured. Nothing styled
+    reaches `results.jsonl` or the reports. Setup projects' lines (`[artifacts]`, the elevation and
+    plugin-folder banners, APVM's progress) use `workerPalette` (`config/output.ts`): never coloured,
+    ASCII under `plain`, `TERM=dumb` or a C locale; a thrown report (`buildReport`,
+    `formatFailureReport`) is plain Unicode text (`TEXT_PALETTE`) — the printer styles, never the
+    data. Labels are the `emphasis` token, commands `command`. What a site or tool wrote that is
+    printed rather than thrown (a check's detail and hint, warm's errors, APVM's progress, the
+    banners' site values) goes through `printableLines` (`text.ts`): `plain` then `redactSecrets`,
+    per line, indent kept.
+  - **Live block** ([`live-block.ts`](../../src/common/reporting/live-block.ts) rows,
+    [`live-session.ts`](../../src/common/reporting/live-session.ts) lifecycle): only when
+    `capabilities.live` — a TTY ≥ 20 columns whose `TERM` moves the cursor, not `plain`, not `CI`
+    unless `fancy`, not quiet; never in a pipe or `run.log`. From the first scenario's begin (setup
+    lines print plain before it) to `onEnd`, bottom-pinned: `███░░ 23/52 · 44% · 20 passed · 1 flaky ·
+    3 running · 4m 12s` (the summary's counts, `RunTally`) and one `▸ Feature › Scenario · site ·
+    1m 03s` row per busy worker (`sites` option: `siteLabel` per `parallelIndex` — no user, password,
+    query, fragment or `;` parameter, nothing before an `@` in the path). Narrow: the bar goes, then
+    `running`, then the counts are cut — the time stays; a worker row drops the feature path before
+    the name and site are cut. Redrawn on every event, on a 500 ms tick and on `resize`; taller than
+    the terminal, `… N more running`. **Stdio capture** ([`terminal/stdio-capture.ts`](../../src/common/terminal/stdio-capture.ts)):
+    meanwhile the runner's own `process.stdout.write` (and `stderr`'s, when a TTY; redirected, it keeps
+    its bytes) is replaced: foreign writes (Playwright's warnings, `emitWarning`, another reporter's
+    `console.*`) are cut into lines — a partial line held until its end or 64 KiB — masked
+    (`redactSecrets`) and printed above the block; the region writes through a `bypassWriter`, so its
+    bytes never loop; a child's writes to an inherited fd cannot be seen. **Ending**: `onEnd` clears it
+    before the settled lines, reports' hints and summary (plain lines); a callback's throw, a throw
+    while drawing (warned once, never retried), a failed write and `exit` close it too — capture,
+    `resize`/`exit`/signal listeners and tick undone. `SIGTERM`/`SIGHUP` while live: cleared, drained
+    ≤ 500 ms, then re-sent when no other listener handles it, so the exit status stays 143/129.
+    `SIGKILL` cannot be heard: the block stays, the shell's next lines over it. `onExit` drains ≤ 2 s,
+    then makes a drained terminal blocking again; a paused one (Ctrl-S) stays non-blocking, and the run
+    ends when it is resumed (Playwright waits for stdout itself). One block per terminal: a second
+    terminal reporter (`--add-reporter`) prints plain lines above the first's.
+  - **Quiet** (prints nothing, registers no sink; `terminal-mode.ts`) for `--list` (`_mode`), `--ui`
+    (`--ui*` in `argv`, or `process.stdout.write` replaced on the stream — Playwright's stdio
+    interception, an editor's test server too) and `PW_TEST_REPORTER` (a second reporter prints).
+    Quiet, `printsToStdio()` is `false`, so Playwright adds its own terminal reporter (`line`, `dot`
+    under CI; its listing for `--list`): a `PW_TEST_REPORTER=junit` or `null` run is never silent —
+    and that fallback prints worker output as it is, unmasked. Watch mode (`PWTEST_WATCH`) does not
+    intercept stdio: the reporter prints there. `--add-reporter` is not detected: an added printing
+    reporter prints every line twice, an added `list` prints errors unmasked — the caller's choice.
+  - **Never fails a run**: callbacks are caught (one `[terminal]` warning on stderr; missing options
+    are told apart, so a later throw is still told). While it owns stdout it listens for its `error`
+    event, so a closed pipe (`EPIPE`, `… | head -1`) never crashes the runner: the run ends as it
+    would, `run.end` written. A failed write stops its output for good, and the listener then stays
+    after `onExit`, so the summary's writes fail silently too.
 
 - **The results stream** ([`reporting/results-stream.ts`](../../src/common/reporting/results-stream.ts))
   appends one JSON line per event to `<report dir>/results.jsonl` as it happens: `run.begin`,
@@ -137,21 +261,28 @@ Two always-on reporters of the suite's own, given the run's facts (`RunDescripti
   and readers ignore what they do not know
   ([`results-reader.ts`](../../src/common/reporting/results-reader.ts) reads complete lines only).
   Silent on the terminal; listed before the reports so `run.end` lands before their slow `onEnd`. A
-  failed write warns once on stderr, never fails the run. No `run.end` means the runner died (SIGTERM,
+  failed write warns once (through the terminal sink, else stderr), never fails the run. No `run.end` means the runner died (SIGTERM,
   SIGKILL); `mode: "list"`, or no tests, marks a run that ran nothing.
 - **The end-of-run summary** ([`reporting/run-summary.ts`](../../src/common/reporting/run-summary.ts)),
-  the last reporter, prints in `onExit`, below everything (Playwright's counts included): the verdict
+  the last reporter, prints in `onExit`, below everything (Playwright's counts included), after a blank
+  line and with none after it. Its header is a heavy rule as wide as the terminal (`COLUMNS`, else 80,
+  in a pipe; never cutting its words); colours (by palette token: its `Styler`), the verdict's mark and
+  its own glyphs (frame, separators, breadcrumbs, dashes, ellipses) come from the terminal palette, so
+  `E2E_OUTPUT=plain` (its `output` option) makes it colourless with those glyphs ASCII (`== backwpup .
+  pro@nginx (pro) == x FAILED ==`, `F > S - When x`, `1 failed . 2 passed`); the phrases it shares
+  with the reports (the plugin, the site) keep their `·`. The verdict
   (`✔ PASSED`, `✘ FAILED`, `✘ COULD NOT TEST` for a failed setup, `■ INTERRUPTED`, `■ STOPPED` when the
   drain skipped a scenario, `NO TESTS` only when no error came from outside a test — a spec that would
-  not load plans none either and is `FAILED`); the counts (drain skips as `stopped`) and duration; each
-  outside-test error (`Error`) and failed setup's first line; the plugin and sites tested (from the
-  setups' attachments, `setup-facts.ts`); the three reports as paths from the working directory (quoted
-  when a shell would split them). Site and setup text is printed plain (no escape sequence or control
+  not load plans none either and is `FAILED`); the counts (drain skips as `stopped`) and duration;
+  `Failed`: each scenario that failed for good, `Feature › Scenario — <failed step>` (`failedStep`),
+  the first ten, then `and N more`; each outside-test error (`Error`) and failed setup's first line; the plugin and sites tested (from the
+  setups' attachments, `setup-facts.ts`); the three reports as paths from the working directory (plain,
+  quoted when a shell would split them). Site and setup text is printed plain (no escape sequence or control
   character), credentials masked (`displayText`); an interrupted setup is not called failed. Silent for
   `--list`; a SIGTERM ends a run before any `onExit`. It first prunes the run's report group
   ([Report retention](#report-retention)); a `Pruned` line says what went, only when something did.
 
-Both read the run through one pure module, [`reporting/results.ts`](../../src/common/reporting/results.ts),
+All three read the run through one pure module, [`reporting/results.ts`](../../src/common/reporting/results.ts),
 so they never disagree:
 
 - **Final attempt**: the dispatcher's rule (`willRetry`), not the guess Playwright's reporters make:
@@ -186,9 +317,9 @@ the display-only `E2E_RUN_NAME` and `E2E_REQUESTED_REF`, the plugin zips (ref, f
 SHA-256 — the artifacts setup's attachment) and each site's versions (the auth setup's), read through
 `setup-facts.ts`; the verdict is the summary's (`verdictOf`).
 
-- **Position**: after `list`, before the reports (the HTML report reads title and metadata in its own
-  later `onEnd`). Not first: the `[cell]` notice must precede `list`'s "Running …", and the stream must
-  end before every report.
+- **Position**: after the terminal reporter, before the reports (the HTML report reads title and
+  metadata in its own later `onEnd`). Not first: the `[cell]` notice must precede the `[run]` header, and
+  the stream must end before every report.
 - **Writes**: `onBegin` — what is known, into `config.metadata` (flat keys), `<report dir>/run-facts.json`
   and `<report dir>/allure-results/environment.properties`; each setup's `onTestEnd` — its attachment and end, both
   files rewritten whole (temp file + rename), so a killed run's say `running`; `onEnd` —
@@ -207,7 +338,8 @@ SHA-256 — the artifacts setup's attachment) and each site's versions (the auth
   non-ASCII as `\uXXXX`, read back exact by Allure). `captureGitInfo` is off in the config factory:
   unset, Playwright enables it under CI and the HTML report would carry authors' emails and the PR's
   diff.
-- **Never fails a run**: every step is caught; the first failure warns once on stderr. Nothing for
+- **Never fails a run**: every step is caught; the first failure warns once (terminal sink, else
+  stderr). Nothing for
   `--list`, nor with a command-line `--reporter` (it replaces every configured reporter).
 
 **Credentials** are masked before any cut by one helper, `redactSecrets` ([`text.ts`](../../src/common/text.ts)),

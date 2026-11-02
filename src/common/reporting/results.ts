@@ -9,7 +9,7 @@ import type {
 
 import { STOPPED_ANNOTATION } from "../config/drain";
 import { setupKindOf, type SetupKind } from "../config/project-names";
-import { redactSecrets } from "../text";
+import { redactSecrets, withoutFormat } from "../text";
 
 /**
  * What a run's results are, decided from Playwright's reporter API: each test's final status, the
@@ -177,7 +177,7 @@ function cutAt(text: string, limit: number): string {
 }
 
 /**
- * A message as a stream line carries it: no ANSI codes, no call log (see {@link CALL_LOG} — the
+ * A message as a stream line carries it: no ANSI codes or invisible format characters, no call log (see {@link CALL_LOG} — the
  * reports keep it whole), credentials masked ({@link redactSecrets} — a navigation error quotes a
  * basic-auth URL whole), no trailing whitespace, at most `limit` characters — a cut one ending with a
  * marker that says so.
@@ -189,7 +189,9 @@ export function cleanMessage(
   message: string,
   limit: number = MESSAGE_LIMIT,
 ): string {
-  const plain = stripVTControlCharacters(message);
+  // No format character either: dropped later by `plain`, one inside a token would join it only
+  // after the mask had missed it.
+  const plain = withoutFormat(stripVTControlCharacters(message));
   const callLog = CALL_LOG.exec(plain);
   // Masked before the cut, which could otherwise leave a credential without what marks it.
   const head = redactSecrets(
@@ -206,6 +208,11 @@ export interface StepLike {
   readonly title: string;
   readonly category: string;
   readonly error?: { readonly message?: string; readonly value?: string };
+  /**
+   * How long it ran, in milliseconds; negative while it has not ended — Playwright leaves a step a
+   * crashed worker never ended at `-1`. Absent: taken as ended.
+   */
+  readonly duration?: number;
   readonly steps: readonly StepLike[];
 }
 
@@ -229,14 +236,19 @@ function isGherkinStep(step: StepLike): boolean {
   return step.category === "test.step" && GHERKIN_STEP.test(step.title);
 }
 
-/** A chain's titles joined, cut at the first step whose title must not be reported. */
-function describeChain(chain: StepChain): string {
+/** A chain's titles, outermost first, up to the first step whose title must not be reported. */
+function reportableTitles(chain: StepChain): string[] {
   const titles: string[] = [];
   for (const step of chain) {
     if (!REPORTABLE_CATEGORIES.has(step.category)) break;
     titles.push(step.title);
   }
-  return titles.join(PATH_SEPARATOR);
+  return titles;
+}
+
+/** A chain's reportable titles ({@link reportableTitles}) joined as Playwright's reporters join them. */
+function describeChain(chain: StepChain): string {
+  return reportableTitles(chain).join(PATH_SEPARATOR);
 }
 
 /** From a failing step, follows its first failing child down to the innermost failing step. */
@@ -254,8 +266,8 @@ function stepMessage(step: StepLike | undefined): string | undefined {
 /**
  * The step a failure is blamed on, in order: the first failing Gherkin step (a Background's
  * included); else the innermost failing step under the first failing step — a hook, a fixture, or
- * a setup's own `test.step`; else, when no step failed (a timeout inside a step, a crash), the last
- * step begun outside the closing hooks.
+ * a setup's own `test.step`; else, when no step failed (a timeout inside a step, a crash), the step
+ * that was running ({@link lastBegun}), if one can be told.
  */
 function blamedStep(
   steps: readonly StepLike[],
@@ -282,14 +294,29 @@ function blamedStep(
 }
 
 /**
- * The step that was running when a failure no step carries struck: the closing hooks ran after it,
- * so the last top-level step that is not a hook — else, when only hooks began (a crash in one), the
- * last of them — narrowed down by its last reportable children.
+ * The top-level hooks Playwright runs once the test's body is over — its closing hooks and fixture
+ * teardowns, then the worker's: they begin after any failure of the body, so they never name it.
+ */
+const AFTER_THE_BODY: ReadonlySet<string> = new Set([
+  "After Hooks",
+  "Worker Cleanup",
+]);
+
+/**
+ * The step that was running when a failure no step carries struck (a timeout, a crash), narrowed down
+ * by its last reportable children: the last top-level step of the body — never a hook that runs after
+ * it ({@link AFTER_THE_BODY}). When only hooks began before, the last of them only if it never ended
+ * (a worker that died inside it); a hook that ended proves nothing — the body may have failed with no
+ * step of its own (a setup's plain `throw`) — so then `undefined`.
  */
 function lastBegun(steps: readonly StepLike[]): StepChain | undefined {
+  const beforeTheEnd = steps.filter(
+    (candidate) =>
+      candidate.category !== "hook" || !AFTER_THE_BODY.has(candidate.title),
+  );
   const begun =
-    steps.filter((candidate) => candidate.category !== "hook").at(-1) ??
-    steps.at(-1);
+    beforeTheEnd.filter((candidate) => candidate.category !== "hook").at(-1) ??
+    beforeTheEnd.filter(neverEnded).at(-1);
   if (begun === undefined) return undefined;
   let chain: StepChain = [begun];
   for (;;) {
@@ -298,6 +325,15 @@ function lastBegun(steps: readonly StepLike[]): StepChain | undefined {
     chain = [...chain, next];
   }
   return chain;
+}
+
+/**
+ * Whether a step never ended: the worker died while it ran.
+ *
+ * @param step - the step.
+ */
+function neverEnded(step: StepLike): boolean {
+  return step.duration !== undefined && step.duration < 0;
 }
 
 /** The top-level step Playwright runs the closing hooks and fixture teardowns in. */
@@ -334,10 +370,56 @@ export function firstError(result: {
     : { message: cleanMessage(message), where: blamed?.where ?? "test", step };
 }
 
+/** What failed, as a person reads it: the step's label and title. */
+export interface FailedStep {
+  /** `Step` for a Gherkin step (or a setup's own step), `Hook` for a hook or a fixture. */
+  readonly label: "Step" | "Hook";
+  /**
+   * The Gherkin step's title alone, raw; else the reportable titles {@link FirstError.step} joins,
+   * outermost first — the caller joins them with its own glyph (ASCII under plain output).
+   */
+  readonly path: readonly string[];
+  /** Whether no step carries the error (a timeout, a crash): the step named was running when it struck. */
+  readonly running: boolean;
+}
+
+/**
+ * The step a failure is blamed on ({@link firstError}'s choice), safe to show: the Gherkin step in
+ * its chain when there is one — `When the backup runs`, never the API steps under it, whose titles
+ * hold what a test typed (`Fill "…"`); else the hook, fixture or setup step's path, cut at the first
+ * step whose title must not be reported. `undefined` when the attempt began no step.
+ *
+ * @param result - the attempt: its errors and its steps.
+ */
+export function failedStep(result: {
+  readonly errors: readonly {
+    readonly message?: string;
+    readonly value?: string;
+  }[];
+  readonly steps: readonly StepLike[];
+}): FailedStep | undefined {
+  const first = result.errors[0];
+  const blamed = laterHookAside(
+    blamedStep(result.steps),
+    result.steps,
+    first?.message ?? first?.value,
+  );
+  if (blamed === undefined) return undefined;
+  const running = blamed.where === "last-step";
+  const gherkin = blamed.chain.find(isGherkinStep);
+  if (gherkin !== undefined) {
+    return { label: "Step", path: [gherkin.title], running };
+  }
+  const path = reportableTitles(blamed.chain);
+  if (path.length === 0) return undefined;
+  return { label: blamed.where === "hook" ? "Hook" : "Step", path, running };
+}
+
 /**
  * A failure blamed on a closing hook whose error is not the attempt's first: the attempt failed before
  * the hook — a timeout inside a step, which no step carries — and the hook failed after, in its
- * clean-up. The first error is the cause, so the blame goes to the step that was running.
+ * clean-up. The first error is the cause, so the blame goes to the step that was running — or, when
+ * none was ({@link lastBegun}), to no step at all.
  *
  * @param blamed - what {@link blamedStep} chose.
  * @param steps - the attempt's top-level steps.
@@ -356,8 +438,9 @@ function laterHookAside(
   ) {
     return blamed;
   }
+  // No step was running: the first error stands alone, never the later hook's.
   const begun = lastBegun(steps);
-  return begun === undefined ? blamed : { chain: begun, where: "last-step" };
+  return begun === undefined ? undefined : { chain: begun, where: "last-step" };
 }
 
 /**

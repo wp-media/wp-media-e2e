@@ -40,6 +40,7 @@ import type {
   ProductArtifacts,
 } from "./types";
 import type { Edition } from "../config/types";
+import type { Printers } from "../config/output";
 import type { Apvm, JsBuildOutput, WarmOptions } from "apvm-napi";
 
 /** One `(product × cell)` to warm: its manifest, the cell's edition, and a display label. */
@@ -370,16 +371,19 @@ const DEFAULT_WARMER_DEPS: WarmerDeps = {
  * are not in the cache, is a failed warm.
  *
  * @param deps - the APVM instance and the file check, injected for tests; the real ones by default.
+ * @param printers - where the build's progress and warnings go, with their streams' palettes; a test
+ *   worker's by default (`createBuildReporter`'s).
  */
 export function createApvmWarmer(
   deps: WarmerDeps = DEFAULT_WARMER_DEPS,
+  printers?: Printers,
 ): WarmOne {
   return async (params) => {
     const apvm = await deps.apvm();
     assertToken(apvm, params.project);
 
     const label = `${params.project} ${params.gitRef}`;
-    const reporter = createBuildReporter(`warm ${label}`);
+    const reporter = createBuildReporter(`warm ${label}`, printers);
     const options: WarmOptions = {
       project: params.project,
       gitRef: params.gitRef,

@@ -6,6 +6,7 @@ import {
 import { clockTime } from "../log";
 import { MAX_REASON_LENGTH } from "../runs/outcome";
 import type { StopLevel } from "../runs/stop";
+import { callListener, tellActivity, type TaskActivity } from "./activity";
 import { failureLine, safeLine } from "../text";
 import type { HeldCell } from "../state/cell-lock";
 import type { RunNaming } from "../state/lock";
@@ -427,15 +428,26 @@ class Loop {
 
   /**
    * One run: created, held where a stop reaches it, waited for. A `runOnce` that throws, or a `done`
-   * that rejects — both against its contract — is a line and a run that did not start.
+   * that rejects — both against its contract — is a line and a run that did not start. An attempt
+   * that ends with no run begun is told (`notStarted`).
    *
    * @param deps - the run's deps: the loop's, with `claimCell` naming the run in the cell's locks.
    * @returns its result, and when it settled.
    */
   private async cycle(deps: CycleDeps): Promise<Settled> {
     let result: RunResult;
+    const seen = { begun: false };
+    const listener = deps.onActivity;
+    const watched: CycleDeps = {
+      ...deps,
+      onActivity: (activity) => {
+        if (activity.kind === "begun") seen.begun = true;
+        // Passed through as it is: the run's `tell` catches its throw and its rejection.
+        return callListener(listener, activity) as undefined;
+      },
+    };
     try {
-      const handle = (this.deps.runOnce ?? runOnce)(this.task, deps);
+      const handle = (this.deps.runOnce ?? runOnce)(this.task, watched);
       this.current = handle;
       // Asked while the run was being created: it has not seen it yet.
       if (this.asked !== undefined) this.forward(this.asked);
@@ -446,6 +458,12 @@ class Loop {
     } finally {
       this.current = undefined;
     }
+    // An attempt that began no run told nothing: say so, or the table would show the last run alone.
+    if (!seen.begun && result.kind === "notStarted")
+      this.tell(
+        { kind: "notStarted", taskId: this.task.id, why: result.why },
+        "its attempt did not start",
+      );
     return { result, at: this.now() };
   }
 
@@ -461,7 +479,12 @@ class Loop {
     const from = result.kind === "ended" ? result.endedAt : at;
     const now = this.now();
     const ms = cooldownDelay(from, now, minutes * 60_000);
-    this.say(nextRunLine(new Date(now.getTime() + ms), minutes));
+    const nextRunAt = new Date(now.getTime() + ms);
+    this.say(nextRunLine(nextRunAt, minutes));
+    this.tell(
+      { kind: "cooling", taskId: this.task.id, nextRunAt },
+      "its loop cools down",
+    );
     await this.wait(ms);
   }
 
@@ -516,6 +539,10 @@ class Loop {
     const asked = this.asked;
     if (ended === "stopped" && asked !== undefined)
       this.say(`no next run: ${asked.why}`);
+    this.tell(
+      { kind: "loopEnded", taskId: this.task.id, ended },
+      "its loop ended",
+    );
     return {
       ended,
       ...(last === undefined ? {} : { last }),
@@ -546,6 +573,19 @@ class Loop {
     } catch (error) {
       this.say(`stopping the run failed: ${this.failure(error)}`);
     }
+  }
+
+  /**
+   * Tells `onActivity` what the loop did; a listener that throws is a line.
+   *
+   * @param activity - what it did.
+   * @param what - how the line words it: `its loop cools down`, `its loop ended`, `its attempt did
+   *   not start`.
+   */
+  private tell(activity: TaskActivity, what: string): void {
+    tellActivity(this.deps.onActivity, activity, (error) => {
+      this.say(`telling that ${what} failed: ${this.failure(error)}`);
+    });
   }
 
   /**

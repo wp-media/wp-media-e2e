@@ -14,6 +14,7 @@ import type {
 import { errorMessage } from "../guards";
 import { setupKindOf } from "../config/project-names";
 import { actualWorkers } from "./cell-notice";
+import { printLine } from "./terminal-sink";
 import {
   RunTally,
   cleanMessage,
@@ -45,7 +46,8 @@ import {
  *
  * Always on, and silent: it writes nothing to the terminal. Listed first among the reporters that
  * end a run, so `run.end` lands before the slow reports are written. It never fails a run: a write
- * that fails warns once on stderr, and the run goes on (a reporter that throws turns a green run red).
+ * that fails warns once — through the run's terminal sink, else on stderr — and the run goes on (a
+ * reporter that throws turns a green run red).
  *
  * Never written: step parameters, Playwright API steps, attachments, output or an error's call log —
  * Playwright titles a `fill()` with its value, and its call log quotes element markup, so any of them
@@ -73,13 +75,14 @@ export class JsonLinesFile {
 
   /**
    * @param path - the file, absolute. Its folder is created with the first line.
-   * @param warn - where the one warning goes; stderr by default, as Playwright's own errors do.
+   * @param warn - where the one warning goes: the run's terminal sink, else stderr.
    * @param now - the clock that stamps each line.
    */
   constructor(
     readonly path: string,
-    private readonly warn: (message: string) => void = (message) =>
-      process.stderr.write(`${message}\n`),
+    private readonly warn: (message: string) => void = (message) => {
+      printLine(message, "stderr");
+    },
     private readonly now: () => Date = () => new Date(),
   ) {}
 
@@ -310,8 +313,9 @@ export default class ResultsStreamReporter implements Reporter {
   onBegin(config: FullConfig, suite: Suite): void {
     this.guard(() => {
       if ("missing" in this.run) {
-        process.stderr.write(
-          `[results] the reporter's options lack "${this.run.missing}"; no results stream.\n`,
+        printLine(
+          `[results] the reporter's options lack "${this.run.missing}"; no results stream.`,
+          "stderr",
         );
         return;
       }

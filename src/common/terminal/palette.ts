@@ -1,0 +1,248 @@
+import { styleText } from "node:util";
+
+import { detectCapabilities } from "./capabilities";
+import type { CapabilityInputs, TerminalCapabilities } from "./capabilities";
+
+/**
+ * The terminal's semantic colours and symbols. A palette styles text that is already final — plain,
+ * masked, cut — and decides nothing: {@link TerminalCapabilities} already said whether the stream is
+ * a terminal and whether colour and Unicode are on. Side-effect free.
+ *
+ * With colour on, `styleText` runs with `validateStream: false`, which skips Node's own stream and
+ * environment checks (measured on a pty: it emits SGR even under `NO_COLOR` or `CI`), so a terminal
+ * under `CI` keeps the colour the capabilities granted. With colour off, `paint` returns its text unchanged and nothing emits an escape.
+ */
+
+/**
+ * What a piece of text means, which picks its style. `command` is something to run; `emphasis` a
+ * label or heading that must stand out (both bold, so a reader of the code knows which is which).
+ */
+export type Token =
+  "ok" | "fail" | "warn" | "stop" | "id" | "dim" | "command" | "emphasis";
+
+/** Named ANSI colours and bold/dim only: no 256-colour, truecolor or background. */
+const TOKEN_FORMATS: Readonly<Record<Token, Parameters<typeof styleText>[0]>> =
+  {
+    ok: "green",
+    fail: "red",
+    warn: "yellow",
+    stop: "yellow",
+    id: "cyan",
+    // Metadata and paths.
+    dim: "dim",
+    command: "bold",
+    emphasis: "bold",
+  };
+
+/**
+ * The colours that tell the items of a list apart — the orchestrator's tasks —, in turn: none a
+ * status's (green, red, yellow), so an item's colour never reads as an outcome.
+ */
+export const SERIES_FORMATS = [
+  "cyan",
+  "magenta",
+  "blue",
+  "cyanBright",
+  "magentaBright",
+  "blueBright",
+] as const satisfies readonly Parameters<typeof styleText>[0][];
+
+/**
+ * A symbol's two spellings: Unicode, and the ASCII shown on a dumb terminal, under a non-UTF-8 locale
+ * or in plain mode. The ASCII one can be wider (`OK`, `->`, `...`): layout measures the glyph it is
+ * given, never assumes one column.
+ */
+interface Glyph {
+  readonly unicode: string;
+  readonly ascii: string;
+}
+
+/** Every symbol the terminal output draws, by role: a new one is added here, never spelt inline. */
+export const SYMBOLS = {
+  passed: { unicode: "✔", ascii: "OK" },
+  failed: { unicode: "✘", ascii: "x" },
+  warning: { unicode: "⚠", ascii: "!" },
+  stopped: { unicode: "■", ascii: "#" },
+  /** A scenario running now. */
+  current: { unicode: "▸", ascii: ">" },
+  /** A failed attempt due a retry. */
+  retry: { unicode: "↻", ascii: "~" },
+  /** A progress bar's done and remaining cells. */
+  barDone: { unicode: "█", ascii: "#" },
+  barLeft: { unicode: "░", ascii: "-" },
+  check: { unicode: "✓", ascii: "ok" },
+  cross: { unicode: "✗", ascii: "x" },
+  /** Between facts on one line. */
+  separator: { unicode: "·", ascii: "." },
+  /** Between a list item and its detail, and an empty table cell. */
+  dash: { unicode: "—", ascii: "-" },
+  /** From one state or value to the next; also a hint under a failed check. */
+  arrow: { unicode: "→", ascii: "->" },
+  /** Points back at the item it follows: a mark beside a list item. */
+  backArrow: { unicode: "←", ascii: "<-" },
+  /** A list item. */
+  bullet: { unicode: "•", ascii: "*" },
+  /** Two things that differ (where `=` says they match). */
+  notEqual: { unicode: "≠", ascii: "!=" },
+  /** Tree drawing: a vertical line, a branch, the last branch. */
+  vertical: { unicode: "│", ascii: "|" },
+  branch: { unicode: "├", ascii: "+" },
+  lastBranch: { unicode: "└", ascii: "+" },
+  /** Rules: light and heavy. */
+  rule: { unicode: "─", ascii: "-" },
+  heavyRule: { unicode: "━", ascii: "=" },
+  /** Between a feature and its scenario. */
+  breadcrumb: { unicode: "›", ascii: ">" },
+  ellipsis: { unicode: "…", ascii: "..." },
+} as const satisfies Readonly<Record<string, Glyph>>;
+
+/** A symbol's role. */
+export type SymbolName = keyof typeof SYMBOLS;
+
+/**
+ * A status, which always has a symbol, a word and a colour. `error` (a run that could not test) and
+ * `killed` (a run stopped by SIGKILL) are the orchestrator's run statuses; `could-not-test` (a setup
+ * failed, so nothing ran) and `interrupted` (the run was stopped by a signal) the suite's.
+ */
+export type Status =
+  | "passed"
+  | "failed"
+  | "flaky"
+  | "stopped"
+  | "warning"
+  | "error"
+  | "killed"
+  | "could-not-test"
+  | "interrupted";
+
+/** How a status is shown. */
+interface StatusStyle {
+  readonly symbol: SymbolName;
+  readonly token: Token;
+  /**
+   * Whether a coloured terminal may show the mark without the word. `false` for a status whose mark
+   * and colour another status shares (flaky looks like a warning), so only the word tells them apart.
+   */
+  readonly markAlone: boolean;
+}
+
+/** How each status is shown. */
+export const STATUSES: Readonly<Record<Status, StatusStyle>> = {
+  passed: { symbol: "passed", token: "ok", markAlone: true },
+  failed: { symbol: "failed", token: "fail", markAlone: true },
+  flaky: { symbol: "warning", token: "warn", markAlone: false },
+  stopped: { symbol: "stopped", token: "stop", markAlone: true },
+  warning: { symbol: "warning", token: "warn", markAlone: true },
+  // Each shares its mark and colour with another status: only the word tells them apart.
+  error: { symbol: "failed", token: "fail", markAlone: false },
+  killed: { symbol: "stopped", token: "stop", markAlone: false },
+  "could-not-test": { symbol: "failed", token: "fail", markAlone: false },
+  interrupted: { symbol: "stopped", token: "stop", markAlone: false },
+};
+
+/** Styles and symbols for one stream, from its capabilities. */
+export interface Palette {
+  /** `text` in `token`'s style; `text` itself when colour is off or it is empty. */
+  readonly paint: (token: Token, text: string) => string;
+  /** The symbol for `name`, in Unicode or ASCII, never styled: colour is the caller's `paint`. */
+  readonly symbol: (name: SymbolName) => string;
+  /**
+   * A status as shown on its own: the painted symbol, then the status word. The word is dropped only
+   * on a terminal with colour on, and never for flaky; so a log (even a coloured pipe, whose escapes
+   * get stripped) or a screen reader never meets a colour-only status.
+   */
+  readonly status: (status: Status) => string;
+  /**
+   * `text` in the colour of the `index`-th item of a list ({@link SERIES_FORMATS}, in turn); `text`
+   * itself when colour is off, it is empty, or `index` is no whole number ≥ 0.
+   */
+  readonly series: (index: number, text: string) => string;
+}
+
+/**
+ * The palette for a stream with `capabilities`.
+ *
+ * @param capabilities - whether the stream is a terminal, and whether colour and Unicode are on.
+ * @returns the palette; it keeps no state.
+ * @example
+ * ```ts
+ * createPalette({ tty: false, color: false, unicode: false }).status("failed"); // "x failed"
+ * createPalette({ tty: true, color: true, unicode: true }).status("passed"); // "\x1b[32m✔\x1b[39m"
+ * ```
+ */
+export function createPalette(
+  capabilities: Pick<TerminalCapabilities, "tty" | "color" | "unicode">,
+): Palette {
+  const paint = capabilities.color ? stylePaint : plainPaint;
+  const symbol = (name: SymbolName): string =>
+    capabilities.unicode ? SYMBOLS[name].unicode : SYMBOLS[name].ascii;
+  // Only a coloured terminal shows a mark alone: elsewhere the colour may never be seen.
+  const marksAlone = capabilities.color && capabilities.tty;
+  const status = (name: Status): string => {
+    const { symbol: glyph, token, markAlone } = STATUSES[name];
+    const mark = paint(token, symbol(glyph));
+    return marksAlone && markAlone ? mark : `${mark} ${name}`;
+  };
+  const series = (index: number, text: string): string =>
+    capabilities.color ? seriesPaint(index, text) : text;
+  return { paint, symbol, status, series };
+}
+
+/**
+ * The palette for text that is data, not a terminal's: a thrown error's message, a report. No colour —
+ * whoever prints it decides that — and Unicode symbols, since reports are UTF-8 whatever the terminal.
+ */
+export const TEXT_PALETTE: Palette = createPalette({
+  tty: false,
+  color: false,
+  unicode: true,
+});
+
+/**
+ * The palette for a stream, decided by {@link detectCapabilities}: a shorthand for callers that need
+ * nothing else from the capabilities.
+ *
+ * @param inputs - the environment, the stream and the caller's mode, screen context and pipe policy.
+ * @returns the palette for that stream.
+ * @example
+ * ```ts
+ * paletteFor({ env: { TERM: "xterm" }, stream: { isTTY: false } }).paint("ok", "done"); // "done"
+ * ```
+ */
+export function paletteFor(inputs: CapabilityInputs): Palette {
+  return createPalette(detectCapabilities(inputs));
+}
+
+/**
+ * {@link Palette.series} with colour on.
+ *
+ * @param index - the item's place in its list, from 0; its colour repeats every
+ *   {@link SERIES_FORMATS}' length.
+ * @param text - final, plain text.
+ */
+function seriesPaint(index: number, text: string): string {
+  if (text === "" || !Number.isSafeInteger(index) || index < 0) return text;
+  const format = SERIES_FORMATS[index % SERIES_FORMATS.length] ?? "cyan";
+  return styleText(format, text, { validateStream: false });
+}
+
+/**
+ * {@link Palette.paint} with colour on: SGR through `styleText`, Node's checks skipped.
+ *
+ * @param token - the meaning, which picks the style.
+ * @param text - final, plain text.
+ */
+function stylePaint(token: Token, text: string): string {
+  if (text === "") return text;
+  return styleText(TOKEN_FORMATS[token], text, { validateStream: false });
+}
+
+/**
+ * {@link Palette.paint} with colour off: the text unchanged.
+ *
+ * @param _token - ignored.
+ * @param text - final, plain text.
+ */
+function plainPaint(_token: Token, text: string): string {
+  return text;
+}

@@ -11,15 +11,18 @@ import {
   fakeSuite,
   fakeTest,
   jsonAttachment,
+  step,
 } from "../__fixtures__/reporter-fakes";
 import { makeRun, removeTempRoot, tempRoot } from "../__fixtures__/report-tree";
 import {
   ARTIFACTS_ATTACHMENT,
   SITE_INFO_ATTACHMENT,
 } from "../setup/attachments";
+import { SYMBOLS } from "../terminal/palette";
 import type { Counts } from "./results";
 import type { RunDescription } from "./run-description";
 import RunSummaryReporter, {
+  DEFAULT_LAYOUT,
   describeCounts,
   describePlugin,
   describeSite,
@@ -31,6 +34,7 @@ import RunSummaryReporter, {
   verdictOf,
   type CellFacts,
   type SummaryInput,
+  type SummaryLayout,
 } from "./run-summary";
 
 /**
@@ -200,6 +204,13 @@ test.describe("the phrases", () => {
       "2 failed · 1 interrupted · 1 flaky · 11 passed · 1 skipped · 2 did not run",
     );
     expect(describeCounts(counts({}))).toBe("no scenarios ran");
+  });
+
+  test("describeCounts: joins with the separator it is given, `·` by default", () => {
+    const some = counts({ total: 3, failed: 1, passed: 2 });
+    expect(describeCounts(some)).toBe("1 failed · 2 passed");
+    expect(describeCounts(some, ".")).toBe("1 failed . 2 passed");
+    expect(describeCounts(counts({}), ".")).toBe("no scenarios ran");
   });
 
   test("describePlugin: a build, a release, a provided zip, a failure", () => {
@@ -555,13 +566,15 @@ test.describe("renderSummary", () => {
     );
   });
 
-  test("colours go through the styler it is given", () => {
-    const styled = renderSummary(
-      input(),
-      (format, text) => `<${String(format)}>${text}`,
+  test("colours go through the styler it is given, by token: the header bold in its verdict's colour", () => {
+    const styled = renderSummary(input(), (token, text) => `<${token}>${text}`);
+    expect(styled[0]).toMatch(/^<emphasis><ok>━━ backwpup/);
+    expect(styled[1]).toMatch(/^ {2}<emphasis>Result/);
+    const failed = renderSummary(
+      input({ status: "failed", scenarios: counts({ total: 1, failed: 1 }) }),
+      (token, text) => `<${token}>${text}`,
     );
-    expect(styled[0]).toMatch(/^<bold,green>━━ backwpup/);
-    expect(styled[1]).toMatch(/^ {2}<bold>Result/);
+    expect(failed[0]).toMatch(/^<emphasis><fail>━━ backwpup/);
   });
 });
 
@@ -723,12 +736,76 @@ test.describe("RunSummaryReporter", () => {
     ).toBe("");
     expect(reporter.printsToStdio()).toBe(false);
   });
+
+  test("E2E_OUTPUT=plain: no colour whatever FORCE_COLOR says; auto keeps the stream's colours", () => {
+    const saved = process.env.FORCE_COLOR;
+    process.env.FORCE_COLOR = "1";
+    try {
+      /** The raw text a reporter with `output` prints for a passed run. */
+      const printed = (output: string): string => {
+        const reporter = new RunSummaryReporter({ ...RUN, output });
+        reporter.onEnd({
+          status: "passed",
+          startTime: new Date(),
+          duration: 1,
+        });
+        return captureWrites(process.stdout, () => {
+          void reporter.onExit();
+        }).join("");
+      };
+      const plainText = printed("plain");
+      expect(plainText).toMatch(
+        /^\n== backwpup \. pro@nginx \(pro\) == NO TESTS =+\n/,
+      );
+      expect(plainText).not.toContain("\u001b");
+      // Plain is ASCII: the frame's glyphs too, not only the colour.
+      expect(plainText).toMatch(/^[\n -~]*$/);
+      const auto = printed("auto");
+      expect(auto).toContain("\u001b[");
+      // The words are the same: the colour and the glyphs go.
+      expect(stripVTControlCharacters(auto)).toMatch(
+        /^\n━━ backwpup · pro@nginx \(pro\) ━━ NO TESTS ━+\n/,
+      );
+      // After the blank line and the header, every line is the same.
+      expect(stripVTControlCharacters(auto).split("\n").slice(2)).toEqual(
+        plainText.split("\n").slice(2),
+      );
+    } finally {
+      if (saved === undefined)
+        Reflect.deleteProperty(process.env, "FORCE_COLOR");
+      else process.env.FORCE_COLOR = saved;
+    }
+  });
+
+  test("the reporter's rule follows the terminal's width: COLUMNS in a pipe", () => {
+    const saved = process.env.COLUMNS;
+    try {
+      for (const columns of [100, 61]) {
+        process.env.COLUMNS = String(columns);
+        const reporter = new RunSummaryReporter({ ...RUN, output: "plain" });
+        reporter.onEnd({
+          status: "passed",
+          startTime: new Date(),
+          duration: 1,
+        });
+        const header = captureWrites(process.stdout, () => {
+          void reporter.onExit();
+        })
+          .join("")
+          .split("\n")[1];
+        expect(header, String(columns)).toHaveLength(columns);
+      }
+    } finally {
+      if (saved === undefined) Reflect.deleteProperty(process.env, "COLUMNS");
+      else process.env.COLUMNS = saved;
+    }
+  });
 });
 
 test.describe("the run's pruning, in the summary", () => {
   test("renderSummary: a Pruned line last, a failure styled as a warning, none when nothing went", () => {
-    const style = (format: unknown, text: string): string =>
-      format === "yellow" ? `<y>${text}</y>` : text;
+    const style = (token: string, text: string): string =>
+      token === "warn" ? `<y>${text}</y>` : text;
     const lines = renderSummary(
       input({
         pruned: [
@@ -766,11 +843,13 @@ test.describe("the run's pruning, in the summary", () => {
     const root = tempRoot("e2e-summary-prune-");
     try {
       const cell = join(root, "backwpup", "pro@nginx");
-      const old = [
-        "2026-10-01T00-00-00-000Z-1",
-        "2026-10-02T00-00-00-000Z-1",
-        "2026-10-03T00-00-00-000Z-1",
-      ].map((name) => makeRun(cell, name));
+      // Three, four and five days old: well inside the 30-day age rule, so only the count prunes.
+      // (Fixed dates once aged past it and changed the reason.)
+      const daysAgo = (days: number): string =>
+        `${new Date(Date.now() - days * 86_400_000).toISOString().replace(/[:.]/g, "-")}-1`;
+      const old = [daysAgo(5), daysAgo(4), daysAgo(3)].map((name) =>
+        makeRun(cell, name),
+      );
       const current = makeRun(
         cell,
         new Date().toISOString().replace(/[:.]/g, "-") + "-2",
@@ -800,4 +879,303 @@ test.describe("the run's pruning, in the summary", () => {
       removeTempRoot(root);
     }
   });
+});
+
+test.describe("the Failed list, the rule and the glyphs", () => {
+  /** The `Failed` lines of a summary: its label's line and the aligned ones after it. */
+  function failedOf(lines: readonly string[]): string[] {
+    const start = lines.findIndex((line) => line.startsWith("  Failed"));
+    if (start === -1) return [];
+    const rest = lines.slice(start + 1);
+    const end = rest.findIndex((line) => !line.startsWith(" ".repeat(14)));
+    return [lines[start] ?? "", ...(end === -1 ? rest : rest.slice(0, end))];
+  }
+
+  /** A failed run's input, its failed count matching the failures listed. */
+  const failedRun = (failures: SummaryInput["failures"]): SummaryInput =>
+    input({
+      status: "failed",
+      scenarios: counts({ total: 30, failed: failures?.length ?? 0 }),
+      ...(failures !== undefined ? { failures } : {}),
+    });
+
+  test("each failed scenario with the step it failed in, right after the result; none when none failed", () => {
+    const lines = renderSummary(
+      failedRun([
+        {
+          title: ["Backups", "Create a backup"],
+          step: ["When the backup runs"],
+        },
+        { title: ["Backups", "Rule A", "Outline — row 1"] },
+        {
+          title: ["Restore", "Restore a backup"],
+          step: ["Before Hooks", "BeforeEach Hooks", "reset"],
+        },
+      ]),
+    );
+    expect(lines[2]).toBe(
+      "  Failed      Backups › Create a backup — When the backup runs",
+    );
+    expect(failedOf(lines)).toEqual([
+      "  Failed      Backups › Create a backup — When the backup runs",
+      "              Backups › Rule A › Outline — row 1",
+      "              Restore › Restore a backup — Before Hooks › BeforeEach Hooks › reset",
+    ]);
+    expect(failedOf(renderSummary(input()))).toEqual([]);
+    expect(failedOf(renderSummary(input({ failures: [] })))).toEqual([]);
+  });
+
+  test("ten are listed, then how many more; eleven says one more", () => {
+    const many = (n: number): SummaryInput["failures"] =>
+      Array.from({ length: n }, (_, i) => ({
+        title: ["F", `Scenario ${String(i + 1)}`],
+        step: ["When it breaks"],
+      }));
+    const ten = failedOf(renderSummary(failedRun(many(10))));
+    expect(ten).toHaveLength(10);
+    expect(ten.at(-1)).toBe("              F › Scenario 10 — When it breaks");
+    const eleven = failedOf(renderSummary(failedRun(many(11))));
+    expect(eleven).toHaveLength(11);
+    expect(eleven.at(-1)).toBe("              and 1 more");
+    const many25 = failedOf(renderSummary(failedRun(many(25))));
+    expect(many25.at(-2)).toBe(
+      "              F › Scenario 10 — When it breaks",
+    );
+    expect(many25.at(-1)).toBe("              and 15 more");
+  });
+
+  test("a duplicate title is listed once per failure", () => {
+    const twice = { title: ["F", "Same"], step: ["When x"] };
+    expect(failedOf(renderSummary(failedRun([twice, twice])))).toEqual([
+      "  Failed      F › Same — When x",
+      "              F › Same — When x",
+    ]);
+  });
+
+  test("a failed item is plain, masked and cut: no escape, no line break, no credential", () => {
+    const [line, ...rest] = failedOf(
+      renderSummary(
+        failedRun([
+          {
+            title: ["F\u001b[2J", "S\nnext https://u:hunter22@h.example/"],
+            step: [`When ${"x".repeat(400)}`],
+          },
+        ]),
+      ),
+    );
+    expect(rest).toEqual([]);
+    expect(line).not.toContain("\u001b");
+    expect(line).not.toContain("hunter22");
+    expect(line).toContain("F › S next https://***@h.example/ — When x");
+    expect(line?.endsWith("…")).toBe(true);
+    expect(line?.length).toBeLessThan(220);
+  });
+
+  test("an empty step says nothing after the scenario; an emoji or CJK title stays whole", () => {
+    expect(
+      failedOf(
+        renderSummary(
+          failedRun([{ title: ["機能", "シナリオ 👩‍💻"], step: ["\u001b[0m"] }]),
+        ),
+      ),
+    ).toEqual(["  Failed      機能 › シナリオ 👩💻"]);
+  });
+
+  test("the rule runs to the width it is given; a header wider than it gets no fill but is never cut", () => {
+    const at = (width: number): string =>
+      renderSummary(input(), undefined, { ...DEFAULT_LAYOUT, width })[0] ?? "";
+    expect(at(120)).toHaveLength(120);
+    expect(at(60)).toMatch(/^━━ backwpup · pro@nginx \(pro\) ━━ ✔ PASSED ━+$/);
+    expect(at(60)).toHaveLength(60);
+    // Too narrow for any fill: the words stay whole.
+    expect(at(40)).toBe("━━ backwpup · pro@nginx (pro) ━━ ✔ PASSED");
+    expect(at(20)).toBe("━━ backwpup · pro@nginx (pro) ━━ ✔ PASSED");
+  });
+
+  test("an ASCII layout draws every frame glyph in ASCII", () => {
+    const ascii: SummaryLayout = {
+      width: 80,
+      symbol: (name) => SYMBOLS[name].ascii,
+    };
+    const lines = renderSummary(
+      input({
+        status: "failed",
+        scenarios: counts({ total: 2, failed: 1, didNotRun: 1 }),
+        failures: [{ title: ["F", "S"], step: ["When x"] }],
+        setupFailures: [
+          { project: "setup:pro@nginx", setup: "auth", message: "no" },
+        ],
+        cells: new Map([["pro@nginx", { failed: ["artifacts", "auth"] }]]),
+      }),
+      undefined,
+      ascii,
+    );
+    expect(lines[0]).toMatch(
+      /^== backwpup \. pro@nginx \(pro\) == x COULD NOT TEST =+$/,
+    );
+    expect(lines[0]).toHaveLength(80);
+    expect(lines).toEqual(
+      expect.arrayContaining([
+        // The counts' separators are the layout's too: no `·` in an ASCII summary.
+        "  Result      1 failed . 1 did not run, in 14.2m",
+        "  Failed      F > S - When x",
+        "  Setup       setup:pro@nginx failed - no",
+        "  Plugin      unknown - the artifacts setup failed",
+        "  Site        unknown - the auth setup failed",
+      ]),
+    );
+    for (const [status, mark] of [
+      ["interrupted", "# INTERRUPTED"],
+      ["passed", "OK PASSED"],
+    ] as const) {
+      expect(renderSummary(input({ status }), undefined, ascii)[0]).toContain(
+        mark,
+      );
+    }
+  });
+
+  test("an ASCII layout cuts with `...` and joins a hook's path with `>`", () => {
+    const ascii: SummaryLayout = {
+      width: 80,
+      symbol: (name) => SYMBOLS[name].ascii,
+    };
+    const [hook, long] = failedOf(
+      renderSummary(
+        failedRun([
+          { title: ["F", "S"], step: ["After Hooks", "AfterEach Hooks", "x"] },
+          { title: ["F", "S".repeat(300)], step: ["When x"] },
+        ]),
+        undefined,
+        ascii,
+      ),
+    );
+    expect(hook).toBe(
+      "  Failed      F > S - After Hooks > AfterEach Hooks > x",
+    );
+    expect(long).toMatch(/^ {14}F > S+\.\.\.$/);
+    expect(long).toHaveLength(14 + 200);
+    // A setup's message and an outside error are cut the same way.
+    const lines = renderSummary(
+      input({
+        status: "failed",
+        scenarios: counts({ total: 1, didNotRun: 1 }),
+        setupFailures: [
+          { project: "setup:x", setup: "auth", message: "m".repeat(300) },
+        ],
+        runErrors: ["e".repeat(300)],
+      }),
+      undefined,
+      ascii,
+    );
+    for (const line of lines) expect(line).toMatch(/^[ -~]*$/);
+    expect(lines.filter((line) => line.endsWith("..."))).toHaveLength(2);
+  });
+
+  test("a failed step is plain and masked; an empty title part is left out", () => {
+    const [line] = failedOf(
+      renderSummary(
+        failedRun([
+          {
+            title: ["F", "", "\u001b[0m", "S"],
+            step: ["When \u001b[2J https://u:hunter22@h.example/"],
+          },
+        ]),
+      ),
+    );
+    // The escape goes and the spaces around it stay, as everywhere `plain` shows a value.
+    expect(line).toBe("  Failed      F › S — When  https://***@h.example/");
+  });
+
+  test("the header's product and cell are plain and masked", () => {
+    const [header] = renderSummary(
+      input({
+        run: {
+          ...input().run,
+          product: "p\u001b[2J",
+          cell: "https://u:hunter22@h.example/",
+        },
+      }),
+    );
+    expect(header).not.toContain("\u001b");
+    expect(header).not.toContain("hunter22");
+    expect(header).toContain("p · https://***@h.example/");
+  });
+
+  test("the reporter lists a scenario that failed for good — a settled retry too — never a flaky one or a setup", () => {
+    const reporter = new RunSummaryReporter(RUN);
+    const failing = fakeTest({
+      id: "1",
+      project: "pro@nginx",
+      titles: ["b.feature.spec.js", "Backups", "Create"],
+    });
+    const flaky = fakeTest({
+      id: "2",
+      project: "pro@nginx",
+      titles: ["b.feature.spec.js", "Backups", "Flaky"],
+      retries: 1,
+    });
+    const pending = fakeTest({
+      id: "3",
+      project: "pro@nginx",
+      titles: ["b.feature.spec.js", "Backups", "Pending"],
+      retries: 1,
+    });
+    const setup = fakeTest({ id: "s", project: "setup:pro@nginx" });
+    const typed = [
+      step("When the form is filled", "test.step", {
+        error: "Error: no",
+        steps: [step('Fill "canary-typed"', "pw:api", { error: "Error: no" })],
+      }),
+    ];
+    const out = captureStdout(() => {
+      reporter.onBegin(
+        {} as FullConfig,
+        fakeSuite([failing, flaky, pending, setup]) as unknown as Suite,
+      );
+      reporter.onTestEnd(
+        failing.test,
+        addAttempt(failing, {
+          status: "failed",
+          errors: ["Error: no"],
+          steps: typed,
+        }),
+      );
+      reporter.onTestEnd(
+        flaky.test,
+        addAttempt(flaky, { status: "failed", errors: ["Error: no"] }),
+      );
+      reporter.onTestEnd(flaky.test, addAttempt(flaky, { status: "passed" }));
+      reporter.onTestEnd(
+        pending.test,
+        addAttempt(pending, { status: "timedOut", errors: ["Timeout"] }),
+      );
+      reporter.onTestEnd(
+        setup.test,
+        addAttempt(setup, { status: "failed", errors: ["Error: setup"] }),
+      );
+      reporter.onEnd({ status: "failed", startTime: new Date(), duration: 1 });
+      void reporter.onExit();
+    });
+    const lines = out.split("\n");
+    expect(failedOf(lines)).toEqual([
+      "  Failed      Backups › Create — When the form is filled",
+      "              Backups › Pending",
+    ]);
+    expect(out).not.toContain("canary-typed");
+    // The leading blank line stays; no trailing one: the prompt follows the last line.
+    expect(out.startsWith("\n")).toBe(true);
+    expect(out.endsWith("\n")).toBe(true);
+    expect(out.endsWith("\n\n")).toBe(false);
+  });
+});
+
+test("a report folder holding an escape is shown plain: no escape reaches the terminal", () => {
+  const lines = renderSummary(
+    input({ reportDir: "reports\u001b[31mred\u001b[0m/run-1" }),
+  );
+  expect(lines).toContain(
+    "  Playwright  npx playwright show-report reportsred/run-1/playwright",
+  );
+  expect(lines).toContain("  Cucumber    reportsred/run-1/cucumber/index.html");
+  expect(lines.join("\n")).not.toContain("\u001b");
 });

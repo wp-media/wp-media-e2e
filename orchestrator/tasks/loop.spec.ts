@@ -24,6 +24,7 @@ import { parseRunRecord } from "../runs/record";
 import type { StopLevel } from "../runs/stop";
 import type { HeldCell } from "../state/cell-lock";
 import type { RunNaming } from "../state/lock";
+import type { TaskActivity } from "./activity";
 import type { CycleDeps, RunHandle, RunResult } from "./cycle";
 import {
   cooldownDelay,
@@ -1301,5 +1302,161 @@ test.describe("runTask — over the real runOnce and the fake suite", () => {
     ]);
     expect(lines.at(-1)).toBe("bpng no next run: the test is over");
     expect(built).toBe(2);
+  });
+});
+
+test.describe("runTask — what the loop tells onActivity", () => {
+  test("tells each cooldown with its next run, and how the loop ended", async () => {
+    const told: TaskActivity[] = [];
+    const r = rig({
+      onActivity: (activity) => {
+        told.push(activity);
+      },
+    });
+    (await runAt(r, 0)).settle(endedRun("passed"));
+    await turns();
+    expect(told).toEqual([
+      {
+        kind: "cooling",
+        taskId: "bpng",
+        nextRunAt: new Date(T0 + COOLDOWN_MS),
+      },
+    ]);
+    r.loop.stop("drained", "the test is over");
+    await r.loop.done;
+    expect(told.at(-1)).toEqual({
+      kind: "loopEnded",
+      taskId: "bpng",
+      ended: "stopped",
+    });
+  });
+
+  test("tells a loop that ends before any run, and a --once loop's end", async () => {
+    const told: TaskActivity[] = [];
+    const listener = (activity: TaskActivity): undefined => {
+      told.push(activity);
+    };
+    const stopped = rig({ onActivity: listener });
+    stopped.loop.stop("drained", "at once");
+    await stopped.loop.done;
+    const once = rig({ onActivity: listener, once: true });
+    (await runAt(once, 0)).settle(endedRun("failed"));
+    await once.loop.done;
+    expect(told).toEqual([
+      { kind: "loopEnded", taskId: "bpng", ended: "stopped" },
+      { kind: "loopEnded", taskId: "bpng", ended: "once" },
+    ]);
+  });
+
+  test("an attempt that began no run is told, before its cooldown; one that began is not", async () => {
+    const told: TaskActivity[] = [];
+    const r = rig({
+      onActivity: (activity) => {
+        told.push(activity);
+      },
+    });
+    (await runAt(r, 0)).settle({ kind: "notStarted", why: "failed" });
+    await turns();
+    expect(told.map((a) => a.kind)).toEqual(["notStarted", "cooling"]);
+    expect(told[0]).toEqual({
+      kind: "notStarted",
+      taskId: "bpng",
+      why: "failed",
+    });
+    r.loop.stop("drained", "the test is over");
+    await r.loop.done;
+    // A runOnce that throws is an attempt that began no run too.
+    const thrown: TaskActivity[] = [];
+    const throwing = rig({
+      onActivity: (activity) => {
+        thrown.push(activity);
+      },
+      runOnce: () => {
+        throw new Error("no identity");
+      },
+    });
+    await turns();
+    expect(thrown[0]).toEqual({
+      kind: "notStarted",
+      taskId: "bpng",
+      why: "failed",
+    });
+    throwing.loop.stop("drained", "the test is over");
+    await throwing.loop.done;
+    // A run that told its begin (then failed: the cycle tells its end) is no attempt that did not start.
+    const begun: TaskActivity[] = [];
+    const telling = rig({
+      onActivity: (activity) => {
+        begun.push(activity);
+      },
+      runOnce: (task, deps) => {
+        deps.onActivity?.({
+          kind: "begun",
+          taskId: task.id,
+          id: "bpng-1",
+          runId: "RID",
+          reportDir: "/r",
+          startedAt: new Date(T0),
+        });
+        return {
+          stop: () => undefined,
+          done: Promise.resolve({ kind: "notStarted", why: "failed" }),
+        };
+      },
+    });
+    await turns();
+    expect(begun.map((a) => a.kind)).toEqual(["begun", "cooling"]);
+    telling.loop.stop("drained", "the test is over");
+    await telling.loop.done;
+  });
+
+  test("an onActivity whose promise rejects is a line, never an unhandled rejection", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const r = rig({
+        // Against its type, as an async listener would be where its type is lost.
+        onActivity: (() =>
+          Promise.reject(
+            new Error(`async listener broke ${SECRET}`),
+          )) as unknown as LoopDeps["onActivity"],
+      });
+      (await runAt(r, 0)).settle(endedRun("passed"));
+      await turns();
+      r.loop.stop("drained", "the test is over");
+      await r.loop.done;
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(r.lines).toContain(
+        "bpng telling that its loop cools down failed: async listener broke ***",
+      );
+      expect(r.lines).toContain(
+        "bpng telling that its loop ended failed: async listener broke ***",
+      );
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  test("an onActivity that throws is a line, and the loop goes on", async () => {
+    const r = rig({
+      onActivity: () => {
+        throw new Error(`listener broke ${SECRET}`);
+      },
+    });
+    (await runAt(r, 0)).settle(endedRun("passed"));
+    await turns();
+    expect(r.timers.live).toHaveLength(1);
+    expect(r.lines).toContain(
+      "bpng telling that its loop cools down failed: listener broke ***",
+    );
+    r.loop.stop("drained", "the test is over");
+    expect((await r.loop.done).ended).toBe("stopped");
+    expect(r.lines).toContain(
+      "bpng telling that its loop ended failed: listener broke ***",
+    );
   });
 });

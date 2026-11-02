@@ -1,12 +1,16 @@
 import type { FullConfig, Reporter } from "@playwright/test/reporter";
 
+import { printLine } from "./terminal-sink";
+
 /**
- * A one-line notice, printed before Playwright's own "Running …", of the cell a run is for and how
- * it was chosen. Nothing else on the terminal names it, and whether a run was pinned decides whether
- * another cell of its product may run beside it.
+ * A one-line notice, `[cell] …`, of the cell a run is for and how it was chosen, printed first —
+ * before the terminal reporter's `[run]` header. Nothing else on the terminal names it, and whether a
+ * run was pinned decides whether another cell of its product may run beside it.
  *
  * A reporter, because reporters live in the runner process alone: the config itself is evaluated
  * in every process of a run (`bddgen`, the runner, each worker) and would print once per process.
+ * It prints through the run's terminal sink (`terminal-sink.ts`), so the terminal reporter stays the
+ * one writer; alone (its spec, a `--list` run) it writes standard output itself, as it always did.
  */
 
 /** What the config factory knows about a run, handed over as this reporter's options. */
@@ -67,20 +71,18 @@ export function actualWorkers(
     : config.workers;
 }
 
-/** Prints {@link cellNotice} as the run begins; listed first, so it comes before "Running …". */
+/** Prints {@link cellNotice} as the run begins; listed first, so it comes before the `[run]` header. */
 export default class CellNoticeReporter implements Reporter {
   /** @param options - the facts, as the config factory passed them. */
   constructor(private readonly options: CellNoticeOptions) {}
 
   /**
-   * Prints the notice.
+   * Prints the notice, through the run's terminal sink when there is one. Never throws.
    *
    * @param config - the run's resolved config; its worker count is {@link actualWorkers}.
    */
   onBegin(config: FullConfig): void {
-    process.stdout.write(
-      `${cellNotice(this.options, actualWorkers(config))}\n`,
-    );
+    printLine(cellNotice(this.options, actualWorkers(config)), "stdout");
   }
 
   /**

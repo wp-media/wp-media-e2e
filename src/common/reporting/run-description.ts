@@ -27,6 +27,15 @@ export interface RunDescription extends CellNoticeOptions {
    * no cap (`run-pruning.ts`). Absent, the run prunes nothing.
    */
   readonly reportsKeep?: number;
+  /**
+   * The plugin ref the operator set (`E2E_PLUGIN_REF`, trimmed), for the rerun command a failure
+   * prints when the artifacts setup recorded no build.
+   */
+  readonly pluginRef?: string;
+  /** The plugin zip the operator set (`E2E_PLUGIN_ZIP`, trimmed, as given), for the rerun command. */
+  readonly pluginZip?: string;
+  /** The plugin version the operator set (`E2E_PLUGIN_VERSION`, trimmed), for the rerun command. */
+  readonly pluginVersion?: string;
 }
 
 /**
@@ -53,7 +62,15 @@ export function readRunDescription(
   ] as const) {
     if (typeof value[key] !== "string") return { missing: key };
   }
-  for (const key of ["cell", "edition", "runName", "requestedRef"] as const) {
+  for (const key of [
+    "cell",
+    "edition",
+    "runName",
+    "requestedRef",
+    "pluginRef",
+    "pluginZip",
+    "pluginVersion",
+  ] as const) {
     if (value[key] !== undefined && typeof value[key] !== "string") {
       return { missing: key };
     }

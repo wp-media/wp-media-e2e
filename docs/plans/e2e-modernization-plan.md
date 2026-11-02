@@ -1,7 +1,7 @@
 # E2E Modernization Plan — `wp-rocket-e2e` → `wp-media-e2e`
 
-- Status: Phases 0–5 done. **Next: Phase 7 — terminal output** (decided 2026-10-22), then **Phase 11
-  — shared SSH server profiles** (open; scheduled after 7). The rest of Phase 6 (6H–6K) follows in
+- Status: Phases 0–5 and 7 (terminal output, done 2026-11-01) done. **Next: Phase 11 — shared SSH
+  server profiles** (open). The rest of Phase 6 (6H–6K) follows in
   the [phase-6 plan](phase-6-feature-porting-plan.md). Phase 10 open. Phase 8 dropped. Phase 9 moved
   to the [orchestrator plan](orchestrator-plan.md). WP Rocket's port starts after Phase 10.
 - Merged in, both done: plugin artifacts (§7) and site file ownership (§8), formerly plans of their
@@ -25,9 +25,10 @@
   metadata.
 - The plugin zips under test are resolved, built through APVM and identity-verified per run (§7);
   files the suite installs on a site are handed back to the site's own owner (§8).
-- Next: Phase 7 — terminal output for the suite and the orchestrator (below), then Phase 11 — shared
-  SSH server profiles: a site may omit `host`, `username`, `privateKeyPath` and `port`, while
-  `rootDir` stays per site. Phase 6 resumes at 6H after both; Phase 10 (dependency check, cleanup)
+- Terminal output (Phase 7, done): one renderer for the suite and the orchestrator — live block and
+  table on a terminal, plain stable lines piped, `E2E_OUTPUT=auto|plain|fancy`.
+- Next: Phase 11 — shared SSH server profiles: a site may omit `host`, `username`, `privateKeyPath`
+  and `port`, while `rootDir` stays per site. Phase 6 resumes at 6H after it; Phase 10 (dependency check, cleanup)
   and WP Rocket's port (parity matrix, §4) follow.
 
 ## 1. Core decisions
@@ -311,14 +312,14 @@ Open, for WP Rocket's port:
 | 4 Reporting | done | README, "Reporting"; `allurerc.mjs`, `scripts/allure.mjs` |
 | 5 Visual regression | done | §2.12 |
 | 6 Feature porting | in progress | phase-6 plan (supersedes this phase; BackWPup only) |
-| 7 Terminal output | next | below |
+| 7 Terminal output | done | below; configuration.md (Terminal output), execution-model.md |
 | 8 CI on real cells | dropped | below |
 | 9 Orchestrator | moved | orchestrator plan |
 | 10 Cleanup & validation | open | below |
-| 11 Shared SSH server profiles | open — after Phase 7 | below |
+| 11 Shared SSH server profiles | next | below |
 | WP Rocket port | after Phase 10 | phase-6 plan, "After Phase 10 — WP Rocket" |
 
-Phase 10 states no dependencies, effort or parallelism; Phases 7 and 11 state theirs below.
+Phase 10 states no dependencies, effort or parallelism; Phase 11 states its own below.
 
 Phase 6: the three install-hook obligations this plan set (consume `pluginArtifact`, stage the zip
 for `ssh`/`docker`, clean the staging area in worker teardown) are done (6A; `releaseBoundSite`).
@@ -328,241 +329,158 @@ acted on: 2 retries everywhere, local runs included, `E2E_RETRIES` overriding
 judge. Acceptance this plan set, beyond 6A's and still open: a review checklist confirms no 1:1
 carry-over from the baseline (WP Rocket's port included).
 
-Phase 7 — Terminal output (next; decided 2026-10-22). The suite and the orchestrator.
+Phase 7 — Terminal output (done 2026-11-01). The suite and the orchestrator.
 
-- Goal: on a terminal, a run and the orchestrator are easy to scan: a short header, live progress
-  (done/remaining, passed/failed/flaky), one aligned line per scenario, a failure block naming the
-  scenario, the failed step and where to look, and a summary with the report paths. Piped, redirected,
-  `CI`, `NO_COLOR`, `TERM=dumb` and narrow or non-UTF-8 terminals get the same information as plain,
-  stable lines. No styling ever reaches a log, a report or `results.jsonl`.
-- Today: `list` is the only configured reporter that prints worker output — `BaseReporter` only
-  stores it, `ListReporter` dumps it — so removing it silently hides `[artifacts]`, `[site]`,
-  `[auth]` and every worker warning. `run-summary.ts` prints one aligned block at the end, already
-  honours `NO_COLOR` through `styleText` and already begins with a blank line. The orchestrator
-  prints one timestamped line per event (`orchestrator/log.ts`); nothing shows a failed step while it
-  happens, and no live state exists.
+- Goal (met): on a terminal a run and the orchestrator are easy to scan — a header, a live block or
+  table, one line per scenario, a failure block naming the scenario, the failed Gherkin step and
+  where to look, a summary with the report paths; piped, `CI`, `NO_COLOR`, `TERM=dumb`, narrow or
+  non-UTF-8 terminals get the same information as plain, stable lines; nothing styled reaches a log,
+  a report or `results.jsonl`.
+- As built: [execution-model.md](../architecture/execution-model.md) (Watching a run, Styling, the
+  summary), [configuration.md → Terminal output](../guides/configuration.md#terminal-output) (modes,
+  precedence, the compatibility contract per program), the
+  [orchestrator guide](../guides/orchestrator.md) (On a terminal, and piped), README, AGENTS. The
+  pre-condensing plan (sub-phase rows, the full 7V1–7V91 table, the specs changed per sub-phase) is
+  at b88ed9a.
+- Delivered in ten slices: 7.1a capabilities and palette; 7.1b layout (`string-width`); 7.1c live
+  region and stream helpers; 7.2a the suite's terminal reporter (replaces `list`); 7.2b its live
+  block; 7.2c failure blocks and the summary; 7.3a the orchestrator's status model; 7.3b its screen
+  and table; 7.4a every other printer (setup lines, healthcheck, warm, thrown reports); 7.4b the
+  compatibility matrix, docs, this condensing. Each was audited twice and its findings fixed.
 - Decisions:
-  - One renderer, two front ends: a side-effect-free `src/common/terminal/` (capabilities, palette,
-    layout, live region, stream helpers) used by the suite's reporter and by the orchestrator's
-    logger. Add its modules to `orchestrator/suite-imports.json` one at a time;
-    `import-boundary.spec.ts` must stay green. Nothing reads env, installs listeners or starts a
-    timer at import: every capability is a parameter.
-  - Style is a sink, never data: build strings once on plain text, then style. Every external string
-    (title parts, error messages, paths, URLs, log chunks) goes through `plain` → masking → width
-    cut. `plain` strips VT/C0/C1/Cf but keeps lone surrogates; run `toWellFormed()` first and cap
-    combining marks. The file sinks (`orchestrator.log`, `run.log`, `results.jsonl`, reports) stay
-    byte-plain; tests assert no `\x1b` in them and no control characters in parsed values (`JSON`
-    escapes `\u001b`).
-  - Colour: `styleText` is the emitter, never the decision-maker. `detectCapabilities({ env, stream,
-    columns, rows, mode })` owns the precedence; when colour is on, the palette calls
-    `styleText(format, text, { validateStream: false })` (measured to bypass Node's own env checks),
-    so a TTY under `CI` keeps its colour while the live region stays off. When off, identity. Named
-    ANSI colours and bold/dim only — no 256/truecolor, no background fills. Semantic tokens: `ok`
-    green, `fail` red, `warn`/`stop` yellow, `id` cyan, `dim` metadata and paths, `command` bold.
-    Every status also has a symbol and a word; the word is shown whenever colour is off (a TTY with
-    colour may show the mark alone), so a CI log and a screen reader never see a colour-only status.
-  - Precedence, once: `E2E_OUTPUT=plain` (the suite's switch) wins over everything; else
-    `FORCE_COLOR` present (`0`/`false` off, anything else on) wins; else a non-empty `NO_COLOR`,
-    `NODE_DISABLE_COLORS` (any value), `TERM=dumb` or a non-TTY stream turns colour off; else a TTY
-    turns it on. `CI` never turns colour off by itself; it only turns the live region off.
-  - `E2E_OUTPUT=auto|plain|fancy` (default `auto`, read by the suite only): `auto` = fancy on a TTY,
-    plain otherwise; `plain` = no colour, no cursor movement, ASCII; `fancy` = live on a TTY even
-    under `CI`, but never colour where the precedence says no and never cursor movement without a
-    TTY. An invalid value fails fast at the env boundary, as `E2E_RETRIES` does. The orchestrator
-    reads no `E2E_*` (0.5 §4.9) and detects from its own stream and the standard variables.
-  - Symbols: `✔ ✘ ⚠ ■ ▸ ▰▱ ✓ ✗ · │ ├ └ ─ ━ › …`; ASCII fallback (`OK`, `x`, `!`, `#`, `>`, `#-`,
-    `ok`, `x`, `.`, `|`, `+`, `-`, `=`, `>`, `...`) when `TERM=dumb`, the locale is `C`/`POSIX`, or
-    output is forced plain. An unset locale is UTF-8 on the supported platforms.
-  - Width: `stream.columns` when a finite integer > 0, else `COLUMNS` when valid, else 80; clamped
-    20–120. Live rows are hard-cut to the width (grapheme-safe: `string-width` with
-    `ambiguousIsNarrow: false`, `Intl.Segmenter` for the cut); permanent lines are never truncated
-    except a 500-code-point safety cap, and commands and paths are never cut. `columns`/`rows` of 0
-    (BSD `script`) means no live region, not width 0.
-  - Live region: only on a TTY, `rows`/`columns` > 0, not `CI` (unless `fancy`), not `--ui`/`--watch`,
-    not `--list`; at most 2 redraws/s, height-capped at `rows - 1`; one writer owns the run's stdout
-    and stderr. Cursor contract, byte-tested: after a draw the cursor is on the block's last row,
-    column 0, with no trailing newline; clearing N rows writes `\r\x1b[2K` then
-    `\x1b[1A\r\x1b[2K` × (N-1), ending on the block's first row, column 0; the permanent line is
-    printed there, then `\n`, then the block is redrawn below. A resize resets the model to height 0
-    and redraws after a newline; the cursor is never hidden; the region is closed in `onEnd` (before
-    the HTML hint and the summary) and on every stop path. The suite makes its TTY stdout
-    non-blocking while live is on (`unblockTerminal`, moved into `terminal/stream.ts`), bounds the
-    queue and drains before exit: a paused terminal costs the drain bound, never a frozen event
-    loop. A write that fails (`EPIPE`, `EIO`, a destroyed stream) turns the region off for good and
-    is never thrown: a throwing reporter fails a run that passed. SIGTERM/SIGKILL can leave it; the
-    guide says so.
-  - One writer: `terminal.reporter.ts` implements `onStdOut`/`onStdErr` (buffer to lines, flush at
-    the attempt's end, strip VT codes, mask, cap, print as permanent indented lines) and every suite
-    reporter that writes during a run goes through its sink (`cell-notice`, `results-stream`'s
-    warnings, `run-facts`'s). This keeps the setup lines and warnings visible once `list` is gone,
-    and keeps `run.log` plain: workers are started with `FORCE_COLOR=1`, so their `styleText` output
-    carries ANSI even when the runner's env says otherwise. The run's environment needs no colour
-    variables: its allowlist already excludes `FORCE_COLOR`/`NO_COLOR`, and the reporter strips what
-    the workers force.
-  - Secrets: the failure block never prints a `result.steps` title or `params` — Playwright titles
-    API steps with typed values (`Fill "…"`). It uses `firstError()`
-    (`REPORTABLE_CATEGORIES`, `cleanMessage`) and `scenarioPlace()`. Every rendered field goes
-    through `plain` → `redactSecrets` (shape) and, in the orchestrator, `maskValues` (by value) →
-    cut; the suite holds no secret values, so a typed value is never shown because it is never
-    printed. A canary typed with `enterSecret` plus a failing assertion proves it, including a
-    title, `E2E_RUN_NAME` and `REPORT_ROOT` carrying an escape.
-  - `--list`, `--ui` and `--watch`: `printsToStdio()` returns `mode !== "list"`; `--list` keeps
-    Playwright's listing. The live region and the reporter's own lines are inert under
-    `--ui`/`--watch`, whose stdio Playwright intercepts; `PW_TEST_REPORTER`, which appends a second
-    reporter, does the same. `--reporter` replaces the whole suite stack (stream, reports, summary),
-    not just this reporter; documented.
-- Suite (7.2a–7.2c):
-  - 7.2a, the sink and plain output: replace `list` with `src/common/reporting/terminal.reporter.ts`;
-    a `[run]` line after the unchanged `[cell]` notice (`product · cell (edition) · run id ·
-    requested ref · N scenarios`) or, on a TTY, the same words as a `━━` rule; one line per
-    scenario at its final attempt (`✔ 18.4s  Backups › …`, `✘ failed 8.1s  … attempt 2/2` when
-    colour is off); a `↻` line per failed attempt due a retry; setup lines and the summary
-    unchanged; no live block yet. Output stays bounded (one line per final scenario, one block per
-    final failure, a capped error) so the 64 KiB log tail a run's reason quotes keeps `bddgen`'s
-    cause.
-  - 7.2b, the live block: bar, counts (`done/total · % · passed · flaky · failed · running ·
-    elapsed`) and at most one current line per worker (`▸ feature › scenario · site · elapsed`),
-    bottom-pinned through the cursor contract, starting with the first `scenario.begin` so a long
-    build shows setup lines, not a 0 % bar; nothing in plain.
-  - 7.2c, failures and the summary: on a final failure, a block with the scenario, the failed Gherkin
-    step, the `feature:` file (no line — the reported location is the generated spec, 7V6), the
-    first error line, screenshot/trace paths and a rerun command
-    (`E2E_CELL=<cell> [E2E_PLUGIN_REF=<commit>|E2E_PLUGIN_ZIP=<zip>] npm run test:<product> --
-    --grep=<escaped title>`, `shellWord`-quoted; a cell-less run omits `E2E_CELL`; duplicate titles
-    run more than one test). Setup failures get their own block. The summary keeps its facts, gains
-    a capped `Failed` list (scenario — failed step, 10 then `and N more`), a width-aware rule and the
-    shared palette; its `Styler` becomes token-based (the specs' identity styler keeps working), its
-    leading blank line stays and no trailing blank line is added, so the shell prompt follows the
-    last line.
-  - Header contents: product/cell, run id, requested ref, planned scenario count — what `onBegin`
-    knows. Plugin and site facts stay in the `[artifacts]`/`[site]` lines they already print and in
-    the summary; they do not exist yet at `onBegin` and are not printed twice.
-- Orchestrator (7.3a–7.3b):
-  - Data: the loop hands the renderer each run's `id`, `reportDir` and `startedAt` when it starts and
-    `stopping`/`ended` when those happen — a small extension of `onRunBegun`, which passes only
-    `id, taskId` today, and `run.json` has no `reportDir`. Counts come from a per-run tail of
-    `results.jsonl` (`run.begin.scenarios`, `setup.end`, `scenario.begin`, `scenario.end`), through
-    the same `parseResults`/`readRunResults` reader `run.finished` uses, never re-counted ad hoc,
-    and never from stdout (a run's stdout is its log's fd). The tailer keeps an offset, slices at the last
-    newline before decoding, caps the partial line, resets on truncation, tolerates a missing file,
-    and closes on every end path. Scenario titles are `plain`ed again: JSON preserves control
-    characters.
-  - States, from the orchestrator's own record: `starting` (launched, no `run.begin` yet),
-    `setup n/m` (setups arriving), `running`, `stopping` (a stop asked), `cooling`
-    (`next run HH:MM:SS` and the last outcome). No `building`: the artifact build is inside the run's
-    setup project.
-  - Table: bottom-pinned, one row per task (`TASK RUN CELL PROGRESS ELAPSED STATE`); redrawn at most
-    once a second; cleared before every permanent line and on every stop path; height-aware rows
-    (`rows - 2`, running and stopping first, then config order, `and N more`); columns dropped in
-    order (bar, elapsed, cell, counts) down to one line per task below ~50 columns; writes are
-    Buffers and obey the logger's 1 MiB backlog (skipped draws coalesce, never counted as lost
-    lines); the timer is `unref`ed and stopped before `exiting`, and the final clear runs before
-    `drainTerminal`.
-  - Permanent lines: today's words, in today's order, with the time dim and the scope coloured per
-    task and continuation lines aligned under the message; blocks only for the run end and the stop
-    sequence; `--dry-run`, `--help` and refusals keep their exact text (commander owns help), styled
-    only when the stream is a TTY.
-  - `orchestrator.log` stays `ISO <scope>  <text>`; a piped stdout stays today's bytes (no table, no
-    colour, Unicode kept). Slack, Datator, `run.finished` and `run.log` are untouched.
-- Shape (TTY, abbreviated):
+  - One renderer (`src/common/terminal/`), side-effect-free at import, every capability a
+    parameter; the orchestrator admits its modules one at a time (`suite-imports.json`).
+  - Style is a sink, never data: strings are built plain, cut, then styled. External text goes
+    `plain` → masking → cut; `cleanMessage`/`redactBuildText` drop format characters before masking
+    (one inside a token defeated it, 7V64, 7V87). Raw worker lines are masked whole before any cut (a
+    cut inside an escape-inflated line printed a token's head, 7V34).
+  - `styleText` emits, never decides: `detectCapabilities` owns the precedence and the palette calls
+    `styleText(…, { validateStream: false })` (7V1–7V3), so a TTY under `CI` keeps colour. Every
+    status has a symbol and a word; the word drops only on a coloured TTY, never for flaky, so no
+    status is colour-only. Named ANSI colours, bold and dim only.
+  - The orchestrator reads no `E2E_*` (its runs: [configuration.md → Terminal
+    output](../guides/configuration.md#terminal-output)), never colours a pipe
+    (`forceColorWithoutTty: false`), and keeps its piped bytes and its lines' Unicode glyphs (7V69,
+    7V85).
+  - Width measured per grapheme as max(`string-width` of the cluster, Σ of its code points), ambiguous
+    narrow (user decision 2026-10-27): never below what tmux draws (7V20, 7V21). Live rows are cut;
+    permanent lines never, but for a 500-code-point cap; commands, paths and a rule's title never.
+  - A C/POSIX locale changes only the symbols, never colour or live (user decision).
+  - Live region: `\r\n` inside it (7V27); one repaint per print burst (7V26); resize erases from the
+    old block's top row, never `\x1b[J` from the top-left (tmux's `scroll-on-clear`, 7V22, 7V24);
+    the TTY made non-blocking with a no-op `error` listener (7V28); a failed write turns it off for
+    good, never thrown. One writer per stream: the suite's terminal reporter owns stdout and prints
+    worker output live under `▸` lines (7V5, 7V33); while a block or table shows, the process's own
+    stdout/stderr writes are captured and printed above it (7V74), the wrap restored on close and on
+    every stop path but SIGKILL (user decision); SIGTERM/SIGHUP clear the block
+    and are re-sent only when no other listener is left (7V51); a crash clears the table first (7V75).
+  - The failure block never prints a `result.steps` title or `params` (Playwright titles API steps
+    with typed values, 7V6); its `--grep` follows Playwright's grep title shape, anchored, with
+    hostile characters as `\uXXXX` (7V57, 7V58, 7V62); its pin is the documented form (7V65). A
+    crashed worker's step is `duration: -1` (7V63).
+  - `--list`, `--ui`, `PW_TEST_REPORTER`: the reporter is quiet and `printsToStdio()` false, so
+    Playwright adds its own (7V30, 7V31, 7V35); watch mode prints.
+  - Thrown reports are plain Unicode (`TEXT_PALETTE`); a worker's printed lines are never coloured
+    (`workerPalette`); the scripts' rules stay 72 columns (7V81).
+  - Under `plain` the summary's own glyphs are ASCII, its counts' separators included; the plugin and
+    site phrases it shares with the run facts keep their `·`/`—` (7V64, 7.4b).
+- Compatibility contract: [configuration.md → Terminal output](../guides/configuration.md#terminal-output).
+  Row → test (`compat.pty.spec.ts` runs the suite's reporter and summary, the orchestrator's screen
+  and logger, and the healthcheck's printers, each in a fresh Node on a sized pty, an unsized one or
+  a pipe, and reads colour, live, symbols and width from the bytes; macOS and `p71a-audit-b`
+  (Ubuntu 24.04, util-linux 2.39.3, `CI=true`) ×3 green):
 
-  ```text
-  [cell] backwpup/pro@nginx, pinned by E2E_CELL: …
-  ━━ BackWPup · pro@nginx (pro) ━━ bpng-42 · develop · 52 scenarios ━━━━━━━━━━━━━━━━━━━━━━━━━━
-  [artifacts] …
-  [site] https://bwu3.example: WordPress 7.1.2 · PHP 8.5.10 (fpm-fcgi) · nginx · database 8.4.5 (mysqli)
+  | Row                           | Proved by                                                                                                                                                                                                  |
+  | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | TTY, UTF-8, no `CI`           | compat: nothing set; `NO_COLOR`/`CI` empty; `CI=false`; `NODE_DISABLE_COLORS` `1`/empty; `FORCE_COLOR` `0`/`false`/`FALSE`; `1`/`true`/empty over `NO_COLOR=1`. `terminal.pty.spec.ts` (Node's own `styleText` per case); `live-block.run.spec.ts`, `table.tmux.spec.ts` (real runner, real CLI, tmux) |
+  | TTY, `CI`                     | compat: `CI=true`, with `fancy`; `terminal.pty.spec.ts`; `live-block.run.spec.ts` under CI (`fancy`)                                                                                                       |
+  | TTY, `NO_COLOR`               | compat: `NO_COLOR=1` (live kept); `live-block.run.spec.ts` (block kept, no colour)                                                                                                                         |
+  | TTY, `TERM=dumb`              | compat: alone, with `FORCE_COLOR=1`; `terminal.pty.spec.ts`                                                                                                                                                |
+  | TTY, `TERM` unset or empty    | compat: unset, empty, unset with `FORCE_COLOR=1`; `terminal.pty.spec.ts`                                                                                                                                   |
+  | TTY, C/POSIX/non-UTF-8 locale | compat: `LANG=en_US.UTF-8` (Unicode), `LC_ALL=C`, empty `LC_ALL` with `LANG=C`, `LANG=en_US.ISO-8859-1`, `LC_ALL=POSIX` + `NO_COLOR`; `terminal.pty.spec.ts` (`en_US`, `LC_CTYPE=UTF-8`); `capabilities.spec.ts` |
+  | Pipe/file (`fancy` too)       | compat: nothing set, `FORCE_COLOR` `1`/empty, `fancy`, `CI`, `LC_ALL=C`; `results-stream.run.spec.ts` (`FORCE_COLOR`, real runner); `live-block.run.spec.ts` (pipe); 7V69 (orchestrator bytes)            |
+  | `plain`                       | compat: TTY and pipe, each with `FORCE_COLOR=1`; `results-stream.run.spec.ts`; `run-summary.spec.ts`                                                                                                       |
+  | Width                         | compat: TTY 100 with `COLUMNS=90` (the terminal wins); 0×0 pty `COLUMNS=90`, garbage → 80; pipe 80, `COLUMNS` 90, 500 → 120, 0 and −5 → 80; the orchestrator wraps at the width, no narrower; `layout.spec.ts` (the 20 floor: a rule's title is never cut, so no printed rule shows it) |
 
-    ✔ 18.4s  Backups › Create a backup from the dashboard
-    ✘  8.1s  Restore › Restore an archive                                   attempt 2/2
-      └ When I choose the archive to restore                       features/restore.feature
-        expected 200, got 500
-        Screenshot reports/…/test-failed-1.png · Trace reports/…/trace.zip
-        Rerun  E2E_CELL=pro@nginx E2E_PLUGIN_REF=<sha> npm run test:backwpup -- --grep="Restore an archive"
-    ███████░░░ 23/52 · 44% · 20 passed · 1 flaky · 2 failed · 3 running · 4m 12s
-      ▸ Backups › Download a backup · bwu4 · 1m 03s
-  ```
+  A script's standard error is read apart (a file on a pty): unstyled unless an on `FORCE_COLOR`
+  outside `plain`, as its own stream's palette says.
 
-  ```text
-  TASK  RUN      CELL       PROGRESS                     ELAPSED  STATE
-  bpng  bpng-12  pro@nginx  ███████░░░ 38/52 · 1 failed  18m 04s  running
-  bfap  —        free@nginx ✔ passed · 52 scenarios      54m 10s  next 11:14:42
-
-  10:15:30  orchestrator  started · 2 tasks (bpng, bfap) · .orchestrator/ · pid 4242
-  ```
-
-- Compatibility contract:
-
-  | Sink / env                                     | Colour                                              | Live    | Symbols                 | Width                    |
-  | ---------------------------------------------- | --------------------------------------------------- | ------- | ----------------------- | ------------------------ |
-  | TTY, UTF-8, no `CI`                            | unless `NO_COLOR`/`NODE_DISABLE_COLORS`/`TERM=dumb` | yes     | Unicode                 | `columns`                |
-  | TTY, `CI`                                      | as the precedence says                              | no      | Unicode                 | `columns`                |
-  | TTY, `NO_COLOR`                                | no                                                  | yes     | Unicode                 | `columns`                |
-  | Pipe/file/CI                                   | no, unless `FORCE_COLOR`                            | no      | Unicode if UTF-8        | 80 (permanent lines)     |
-  | `TERM=dumb`, `C`/`POSIX` locale, `plain`       | no                                                  | no      | ASCII                   | 80 (permanent lines)     |
-  | `fancy`, non-TTY                               | as the precedence says (no ANSI without a TTY)      | no      | Unicode                 | 80 (permanent lines)     |
-
-  `NO_COLOR` follows no-color.org (present and not empty); `FORCE_COLOR=0`/`false` disables, any other
-  value enables and wins over `NO_COLOR` (Node warns; the palette bypasses that warning with
-  `validateStream: false`). `CI` is `true` when present and not empty/`0`/`false`; that only disables
-  live.
-- Sub-phases:
-
-  | #   | Delivers                                                                                                                        | Depends  | Parallel | Effort | Done when                                                                                                                                                                                                                                                                              |
-  | --- | ------------------------------------------------------------------------------------------------------------------------------- | -------- | -------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-  | 7.1a | `terminal/capabilities.ts` and `palette.ts`: the precedence above, semantic tokens, identity palette; unit specs.                | —        | 7.1b     | S, ½ d | Every branch tested with injected env/stream objects; the `styleText` precedence measured through a real pty (`script -q /dev/null`, `stty`), never a fake `isTTY`; `validateStream` pinned; no visible change.                                                                          |
-  | 7.1b | `terminal/layout.ts`: width, grapheme-safe cut, padding, rules; `plain` gains `toWellFormed` and a combining-mark cap; `string-width` (dev dependency). | —        | 7.1a     | S, ½ d | Property tests: emoji/ZWJ/flags/CJK/combining/tabs/lone surrogates, `width(cut(s, n)) <= n`, no split escapes; `npm run typecheck`/`lint` green.                                                                                                                                       |
-  | 7.1c | `terminal/live.ts` and `stream.ts` (`unblockTerminal`/`drainTerminal` moved out of `orchestrator/terminal.ts`): draw/clear, resize, backlog, drain. | 7.1a, 7.1b | —       | M, 1 d | Byte-exact fake-sink contract; tmux 40×10 and 80×24 leave no residue over 20 cycles; resize and a stalled stream bounded; non-TTY is a no-op.                                                                                                                                         |
-  | 7.2a | Suite sink: `terminal.reporter.ts` replaces `list`; plain lines; `onStdOut`/`onStdErr`; `--list`/`--ui` guards; the other suite reporters' warnings through the sink. | 7.1a, 7.1b | 7.3a     | M, 1½ d | A real run on the Docker cell (`npm run env:up`) on a TTY and `\| cat` shows every setup line, warning and scenario once; `--list` lists; `results.jsonl` unchanged; a fake worker chunk with ANSI lands plain.                                                                          |
-  | 7.2b | The live block: bar, counts, per-worker current lines; starts at the first scenario.                                             | 7.1c, 7.2a | 7.3b     | M, 1½ d | A 40×10 tmux pane shows 20 draws with a 120-char title and a worker warning, no residue, no lost permanent line; resize mid-run; `NO_COLOR` keeps live but no colour.                                                                                                                    |
-  | 7.2c | Failure blocks, retry/flaky/setup/timeout cases, rerun command; summary `Failed` list and width-aware rule.                      | 7.2a     | 7.4a     | M, 1½ d | Each failure kind names the scenario and the failed Gherkin step (never an API step); the canary never appears; the summary lists failures, 10 then `and N more`; exact-output specs updated deliberately.                                                                                |
-  | 7.3a | Orchestrator seam (`id`, `reportDir`, `startedAt`, stopping/ended), `results.jsonl` tailer, table plain.                         | 7.1a, 7.1b | 7.2a     | M, 1½ d | The fake suite renders `starting`/`setup`/`running`/`cooling`; a partial line, truncation, a missing file, a crash without `run.end` and `--once` are handled; no timer or fd leaks (soak).                                                                                              |
-  | 7.3b | Table styling, lifecycle, backlog cap, stop paths; piped bytes unchanged.                                                       | 7.1c, 7.3a | 7.2b     | M, 1 d | TTY table and piped log on the fake suite; `SIGINT`/`SIGTERM`/`--once` clear it; `orchestrator.log`/`run.log` byte-plain; event, Slack and Datator payloads identical.                                                                                                                    |
-  | 7.4a | Call-site migration: `verify`, `preflight`, `elevation-report`, `apvm`, `healthcheck`, `warm-artifacts`, `capture-backwpup-fixtures`; thrown reports become plain text, styled only when printed. | 7.1a     | 7.2a–7.3b | M, 1 d | `NO_COLOR`/`E2E_OUTPUT=plain` honoured everywhere; `formatFailureReport`/`buildReport` throw plain text; `npm run healthcheck > fleet.log` has no `\x1b`; specs updated deliberately.                                                                                                       |
-  | 7.4b | Compatibility matrix, pty/tmux tests, docs, measured facts.                                                                     | all      | —        | M, 1½ d | The matrix is covered by tests; README/AGENTS/configuration/execution-model/orchestrator guide document the modes; all four gates green.                                                                                                                                                |
-
-- Tests: the capability matrix against a real pty (`NO_COLOR` empty/non-empty, `FORCE_COLOR`
-  `0`/`1`/`true`/empty, `NODE_DISABLE_COLORS`, `TERM=dumb`, `CI` empty/`false`, `COLUMNS` garbage,
-  `C` locale), never a hand-built `isTTY` object (`styleText` rejects it or takes the wrong branch);
-  layout properties; the live contract on a fake sink and in tmux; the reporter with fake Playwright
-  events (final vs retry, flaky, timeout, hook/beforeAll failure, failed setup, drained, multi-error,
-  worker output); a secrets canary typed with `enterSecret`; `--list`, `--ui` and `--reporter`; the
-  orchestrator's fake suite (partial line, truncation, ENOENT, crash, SIGINT/SIGTERM, `--once`, a
-  stalled terminal); byte-level checks that file sinks and parsed values stay plain. No new test
-  dependency: `script -q /dev/null` with `stty` on macOS, `script -qec` on Linux.
-- Phase 7 — measured (2026-10-23, Node 24.21.0 and 26.12.1, macOS; a real pty unless said):
+  Mutants (40 cases): removing `openScreen`'s TTY check fails 11, `describeCounts` ignoring its
+  separator 9; swapping a script's stdout and stderr palettes 13, the orchestrator wrapping at 80
+  whatever the terminal 28, `COLUMNS` read before the terminal's columns 1, an empty `FORCE_COLOR`
+  read as unset 2, `FORCE_COLOR`'s off values case-sensitive 1, `UTF-8` with its dash unrecognised 1,
+  an empty `LC_ALL` read as no locale at all (UTF-8) 1; flipping the orchestrator's `forceColorWithoutTty` is equivalent there (no screen
+  opens on a pipe, so the flag only meets TTYs).
+- Measured facts that justify behaviour (ids kept from the full 7V1–7V91 table at b88ed9a, 7V92
+  on added since; 2026-10-23 to 11-02, Node 24.21/26.12, macOS unless said):
 
   | #    | Claim                                                                                                                                                                                                                                 | Evidence                                                                                                     |
   | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-  | 7V1  | `styleText` on a pty: plain under non-empty `NO_COLOR`, any `CI` (even empty/`false`/`0`), `NODE_DISABLE_COLORS` (any value), `TERM=dumb` and `FORCE_COLOR=0`; colour otherwise; `FORCE_COLOR` (any value but `0`/`false`) wins over all of them, warning if `NO_COLOR` is set; `NO_COLOR=""` does not disable. | pty probes, both Nodes                                                                                        |
-  | 7V2  | A hand-built `{isTTY:true}` stream is not a pty: `styleText` rejects it (`ERR_INVALID_ARG_TYPE`) or takes a different branch, so a fake-stream probe reports the opposite of `NO_COLOR`. Test with `script`.                          | fake-stream probe vs the pty probes of 7V1                                                                   |
+  | 7V1  | `styleText` on a pty: plain under non-empty `NO_COLOR`, any `CI` (even empty/`false`/`0`), non-empty `NODE_DISABLE_COLORS` (an empty one keeps Node's colour; the precedence still turns colour off for any value), `TERM=dumb`, an unset `TERM` and `FORCE_COLOR=0`; colour otherwise; a `FORCE_COLOR` Node reads as on (7V15) wins over all of them, warning if `NO_COLOR` is set; `NO_COLOR=""` does not disable. | pty probes, both Nodes                                                                                        |
+  | 7V2  | A hand-built `{isTTY:true}` stream is not a pty: `styleText` rejects a plain object (`ERR_INVALID_ARG_TYPE`); a `Writable` with `isTTY: true` reads only `FORCE_COLOR`, so it colours under `NO_COLOR`, `CI`, `TERM=dumb` or no `TERM`, where a pty does not. Test with `script`. | `terminal.pty.spec.ts` measures both per case                                                                |
   | 7V3  | `styleText(..., { validateStream: false })` bypasses every env check and emits SGR, so a palette that decides first can style deterministically (including `CI` + colour).                                                             | pty probes                                                                                                    |
   | 7V4  | Playwright starts workers with `FORCE_COLOR=1`, so a worker's `styleText` emits ANSI into its output; `list` strips it (`StripAnsiStream`) only because it controls the screen.                                                        | `playwright/lib/runner/index.js` (WorkerHost)                                                                 |
   | 7V5  | `BaseReporter.onStdOut/onStdErr` only stores worker output; `ListReporter` is what prints it. Removing `list` without implementing both loses `[artifacts]`, `[site]`, `[auth]` and warnings from the terminal.                       | `runner/index.js` (BaseReporter, ListReporter)                                                                |
   | 7V6  | `firstError()`/`REPORTABLE_CATEGORIES` already pick a safe step chain; raw `TestStep` titles and `params` can hold typed values (`Fill "…"`). The BDD step's `location` is the generated spec, not the `.feature` line.                | `src/common/reporting/results.ts`; `playwright-bdd/dist/runtime/bddStepInvoker.js`                            |
   | 7V7  | A run's stdout and stderr are its `run.log` fd (`stdio: ["ignore", fd, fd]`), so the orchestrator cannot pump or strip them; only the reporter's `onStdOut`/`onStdErr` can.                                                          | `orchestrator/runs/launch.ts`                                                                                 |
-  | 7V8  | `run.json` has no `reportDir`, and `onRunBegun` carries only `(id, taskId)`; `RunIdentity` has `reportDir` and `startedAt` at launch.                                                                                                 | `orchestrator/runs/record.ts`, `cycle.ts`, `start.ts`                                                         |
-  | 7V9  | BSD `script` gives a pty with `columns=0`, `rows=0`; `stty cols/rows` inside the session fixes it; `script -qec` is util-linux only.                                                                                                   | measured                                                                                                      |
-  | 7V10 | The draw/clear contract above leaves no residue and loses no permanent line in a 40×12 tmux pane over five cycles.                                                                                                                    | tmux capture                                                                                                  |
-  | 7V11 | `run-summary` already begins with a blank line and already drops colour under `NO_COLOR` (it passes `process.stdout`). The summary's `WIDTH` is a fixed 88 and its marks are literal Unicode.                                          | `run-summary.ts`; pty probe                                                                                   |
-  | 7V12 | `reporting.spec.ts` pins `"list"` (position and neighbours); `--reporter` replaces the whole configured stack, stream and summary included.                                                                                            | `src/common/config/reporting.spec.ts`; `run-pruning.run.spec.ts`                                              |
+  | 7V9  | BSD `script` and util-linux `script` (2.39.3) both give a pty `columns=0`, `rows=0` when their stdin is not a terminal; `stty cols/rows` inside the session fixes it; `script -qec` is util-linux only.                            | measured; `terminal.pty.spec.ts` (unsized case), macOS and Ubuntu 24.04                                       |
   | 7V13 | `--ui`/`--watch` create the config reporters and replace `process.stdout.write`/`stderr.write` with dispatchers, so a live region must stay inert there.                                                                               | `runner/index.js` (`disableConfigReporters`, `_setInterceptStdio`)                                            |
+  | 7V14 | util-linux `script` exits 0 when SIGTERMed (BSD: 143), so a spawn `timeout` passes a killed probe off as finished: the pty spec times probes with its own timer, then SIGKILL.                                                       | 2026-10-27, Ubuntu 24.04 container, util-linux 2.39.3                                                         |
+  | 7V15 | Node's `styleText` reads `FORCE_COLOR` `yes`, `FALSE`, `False` as no colour (pipe and pty); `2`, `3`, empty as colour. The precedence reads `yes` as on, `FALSE` as off.                                                              | 2026-10-27, Node 24.21.0 macOS; pinned in `terminal.pty.spec.ts`                                              |
+  | 7V16 | Codeset-less locales: Ubuntu 24.04 gives `en_US`, `c`, `UTF-8`, `c.utf8` (and every uninstalled locale) the charmap `ANSI_X3.4-1968`; macOS reports none for `en_US`/`de_DE` (their `LC_CTYPE` links `C.UTF-8`'s; `nl_langinfo` fails) and `UTF-8` for `LC_CTYPE=UTF-8`. Hence by name: codeset-less is ASCII except bare `UTF-8`. | `locale charmap`, Python `nl_langinfo`, 2026-10-27                                                            |
+  | 7V17 | Node's "NO_COLOR is ignored due to FORCE_COLOR" warning fires once, when anything loads Node's colour helpers — the ESM or tsx loader at start-up already does — so `validateStream: false` cannot keep it off stderr; a bare CommonJS bypass call does not warn. | `node --trace-warnings`, 2026-10-27; pinned in `terminal.pty.spec.ts`                                         |
+  | 7V19 | `string-width` 8.3.0 (2026-09-24; deps `strip-ansi`, `get-east-asian-width`; Node ≥ 20): `ambiguousIsNarrow` default `true`; a cluster counts its first visible code point's width (plus spacing marks), RGI emoji, ZWJ sequences and keycaps 2, a tab and a lone surrogate 0. Node's `stripVTControlCharacters` leaves DCS/APC/PM/SOS and C1 OSC bodies (their `ESC`/C1 then become spaces), so payload text may show but no control passes. | `node_modules/string-width/index.js`; Node 24.21 probe, 2026-10-27 |
+  | 7V20 | tmux 3.8 (macOS, `en_US.UTF-8`; cursor column after printing): every palette Unicode symbol 1 column (ambiguous drawn narrow); Thai KO KAI+SARA AM ×4 8, Devanagari KSSA ×3 6, `a` + 5 / 30 skin-tone modifiers 11 / 61, 3 regional indicators 3 (a lone one 1), keycap+VS16 2, CJK 2 each, `é`/`e`+U+0301/`±` 1. `string-width` alone gives 4, 3 and 1 for those three: a live row would wrap, hence the per-code-point sum. | `layout.spec.ts` table (both columns), 2026-10-27 |
+  | 7V21 | Where tmux 3.8 draws less than the measure (pads short, never wraps): ZWJ family 2 vs 6, rainbow flag 2 vs 3, emoji+modifier 2 vs 4, keycap without VS16 1 vs 2, Hangul L+V jamo 2 vs 3, Devanagari consonant+spacing mark 1 vs 2, a Burmese syllable 1 vs 4. Real text with 5 marks (cantillated Hebrew, Burmese, a Tibetan stack) draws 1 column. | tmux probe, 2026-10-27 |
+  | 7V22 | tmux on resize: wider, rows stay whole and the cursor leaves column 0 (col 20 after 40→60); narrower, rows wider than the pane split and the cursor goes to the last part; shorter, blank rows below go first, then the top into history, out of cursor-up's reach. `\x1b[J` with the cursor at the top-left is tmux's `scroll-on-clear` case (default on, 3.4 and 3.8): the screen scrolls into history, the old block with it — the first resize erase (up N-1, `\r\x1b[J`) left the whole 12-row block after a height-only shrink 80×24→80×10. `\n` + redraw (the first design) left the whole old block. xterm.js 5.5 has no such case. | erase-matrix probe (tmux panes; xterm.js headless), tmux 3.8 macOS, 3.4 Ubuntu 24.04, xterm.js 5.5 headless, 2026-10-28 |
+  | 7V23 | GitHub's `ubuntu-24.04` image (20261023.334.3) has no tmux (its readme's apt list skips from `tk` to `tree`); Ubuntu 24.04's apt gives 3.4, on which the terminal specs pass under `CI=true` (×5 each, `--repeat-each=5`). CI installs it in both unit shards with `DPkg::Lock::Timeout=60`, one retry, `--no-install-recommends`. `script` (util-linux) is on the image. | runner-images readme; ubuntu:24.04 container, 2026-10-28 |
+  | 7V24 | Resize erase, residue lines left (12-row block, 8 lines above; tmux 3.8 / 3.4 / xterm.js), old `up N-1, \r\x1b[J` → new `up N-1, \r\x1b[2K, save, down 1, \x1b[J, restore`: 80→60 narrow 6→6 (all three); 80×24→60×10 12→7 (tmux), 7→7 (xterm.js); height-only 24→10 rows 12→2 (tmux), 2→2 (xterm.js); 40×12→40×4 (11 rows) 11→7; widen 80→100 with CJK rows: tmux 3.8 6 of 12 either way (its reflow moves wide-char rows above the cursor), 0 on 3.4 and xterm.js. No permanent line lost or altered in any of 180 cases per terminal. Erasing more (reflow arithmetic) would erase permanent lines on a terminal that truncates instead of reflowing, so the rest is accepted. | erase matrix, 2026-10-28 |
+  | 7V26 | Print cost (1,000 lines, 42,890 B, under a 10×120 block): repaint per print 1,228,890 B written (28.7×, 1,001 writes); batched, one burst 43,976 B (1.03×) and one repaint; one print every 2 ms 104,835 B (2.44×), the gap capping repaints at 20/s. | burst probe (fake sink), 2026-10-28 |
+  | 7V27 | `\n` returns to column 0 on a cooked pty and under Node's `setRawMode(true)` (libuv keeps `ONLCR`), not after `stty -onlcr` (staircase): hence `\r\n` inside the live region; passthrough keeps `\n` so piped bytes are unchanged. | tmux 3.8 capture, 2026-10-28 |
+  | 7V28 | A pipe closed after 20 bytes: without an `error` listener the process dies on `EPIPE` (unhandled `error`); with `openLiveTerminal` it prints on, the region dead, `onFailure` once. A pty nobody reads (`script`, its stdout unread) behind 4 MB: blocking, a 100 ms timer never fires in 8 s; via `openLiveTerminal`, it fires in ~0.3 s. | `stream.spec.ts`, macOS and Ubuntu 24.04, 2026-10-28 |
+  | 7V29 | macOS: a process's first use of `process.stderr` reopens its tty by name (`uv_tty_init`), which blocks once the pty's master is gone, so the tmux driver's give-up path writes fd 2 with `writeSync`. With it, SIGINT or SIGKILL of the spec mid-phase leaves no driver, server or socket folder within 3 s (macOS and container, ×4 each). | `sample` of a stuck driver; interrupt probe (SIGINT/SIGKILL of the runner's process group), 2026-10-28 |
+  | 7V30 | `--ui` runs the config reporters (`createReporters`, `_mode: "test"`) in the CLI process (its `argv` holds `--ui*`) under a test server that replaced `process.stdout.write` with an own property of the stream (`_setInterceptStdio`); a plain run leaves it the prototype's. Driving `TestServerDispatcher` with `interceptStdio: true` on the Docker cell: the own property is set during `runTests`, the `[cell]` notice and summary reach the UI's stdio pane, the terminal reporter prints nothing. | `runner/index.js` (`runUIMode`, `createReporters`, `_setInterceptStdio`); in-process test-server probe, 2026-10-28 |
+  | 7V31 | 1.63 has no `--watch` flag: watch mode is `PWTEST_WATCH` (`cli/testActions.js`), config reporters on, stdio not intercepted. `PW_TEST_REPORTER` and `--add-reporter` both append to the configured stack; only the first is detected (`--add-reporter` with a printing reporter prints twice). `ListReporter.onError` was the only printer of errors outside tests: the terminal reporter prints them. | `cli/testActions.js`, `common/index.js` (`additionalReporters`), `runner/index.js`; `results-stream.run.spec.ts` |
+  | 7V33 | 7.2a audit, fixed: worker output held to the attempt's end was lost from a SIGKILLed run (the tail showed the previous scenario), and two setups running at once printed under one begin line. Now live, named per source: 8 workers interleaving 240 lines (half split over two writes) — every line once, under its own `▸` line (×3); SIGKILL of the group mid-run — each worker's lines a gap-free prefix, all named; the 2-setup fixture alternates `▸ auth` / `▸ artifacts` per line. A global timeout calls `onEnd` before the running tests' `onTestEnd` (`--global-timeout`): their open lines print with the late end. | fixtures (`p2`, 8-worker, `kill.mjs`, `--global-timeout`); `results-stream.run.spec.ts`, 2026-10-28 |
+  | 7V34 | 7.2a audit, fixed: raw lines were cut to 4,096 units **before** masking — `FORCE_COLOR` escapes inflate a line, so the cut fell inside `https://admin:…@` or a `ghp_` token and printed the head unmasked (real runner). Now a 64 KiB memory bound that drops the word the cut falls in, then `plain` → `redactSecrets` on the whole line → `capLine`; the same inputs print `https://***@…` and `token ***`. | `t6/leak.spec.ts` before/after; `worker-output.spec.ts` (every cut offset); run spec, 2026-10-28 |
+  | 7V35 | Playwright 1.63 adds `line` (`dot` under `CI`) only when no reporter `printsToStdio()`: a quiet reporter answering `true` left `PW_TEST_REPORTER=junit`/`null` runs silent but for `[cell]` and the summary. `printsToStdio()` is now `false` whenever quiet; both runs print `1 passed`. `--quiet` (`config.quiet`) made `list` drop worker output only: matched. | `createReporters` (`runner/index.js`); run spec, 2026-10-28 |
+  | 7V51 | 7.2b audit A-F1, reproduced (auditor's `tm.sh term`/`hup`): SIGTERM/SIGHUP while the block showed → no `exit` event, block left, `EXITED 143`/`129` written over its last row. Playwright's runner has no SIGTERM/SIGHUP listener (its worker's are no-ops); signal-exit (execa) re-raises only when alone, so the session re-sends only when no listener is left — else two polite handlers would keep the process alive. After: block cleared, capture restored, still 143/129, fds blocking after. | tmux runs, 2026-11-01 |
+  | 7V54 | 7.2b audits, not fixed: U4 a partial line held at close is written raw (the next line joins it, as without the capture: the writer never ended it); U5 permanent lines queue unbounded while paused (as Node's own stream queue; 7.1c's bound applies to repaints); U6 the runner on a paused terminal (Ctrl-S) lingers until resumed — Playwright writes `""` to stdout/stderr and awaits the callbacks before exiting — `stream.ts` now says so; `cutLines` re-splitting the held line: 65,536 one-char writes then `\n` take 91 ms (1.4 µs/write), immaterial; a SIGKILLed spec runner leaves its tmux server until the pane's `sleep 30` ends and the socket folder (documented); fakes calling back synchronously: the drain's async path is 7.1c's real-stream specs'. | measured, 2026-11-01 |
+  | 7V57 | Playwright 1.63 `--grep` (`forceRegExp`, `lib/util.js`): a value matching `^\/(.*)\/([gi]*)$` is that pattern with those flags, anything else `gi` (case-insensitive); `.` there crosses no line terminator, so a raw newline in a title breaks the slash form. It is tested against `_grepTitleWithTags()` — `""`, the project, then the file and each describe each followed by its tags, the test's title, its tags, joined by spaces (an untitled describe left out, as from `titlePath()`); a tag is `@` and no space up to the next. Corrected by 7V62: the first claim, "a title cannot be anchored, only matched as a substring", was wrong — the end and the file/describes can be. Dependency projects are built from the unfiltered suites (`createRootSuite`), so a `--grep` rerun still runs the setups. Failure attachments are named `screenshot` (`SnapshotRecorder`), `trace` (`workerProcessEntry.js`) and `video`. | `node_modules/playwright` 1.63 source |
+  | 7V58 | 7.2c decision: a title's controls (C0/C1), format characters (bidi overrides, ZWJ, tags), line/paragraph separators, lone surrogates and combining marks past the eighth in a run go into the `--grep` as `\uXXXX` regex escapes (per UTF-16 unit; no `u` flag, so an astral one matches as its two units) — the command is then visible characters only and still selects the test. Chosen over ANSI-C `$'…'` quoting (not POSIX `sh`; the regex escape works in every shell and through npm) and over refusing (a ZWJ emoji, a common case, would lose its command). A zip path or ref with such a character cannot be escaped: the command is refused, as it is past 2,000 characters or when it, the raw title or the pin quotes a credential's shape (with today's `redactSecrets` shapes the command alone already shows each — the value check is a guard against a future shape the escapes could break; its mutant survives as equivalent). `sh`, `bash`, `zsh` and `dash` each read every command word back byte-identical for 14 hostile titles (`failure-block.spec.ts`). | unit specs, 2026-11-01 |
+  | 7V60 | Playwright names a test's output folder from a cut title: a ZWJ emoji was cut mid-pair, and Node writes the lone surrogate as U+FFFD on disk (`fs.mkdirSync` measured), so the block's `Trace` path, made well-formed, is the folder's real name. | run spec + Node probe, 2026-11-01 |
+  | 7V62 | 7.2c audit A-F2, reproduced (`probeD`: `--grep='/Create a backup/'` listed it, `Create a backup encrypted` and `Untagged Create a backup`) and fixed: `grepPattern(title, above)` — `above` is `titlePath()` between the project and the title (the generated spec's path, the Feature, any Rule/Outline) — writes ` <file>(?: @\S+)* <Feature>(?: @\S+)* … <title>(?: @\S+)*$`, each title escaped; the shape is Playwright's (`_collectGrepTitlePath`, `_grepTitleWithTags`, `lib/common/index.js`; playwright-bdd tags the test with its Feature's and its own tags). Anchoring the end alone still let `Untagged …` in, and the Feature alone `Old Backups` (unit); the file closes both. After: each of the three lists only itself; `failure-block.run.spec.ts` shows 3 by substring, 1 by the printed rerun. The generated path is per cell (`.features-gen/<product>/<cell>/`), so a run of every cell's pattern selects its test under `E2E_CELL` (measured, 1 of 1). | probes + source, 2026-11-01 |
+  | 7V63 | 7.2c audit A-F1, reproduced (auth setup failing its preflight: `Step  Worker Cleanup › Fixture "browser" · running when the attempt ended`; tree: Before Hooks, After Hooks, Worker Cleanup, none errored) and fixed: `lastBegun` never takes `After Hooks`/`Worker Cleanup`, and takes a Before hook only if it never ended — Playwright leaves a step a crashed worker never ended at `duration: -1` (`StepLike.duration`; `_onStepBegin`/`_onStepEnd`, `lib/runner/index.js`); else no step, and `laterHookAside` then blames none (the first error stands, not the later hook's). After: no `Step` line. | probe + source, 2026-11-01 |
+  | 7V64 | 7.2c audit A-F7/F8/F9, reproduced and fixed. F8: `ghp_…<ZWSP>…` showed `***j0K1l2M3n4O5p6Q7r8` — masked before `plain` joined it, so masking again could not help; `cleanMessage` now drops format characters first (`withoutFormat`, `text.ts`), which fixes every consumer (block, summary `Setup`/`Error`, stream); every other field was already plain-then-mask (`displayText`, `suiteLine`). F9: a credential-shaped title left 27 of 36 token characters in the `Trace` path; now each kind prints `not shown: its folder is named after a title shaped like a credential`. F7: plain printed `›` in hook paths and `…` from `cut`; `FailedStep.path` is joined, and `cut` ends, with the palette's glyphs. Decision: under plain the summary's own glyphs are ASCII and the phrases shared with the reports keep their `·` (README, `execution-model.md`, TSDoc now say so). After: a plain run of `probeA` prints no non-ASCII line. | probes, 2026-11-01 |
+  | 7V65 | 7.2c audit A-F3/F4/F5/F6 and U1, reproduced on the audited copy and fixed. F3: `E2E_PLUGIN_VERSION=1.0` was dropped; F4: a `release:3.17.4` record reran `release:latest-stable`; F6: a run of every cell printed `E2E_PLUGIN_REF=feature/x npm run …` — no cell, and a ref that sweep had ignored. Now the pin takes the documented form (`plugin-artifacts.md` Pinning, `pin.ts`): `release:<tag>`, else `commit:<sha>` + `E2E_PLUGIN_VERSION=<the zip's version>`; with no record, the operator's zip/ref/version only in a targeted run; the cell is the test's own. U1: the resolver hands `E2E_PLUGIN_REF` to APVM unparsed (`request.ts` tests only `release:`), so a bare SHA relied on APVM's guess; no longer printed. F5: zsh read `X=/builds/v1:=ls.zip` as `ls.zip not found` and `X==ls` as `/bin/ls` (sh, bash, dash literal); `=` is no longer shell-safe — 8 values (`=ls`, `a:~/b`, `release:…`, `pro@nginx`, …) read back byte-identical through `printenv` in all four. | probes + shells, 2026-11-01 |
+  | 7V68 | 7.3b decisions. "Continuation lines" = a TTY line wider than the terminal (20–120) wrapped at its spaces under the message, a word never broken (a path or command stays copyable; the terminal wraps it); "blocks" = an empty line before a run's outcome line and each escalation line, nothing else. Task colours are `Palette.series` (cyan, magenta, blue and their bright forms, cycled), shared by the scope and the table's TASK cell; other scopes unstyled. `--dry-run`, `--help` and refusals stay unstyled: their exact text is pinned, they print before the start's work through Node's blocking default, and styling them adds nothing a reader needs. The screen is created only for a TTY (pipe: the logger's own plain path, untouched); its region opens with the first table, so lines before it are `\n`-ended as before; a failed write (line or draw) makes the terminal gone for both. The orchestrator's own stdout/stderr writes are captured while the table shows (7V74; first shipped uncaptured, which left table rows for good, not "until the next draw"). | design, 2026-11-01 |
+  | 7V69 | Piped stdout unchanged: the real CLI over the fake suite (`swap-start`), 5 modes (`--once`, one SIGINT, one SIGTERM, a config error, `--dry-run`) on acb8432 and on 7.3b — stdout, stderr, exit code, `orchestrator.log`, `run.json`, `run-finished.json`, `run.log`: 27 files byte-identical once times, PIDs, durations and paths are normalised; no `\x1b` in any piped output or log. | `bytes.sh` harness, 2026-11-01 |
+  | 7V74 | Audit A-F1, reproduced (tmux 100×30, `emitWarning` mid-run): the warning moved the cursor below the table, so the next clear started from the wrong row — header and row, then a second header, stayed in screen and history after `exiting`. Fixed: while the table shows, `screen.ts` captures stdout's `write` and, when a TTY, stderr's (`stdio-capture.ts`, admitted to `suite-imports.json` once `import-boundary.spec.ts` passed; the region writes through `bypassWriter`), each line `safeBlock`ed (shape and config secrets, controls dropped) above the table; restored on close and when the terminal is gone. After: both warnings above the table, 0 table lines. Not logged to `orchestrator.log` (it never was). Soak on a TTY: listeners 15 flat (13 + the two end listeners), pipe 13. | tmux repro, `screen.spec.ts`, `table.tmux.spec.ts`, 2026-11-01 |
+  | 7V75 | Audit A-F3, reproduced: an uncaught exception or rejection left header and row, the stack over them. Fixed: while the table shows, `uncaughtExceptionMonitor` (runs before Node prints the error; changes neither handling nor exit code) and `exit` close the screen synchronously — rows cleared, streams put back. After: no table line, stack whole, exit 1 (throw and rejection). Listeners are a seam (`ScreenOptions.process`), removed on close and on a gone terminal. | tmux repro, specs, 2026-11-01 |
+  | 7V76 | Audit A-F2, reproduced: Enter mid-run leaves one header line for good (tty echo moves the cursor). Documented in the guide beside SIGKILL (`clear`/`reset`); echo not disabled — changing the tty's mode is riskier than the residue, and a SIGKILL would leave it off. U2 (narrowing below the table's width leaves a stale row, 7V24's accepted residue) documented likewise. | tmux repro, 2026-11-01 |
+  | 7V81 | 7.4a decisions. A thrown report is data (HTML/Allure, `results.jsonl`, the failure block's `Error`): plain **Unicode** (`TEXT_PALETTE`), never ASCII — a report is UTF-8 whatever the terminal. A test worker's printed lines (`[artifacts] Verified …`, the banners, APVM progress) use `workerPalette`: colour always off (workers run under `FORCE_COLOR=1`; the reporter strips escapes anyway), symbols by `E2E_OUTPUT`/`TERM`/locale. Scripts (healthcheck, warm, capture) print through `consolePrinters`: stdout's and stderr's palettes apart, `forceColorWithoutTty` the suite's (`FORCE_COLOR` colours a redirect, as `styleText` did before). Structural glyphs (marks, arrows, bullets, rules, separators, the item–detail dash) and the banners' own prose dashes go through `symbol()`; check details, hints and error text are data and keep their characters (`Settings → General` in a hint is WordPress's breadcrumb). Healthcheck and warm rules stay 72 columns (a log reads the same from any terminal); product dividers take `Palette.series(index + 1)` (the header has cyan). | code, specs, 2026-11-01 |
+  | 7V85 | Left unmigrated, on purpose: `orchestrator/tasks/run-lines.ts` and `notify/subscribe.ts` glyphs (the orchestrator keeps its piped bytes, Unicode included — 7.3's contract); Slack and Datator text (not a terminal); `results.ts`' ` › ` path (data in `results.jsonl`); the `__fixtures__` that emit SGR (they test the stripping); escapes in TSDoc examples; `run-summary.ts`' `describePlugin`/`describeSite` (` · `, ` — `: also the run facts' report titles and metadata) and `describeCounts` (` · `, the summary's `Result` only; takes the palette's separator since 7.4b). `capture-backwpup-fixtures.ts` is migrated but only type-checked: it needs a real Pro site. | grep, 2026-11-01 |
+  | 7V87 | Audit A-F1 reproduced (a script rendering each printer with hostile input, `E2E_OUTPUT=plain`): a check's detail/hint (healthcheck), warm's errors, warnings and paths, the elevation/plugin-folder banners' transport and folders printed raw — 15 `ESC`, 13 `ghp_` tokens, 6 U+200B; a multi-line detail broke out of its indent. Same raw path in a run: `settleSiteLeftovers`' and the heal's `[preflight]` warnings (the terminal reporter cleans a worker's lines; `--reporter`/`PW_TEST_REPORTER` do not). Fix: `printableLine`/`printableLines` (`text.ts`: `plain` then `redactSecrets`, per line, indent kept — `suiteLine` now its capped form); `checkLines(…, "printed")` (detail's further lines under its first; the thrown `report` path unchanged); `warm-lines.ts`, the banners' `siteLine`, both `[preflight]` warnings, APVM's printed progress (`plain`). Found: `redactBuildText` let a U+200B inside a legacy (40-hex) token skip the value mask — now drops format characters first (reports too). After: 0/0/0. | repro, specs, 2026-11-01 |
+  | 7V89 | U2 (invalid `E2E_OUTPUT` in healthcheck/warm: exit 1 with a stack trace): left — the suite reports a bad env value the same way (the config's throw, Playwright prints its stack), and so do the scripts' own (`HEALTHCHECK_CONCURRENCY=abc`). The message names the variable and the allowed values. | runs, 2026-11-01 |
+  | 7V92 | CI flake (run 41394142927, tmux 3.4: 6 residue lines > bound 5 after the 100×30→80×24 resize) reproduced: `live.tmux.spec.ts` failed 3/60 on macOS (tmux 3.8) and 3/60 on Ubuntu 24.04 (tmux 3.4) under CPU load, 0/40 idle. Cause: the driver redrew every 10 ms (50 ms throttle) while the spec resized; in all 5 logged failures a draw at the old width was written between `resize-window` and the driver's `resize` event, so tmux reflowed it too (its clear reached 8 of the 13 split lines) and the erase then left a second block's parts. Holding the `resize` handler 120 ms: 4/4 fail (9–12 lines), permanent lines intact; 0 ms: 0/10. Inherent (Node's sizes update only on `SIGWINCH`'s handler; bytes already queued are read at the new size), so not a `live.ts` bug: its TSDoc now says so. Fix, spec only: after each phase the driver redraws 15 times, then leaves a `L|ready <n>` block and writes nothing until the resize; the spec resizes on seeing it, and a window's rows are that block only (tighter: a burst row is residue). Pending-timer-at-resize ordering stays covered by `live.spec.ts` (fake scheduler). After: 0/160 macOS, 0/80 Linux, under load; mutants (resize writes nothing, erases one row, old `\r\x1b[J` erase) still fail. `live-block.run.spec.ts`'s narrowing test has the same exposure: deferred to Phase 10. Audit: the spec waits for the whole ready block on the pane, not just its first row (a partly read write could reopen the gap). | timing-logged probe driver, `--repeat-each`, 2026-11-02 |
 
-- Docs, by sub-phase: 7.1 — AGENTS' tree, `package.json`/lock, `suite-imports.json`, the boundary spec;
-  7.2a — `reporting.ts` and `cell-notice.ts` TSDoc, `execution-model.md` (reporters, the cell line),
-  AGENTS "Watching a run"; 7.2c — `run-summary.ts`'s example, README "Reporting"; 7.3 —
-  `docs/guides/orchestrator.md` (TTY vs piped, the table), `log.ts` TSDoc, the 0.5 plan's §4.9/§4.11/
-  §7.1, AGENTS' orchestrator entry; 7.4b — `configuration.md`, `.env.example`, README "Environment",
-  AGENTS' env accessors, and that an orchestrator's runs are plain (its env allowlist carries no
-  `E2E_OUTPUT`). Phase 11 rebases its `configuration.md`/`.env.example` edits on 7.4b.
-- Specs updated deliberately (never weakened): `src/common/config/reporting.spec.ts` (`list` →
-  terminal reporter), `run-summary.spec.ts` (the `Failed` list, width, palette), `results-stream.run.spec.ts`
-  (summary marker, `--list`), `orchestrator/log.spec.ts` (a TTY-formatter case, the file lines
-  unchanged), `cycle.spec.ts`/`start.spec.ts` (the new seams), `elevation-report.spec.ts` (plain
-  thrown text, styled print), `orchestrator/soak.spec.ts` (no leaked timer or fd).
+- Limits, accepted and documented: SIGKILL leaves a block or table (`clear`/`reset`); keys typed
+  mid-run echo below the table; a narrowed block leaves bounded parts of the old one (7V24, 7V76), a
+  draw racing the resize signal its own too (7V92); a partial line held at close is written raw,
+  permanent lines queue unbounded while a terminal is paused, a paused run lingers until resumed
+  (7V54); Node's `NO_COLOR`-ignored warning under `FORCE_COLOR` (7V17); `--add-reporter` with a
+  printing reporter doubles every line, an added `list` prints errors unmasked; a foreign coloured
+  write keeps its SGR (Playwright's HTML-report hint is cyan under `NO_COLOR`, 7V46 at b88ed9a);
+  `maskSiteUrl`/`siteLabel` mask the userinfo and `;` parameters, but a credential written plainly
+  into a URL's path still shows unless its shape is known (7V52 at b88ed9a).
+- Tests: pty specs (`terminal.pty.spec.ts`, `compat.pty.spec.ts`, `stream.spec.ts`'s paused pty
+  through `__fixtures__/paused-pty.ts`) run through `script`, found and invoked by
+  `__fixtures__/pty.ts` (`script -q /dev/null` on macOS, `script -qec` on Linux; `stty` sizes it); tmux specs (`live.tmux.spec.ts`, `live-block.run.spec.ts`, `table.tmux.spec.ts`) under
+  `/tmp/e2e-*` sockets. Each skips locally without its tool and fails under `CI`; CI's unit shards
+  install tmux (7V23; `script` is on the image).
+- Deferred: in Phase 10 below (7.2c, 7.3b, 7.4a entries and the run-spec timeouts under load).
 - Out: the dashboard's UI, a web progress view, log colouring, CI annotations, interactive prompts,
-  animations/spinners in CI, and changing `results.jsonl` or events.
-- Effort: 11–14 engineer-days over ten small slices, medium difficulty; no dependency on Phase 6, so
-  it runs before 6H.
+  animations in CI, and changing `results.jsonl` or events.
 
 Phase 8 — CI on real cells (dropped). It planned a CI matrix of real cells (one job per product ×
 cell). Real-cell runs, PRs included, belong to the orchestrator; CI keeps its quality, unit and
@@ -577,9 +495,54 @@ Phase 10 — Cleanup & validation (open).
 - No dependency on §5's drop list reappears.
 - `lint`, `typecheck` and `format:check` green; the reports generate.
 - Remove every mention of plan phases from code comments (AGENTS.md forbids citing plans in code).
+- Deferred: `orchestrator/cli.spec.ts`'s child-process tests are flaky under load: `:564` ("npm run
+  orchestrator -- start --dry-run is the dry run…") timed out once at 30 s on CI run 40700750051
+  (2026-10-28, shard 2/2), passing in 1.3 s on rerun; `:328` timed out once under the full local suite
+  (2026-11-01, 7V50 at b88ed9a), passing alone. Investigate them all (npm/Node start-up under load, a missing
+  timeout on the child, or a hang) and fix.
+- Deferred (7.2c audit): `Step … running when the attempt ended` names the body's last step begun
+  when no step carries the error; a body that throws outside any step *after* one ended (no setup
+  does today: the auth setup has no step, the artifacts setup's only one is `test.attach`) would
+  name that ended step. Tell it by the attempt's status (`timedOut`) or the step's `duration`, then
+  drop the claim. Also unconfirmed (audit A, U2): a terminal's copy may turn U+00A0, Hangul fillers,
+  unassigned or private-use characters into others, so a pasted `--grep` would select nothing;
+  measure on macOS Terminal, iTerm2 and tmux, and escape them like format characters if so.
+  `failure-block.run.spec.ts` and `results-stream.run.spec.ts` time out under heavy load (12 `yes`
+  on 12 cores: 90 s child timeouts; audit B, U1), and so do ≥ 5 `compat.pty.spec.ts` cases
+  (`script timed out after 25s`; 7.4b audit B; one worker passes) — the same family as the
+  `cli.spec.ts` flakes above.
+- Deferred (7.2c): a failure's rerun command pins only the plugin under test (`E2E_PLUGIN_REF`/
+  `E2E_PLUGIN_ZIP`); a product with a `previous` role (WP Rocket) reruns against that role's default,
+  which a moving `release:latest-stable` may change. Pin `E2E_PREVIOUS_REF` (`release:<tag>`, or
+  `commit:<sha>` with `E2E_PREVIOUS_VERSION`) or the zip from the artifacts setup's `previous` record
+  the same way (`pluginPin`), once comparison tests exist.
+- Deferred (7.3b): the table is cleared before `bus.settle()` by the loops' own `stopStatus` and again
+  before `exiting`; no spec tells the first from the second (mutant ST1 survives) — add one with a bus
+  whose settle waits, if that order ever matters. Keys typed mid-run (Enter) echo below the table and
+  leave a stale row; a narrowing below the table's width leaves the old table's top rows — both
+  documented in the guide, not fixed (7V76). `table.tmux.spec.ts` covers one
+  and three Ctrl-Cs, not two alone: a runner that ignores SIGINT waits for the 4-minute interrupt
+  budget; add it once the fake start takes a shorter budget. On Linux (CI, tmux 3.4) all 7 pass (runs
+  41364712637, 2026-11-01; 41402620035, 2026-11-02).
+- Deferred (7.4a): `capture-backwpup-fixtures.ts`' migrated output is unverified live (needs a Pro
+  site): check it on the next fixture capture.
+- Deferred (7V92): `live-block.run.spec.ts`'s "narrowed mid-run, 60×14 to 40×10" can meet the same
+  race as `live.tmux.spec.ts` did — a redraw (the block is redrawn ~2/s) written at the old size
+  after the pane changed, before `SIGWINCH` is handled, leaving a second block's parts past its
+  bound of 3. Not reproduced (audit: 0/10 on macOS under 12 busy loops). If it appears, resize only
+  while the block is quiet (the whole block on the pane, nothing pending), as `live.tmux.spec.ts`
+  does; never raise the bound.
+- Deferred (manual, not automatable): resize has been measured only in tmux 3.8/3.4 and xterm.js
+  (7V24, 7V92). Resize iTerm2 and macOS Terminal.app windows (narrower, wider, height only) while a
+  suite run shows its live block and while the orchestrator shows its table: every permanent line
+  must stay intact, leaving only the bounded residue in Phase 7's Limits. Record it as a 7V row; a
+  terminal that reflows differently is measured and decided there.
+- Deferred: `src/common/wp/exec.ssh.spec.ts` is flaky (~0.7 % of runs): ssh2 1.17.0's
+  `generateKeyPairSync("ed25519")` yields a key its own `parseKey` rejects 0.34 % of the time
+  (68/20,000). Regenerate until `parseKey` accepts it, or commit fixed test keys.
 
-Phase 11 — Shared SSH server profiles (open; scheduled after Phase 7). Configuration and transport;
-depends on nothing (independent of Phase 6 and Phase 10; may run beside 7.2–7.4 or 6H). Stack:
+Phase 11 — Shared SSH server profiles (open; next). Configuration and transport;
+depends on nothing (independent of Phase 6 and Phase 10); next, before 6H. Stack:
 existing TypeScript on Node 24, `node-ssh` as already used, the repo's Playwright unit runner, and
 `node:fs`/`node:path`; no new dependency.
 
@@ -695,8 +658,8 @@ existing TypeScript on Node 24, `node-ssh` as already used, the repo's Playwrigh
 - Out: a repo-wide profile file, profiles for `local`/`docker`, global
   `rootDir`/`stagingDir`/`elevate`/`fileOwner`, passphrases/agents/jump hosts, auto-importing
   `~/.ssh/config`, and changing the orchestrator config schema.
-- Effort: 2–4 engineer-days, low/medium difficulty; no dependency on Phase 6 or Phase 10, so it can
-  start beside 7.2–7.4 and finish before 6H.
+- Effort: 2–4 engineer-days, low/medium difficulty; no dependency on Phase 6 or Phase 10; next (Phase 7
+  done 2026-11-01), before 6H.
 
 ## 4. Feature-parity matrix
 

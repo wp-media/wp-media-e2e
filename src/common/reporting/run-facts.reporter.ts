@@ -42,6 +42,7 @@ import {
   type RunFacts,
 } from "./run-facts";
 import { readJsonAttachment } from "./setup-facts";
+import { printLine } from "./terminal-sink";
 
 /**
  * Says what a run tested, up front in every report (`run-facts.ts` holds the facts and their
@@ -56,7 +57,8 @@ import { readJsonAttachment } from "./setup-facts";
  *   `PLAYWRIGHT_HTML_TITLE` (unless the environment set one);
  * - `onExit`: the banner, into the Cucumber report its own `onEnd` finished writing.
  *
- * Never fails a run: everything is caught, and the first failure warns once on stderr (a reporter
+ * Never fails a run: everything is caught, and the first failure warns once, through the run's
+ * terminal sink or else on stderr (a reporter
  * that throws turns a green run red). Silent on the terminal otherwise, and inert for `--list`.
  */
 export default class RunFactsReporter implements Reporter {
@@ -271,7 +273,8 @@ export default class RunFactsReporter implements Reporter {
   }
 
   /**
-   * Warns on stderr, once: the reports go on without the facts that could not be written.
+   * Warns once — through the run's terminal sink, else on stderr: the reports go on without the
+   * facts that could not be written.
    *
    * @param reason - what went wrong.
    */
@@ -279,8 +282,9 @@ export default class RunFactsReporter implements Reporter {
     if (this.warned) return;
     this.warned = true;
     try {
-      process.stderr.write(
-        `[run-facts] ${reason}. The reports may not say what the run tested.\n`,
+      printLine(
+        `[run-facts] ${reason}. The reports may not say what the run tested.`,
+        "stderr",
       );
     } catch {
       // Nothing is left to tell.

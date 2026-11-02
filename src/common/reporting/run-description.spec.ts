@@ -30,6 +30,13 @@ test.describe("readRunDescription", () => {
     expect(readRunDescription(everyCell)).toEqual(everyCell);
     const named = { ...RUN, runName: "nightly", requestedRef: "develop" };
     expect(readRunDescription(named)).toEqual(named);
+    const plugin = {
+      ...RUN,
+      pluginRef: "develop",
+      pluginZip: "/z.zip",
+      pluginVersion: "9.99.99",
+    };
+    expect(readRunDescription(plugin)).toEqual(plugin);
     for (const reportsKeep of [0, 20]) {
       expect(readRunDescription({ ...RUN, reportsKeep })).toEqual({
         ...RUN,
@@ -48,6 +55,9 @@ test.describe("readRunDescription", () => {
       [{ ...RUN, edition: null }, "edition"],
       [{ ...RUN, runName: 7 }, "runName"],
       [{ ...RUN, requestedRef: ["develop"] }, "requestedRef"],
+      [{ ...RUN, pluginRef: 1 }, "pluginRef"],
+      [{ ...RUN, pluginZip: false }, "pluginZip"],
+      [{ ...RUN, pluginVersion: { v: 1 } }, "pluginVersion"],
       [{ ...RUN, pinned: "yes" }, "pinned"],
       [{ ...RUN, reportsKeep: -1 }, "reportsKeep"],
       [{ ...RUN, reportsKeep: 1.5 }, "reportsKeep"],

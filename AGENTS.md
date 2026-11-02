@@ -22,6 +22,7 @@ End-to-end (E2E) tests for WP Media plugins: WP Rocket (performance), BackWPup (
 | BDD                | **Cucumber/Gherkin** via **`playwright-bdd`** (`bddgen` generates specs)                                                                                        |
 | WP-CLI transport   | **execa** (local/docker), **node-ssh** (ssh)                                                                                                                    |
 | Visual diff        | **pixelmatch** + **pngjs**                                                                                                                                      |
+| Terminal layout    | **string-width** (display width per grapheme, never below what a terminal draws; ambiguous width narrow)                                                        |
 | Orchestrator       | **zod 4** (its config), **commander 15** (its `start`)                                                                                                          |
 | Reporting          | Playwright HTML, Cucumber HTML, **Allure** (`allure`, `allure-playwright`)                                                                                      |
 | Quality            | **ESLint** (typescript-eslint, strict + type-checked), **Prettier**, **husky** + **lint-staged**                                                                |
@@ -31,20 +32,21 @@ End-to-end (E2E) tests for WP Media plugins: WP Rocket (performance), BackWPup (
 ```text
 src/
 ├── common/                 # product-agnostic, shared by every product
-│   ├── config/             # env, sites loading, run-context, run-id.ts (RUN_ID, a run's report folder), run-env.ts (run-setting variable names), cell pin, drain, metadata, devices, file-owner rule, config factory
-│   ├── reporting/          # the suite's reporters (cell notice, results stream, run facts, summary), their pure parts, report retention (retention, report-tree, run-pruning, prune-command), page-loads.ts (a failed scenario's lost requests)
+│   ├── config/             # env, sites loading, run-context, run-id.ts (RUN_ID, a run's report folder), run-env.ts (run-setting variable names), cell pin, drain, metadata, devices, file-owner rule, config factory, output.ts (palettes and printers for setup lines and scripts: `E2E_OUTPUT`-aware; a worker's never coloured)
+│   ├── reporting/          # the suite's reporters (cell notice, results stream, terminal + its sink/lines/worker-output/mode/live-block/live-session/failure-block, run facts, summary), their pure parts, report retention (retention, report-tree, run-pruning, prune-command), page-loads.ts (a failed scenario's lost requests)
 │   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ends a saved login)
-│   ├── setup/              # the auth setup's preflight (+ cell-plugin.ts: a broken copy of the cell's plugin), elevation/ownership banner, site info
+│   ├── setup/              # the auth setup's preflight (+ cell-plugin.ts: a broken copy of the cell's plugin), elevation/ownership banner, site info, check-lines.ts (one ✓/✗/→ check list for preflight, artifacts and healthcheck), healthcheck-lines.ts (the healthcheck's output, pure)
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
 │   ├── guards.ts           # type guards for narrowing `unknown`
-│   ├── text.ts             # string helpers: escapeRegExp, escapeHtml, redactSecrets/maskValues (credentials), maskSiteUrl (a baseURL shown safely), plain
+│   ├── text.ts             # string helpers: escapeRegExp, escapeHtml, redactSecrets/maskValues (credentials), maskSiteUrl (a baseURL shown safely), siteLabel (its host·port·path, for a progress row), withoutControls (well-formed, no escape or control), plain (one line: + no Cf, combining marks capped at 8), printableLine/printableLines (someone else's text to print: plain then masked, indent kept)
 │   ├── deadline.ts         # withinBudget: a time limit for a best-effort step
+│   ├── terminal/           # side-effect-free terminal output: capabilities.ts (colour/live/Unicode, one precedence; every input a parameter), palette.ts (semantic colours via styleText — `emphasis` for labels, `command` for commands —, symbols + ASCII fallback, a status's word unless a coloured terminal; TEXT_PALETTE for thrown text, paletteFor), layout.ts (plain text in: width 20–120, display width, grapheme-safe cutToWidth, padding, rules, 500-code-point capLine), stream.ts (unblockTerminal/stdoutTerminal: non-blocking TTY stdout; openLiveTerminal: that plus a no-op `error` listener, the only way to a live region; drainTerminal before exit; writeSafely, backlogBytes, TERMINAL_BACKLOG_BYTES), live.ts (the live region: byte-exact `\r\n` cursor contract, throttle, one repaint per print burst, SGR-only style, backlog bound, resize, close; dead after a failed write), stdio-capture.ts (while a block shows: the process's own stdout/stderr `write` cut into lines printed above it; bypassWriter for the region; restored exactly)
 │   ├── steps/              # generic step definitions
 │   ├── hooks/              # shared scenario hooks (*.hooks.ts) + their policy modules
 │   ├── pages/              # cross-product page objects (plugins, site-health) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
-│   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm, pin)
-│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection
+│   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm + warm-lines.ts its output, pin)
+│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/)
 │   └── wp/                 # WordPress over WP-CLI (exec, php, staging, plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
@@ -61,10 +63,10 @@ orchestrator/               # runs cells in loops. Layout and design: docs/plans
 │                           # cli.ts (entry: `exec node --import tsx`, never the `tsx` CLI; `process.exit(await runCommand(…))`)
 │                           # command.ts (commander `start [--config] [--task <id…>] [--once] [--dry-run]`; refuses options npm took)
 │                           # start.ts (config, lock, orphan check, site locks, every task's loop; signals or the parent ending stop it; prepareStart = --dry-run's seam)
-│                           # parent.ts (the parent's PID at boot: command.ts's first import); start-lines.ts, dry-run.ts (pure); text.ts (masking, safeSiteUrl); log.ts, terminal.ts (non-blocking stdout), files.ts, folders.ts, error-code.ts
+│                           # parent.ts (the parent's PID at boot: command.ts's first import); start-lines.ts, dry-run.ts (pure); text.ts (masking, safeSiteUrl); log.ts (its terminal via src/common/terminal/stream.ts's writeSafely/backlogBytes), screen.ts (on a TTY: styled lines via line-style.ts, the status table in a live region, cleared before `exiting` and on a crash, the process's own stdout/stderr writes printed above it via stdio-capture.ts; a pipe stays plain, byte for byte), files.ts, folders.ts, error-code.ts
 │                           # config/ (zod schema, parse, check, site-key, load, product-list, secrets) · runs/ (identity, environment, commands, launch, stop, shutdown, end, outcome, run.json record)
 │                           # state/ (atomic writes, orchestrator.lock, site locks, inspect, orphans, counter, run folders + retention) · events/ (bus, run.finished v1)
-│                           # tasks/ (cycle: one run; loop: cycle + cooldown, --once) · notify/ (bounded POST, Slack, Datator) · __fixtures__/ (fake suite, fake start, HTTP sink)
+│                           # tasks/ (cycle: one run; loop: cycle + cooldown, --once; activity: what they tell `onActivity`) · status/ (the status table: results.jsonl tail, progress, task board, plain table, its colours; drawn on a TTY by screen.ts) · notify/ (bounded POST, Slack, Datator) · __fixtures__/ (fake suite, fake start, HTTP sink)
 │                           # soak.spec.ts (hundreds of runs over the fake suite; ORCHESTRATOR_SOAK=1, npm run orchestrator:soak)
 docker/                     # local WordPress for the `docker` transport
 docs/                       # architecture & guides (linked below)
@@ -92,8 +94,21 @@ Full detail: **[execution-model.md](docs/architecture/execution-model.md)**.
   scenario's first attempt as `stopped` (`drainGate`). Escalate with **one** SIGINT to the runner,
   then SIGKILL its process group — never SIGTERM, never a second SIGINT.
 - **Watching a run** — `<report dir>/results.jsonl` streams every event (schema v1,
-  `reporting/results-schema.ts`); no `run.end` means the runner died. The terminal ends with a
-  summary and verdict. Every credential a message quotes is masked by its shape (`redactSecrets`);
+  `reporting/results-schema.ts`); no `run.end` means the runner died. On the terminal,
+  `terminal.reporter.ts` replaces `list`: `[cell]`, a `[run]` header (a `━━` rule on a Unicode TTY),
+  one line per test at its final attempt plus a `↻` line per retry, worker output printed live, masked
+  whole then capped, in a `│` gutter under a `▸` line naming its source whenever it changes (a killed
+  run's log keeps the hung scenario's last lines); on a live-capable TTY (not `CI` unless `fancy`), a
+  bottom-pinned progress block from the first scenario's begin to `onEnd`, the runner's own
+  `process.stdout`/`stderr` writes wrapped to print above it, masked (cleared on every stop but
+  `SIGKILL`); under each final failure a block (Gherkin step — never an API step's title — feature
+  file, error, screenshot/trace, a `Rerun` command — that scenario alone, its cell, the build tested —
+  built from the raw titles and never cut: refused, saying why, when unsafe); then the summary (with a
+  `Failed` list) and verdict. It is the one writer:
+  other reporters print through its sink (`printLine`, `terminal-sink.ts`), never cut. `E2E_OUTPUT=
+auto|plain|fancy`; quiet for `--list`, `--ui` and `PW_TEST_REPORTER` (Playwright then adds its own);
+  watch mode prints; `--reporter` replaces the whole stack; `--add-reporter` doubles the lines (not
+  detected). A closed pipe (`| head`) never crashes the run. Every credential a message quotes is masked by its shape (`redactSecrets`);
   APVM's output also by value (`maskValues`, against `GITHUB_TOKEN`/`GH_TOKEN`).
 - **What a run tested** — one facts line as the reports' title/banner/name, every fact in
   `<report dir>/run-facts.json`. `captureGitInfo` is **off**: Playwright would turn it on under CI and
@@ -171,7 +186,9 @@ Schema: **[configuration.md](docs/guides/configuration.md)**.
 - **`.env`** (from `.env.example`, loaded by [`load-env.ts`](src/common/config/load-env.ts)):
   runtime flags and BackWPup storage credentials. Real env vars win; `E2E_LOAD_DOTENV=false` in the
   environment skips the file. Read env only through the typed accessors in
-  [`env.ts`](src/common/config/env.ts).
+  [`env.ts`](src/common/config/env.ts) — `outputModeEnv` for `E2E_OUTPUT` (`auto|plain|fancy`, the
+  suite's and its scripts' terminal output; [configuration.md → Terminal
+  output](docs/guides/configuration.md#terminal-output); the orchestrator reads no `E2E_*`).
 
 ## Fixtures
 
@@ -380,7 +397,10 @@ is checked with `holdsSecret`, both in the page.
 section at a time, their sites concurrently; each site prints as soon as it is done, with every
 check it ran (ownership and elevation reports included) and hints on failure; a summary per product
 ends it. The banner is the auth setup's renderer, printed to **stdout** so `healthcheck > fleet.log`
-keeps it. Placeholder cells are skipped. Exit `0` only if every real site passed. Tune with
+keeps it. Its lines (`setup/healthcheck-lines.ts`) are styled for stdout as a run's are: no escape
+when redirected unless `FORCE_COLOR`; `E2E_OUTPUT=plain`, `TERM=dumb` or a C locale spell its symbols in
+ASCII; a check's detail and hint, and the banners' site values, are printed plain and masked
+(`printableLines`). Placeholder cells are skipped. Exit `0` only if every real site passed. Tune with
 `HEALTHCHECK_CONCURRENCY`, `HEALTHCHECK_LOGIN_TIMEOUT_MS`; `healthcheck:ui` is the same, headed
 (`--headed`, or `HEALTHCHECK_HEADED=true`).
 

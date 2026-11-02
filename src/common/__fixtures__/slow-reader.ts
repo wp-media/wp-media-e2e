@@ -5,11 +5,11 @@ import { setTimeout as delay } from "node:timers/promises";
 /**
  * For specs: run ES-module code in a fresh Node whose standard output nobody reads for a while — what
  * a terminal slower than a burst of output does to a process that then calls `process.exit`. Node
- * writes a pipe without blocking, as it writes a terminal once the orchestrator unblocks it, so what
+ * writes a pipe without blocking, as it writes a terminal once `unblockTerminal` unblocks it, so what
  * the child still had queued at its exit is lost here as it is on a terminal.
  */
 
-/** tsx's loader, resolved from here so the child imports the orchestrator's TypeScript. */
+/** tsx's loader, resolved from here so the child imports the repository's TypeScript. */
 const TSX_LOADER = import.meta.resolve("tsx");
 
 /** How long a child may run before it is killed and the spec fails. */

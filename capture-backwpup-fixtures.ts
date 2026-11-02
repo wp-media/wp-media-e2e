@@ -2,13 +2,14 @@ import "./src/common/config/load-env";
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { basename } from "node:path";
-import { styleText } from "node:util";
 
 import { chromium, expect } from "@playwright/test";
 import type { Browser, Locator, Page } from "@playwright/test";
 
 import { loginViaUi } from "./src/common/auth/login";
 import { boolEnv, env, intEnv } from "./src/common/config/env";
+import { consolePrinters } from "./src/common/config/output";
+import { rule } from "./src/common/terminal/layout";
 import type { SiteInput, Transport } from "./src/common/config/types";
 import { disposeConnections, wpCli } from "./src/common/wp/exec";
 import { ensurePluginAbsent } from "./src/common/wp/plugin";
@@ -114,7 +115,13 @@ const NONCE_PLACEHOLDER = "0000000000";
  */
 const RESTORE_DIR_PLACEHOLDER = "backwpup-restore-00000000000000000000";
 
-const RULE = "─".repeat(78);
+// stdout's palette: colour as the stream and `E2E_OUTPUT` allow, ASCII symbols where Unicode is not.
+const { paint, symbol } = consolePrinters().out.palette;
+
+const RULE = rule({ width: 78, line: symbol("rule") });
+
+/** "From one page to a panel of it", in step titles. */
+const ARROW = symbol("arrow");
 
 // ── Reporting ────────────────────────────────────────────────────────────────────
 
@@ -139,9 +146,7 @@ function record(
 ): void {
   findings.push({ topic, onboarding, dashboard, verdict });
   const tag =
-    verdict === "same"
-      ? styleText("green", "SAME     ")
-      : styleText("yellow", "DIFFERENT");
+    verdict === "same" ? paint("ok", "SAME     ") : paint("warn", "DIFFERENT");
   console.log(`  ${tag} ${topic}`);
   console.log(`            onboarding: ${onboarding}`);
   console.log(`            dashboard:  ${dashboard}`);
@@ -165,7 +170,7 @@ async function openBestEffort(
     ).split("\n")[0];
     notes.push(`could not open ${label}: ${first ?? "unknown error"}`);
     console.log(
-      `  ${styleText("yellow", "skipped")} ${label} — ${first ?? ""}`,
+      `  ${paint("warn", "skipped")} ${label} ${symbol("dash")} ${first ?? ""}`,
     );
   }
 }
@@ -200,8 +205,13 @@ async function openPanel(
   });
 }
 
+/**
+ * Prints a step's title, after a blank line.
+ *
+ * @param message - what the capture does next.
+ */
 function step(message: string): void {
-  console.log(styleText("cyan", `\n▸ ${message}`));
+  console.log(`\n${paint("id", `${symbol("current")} ${message}`)}`);
 }
 
 // ── WP-CLI helpers ───────────────────────────────────────────────────────────────
@@ -337,9 +347,7 @@ async function writeFixture(
   const path = `${FIXTURES_DIR}/${name}`;
   await writeFile(path, `${sanitise(html, host)}\n`, "utf8");
   const lines = html.split("\n").length;
-  console.log(
-    `  ${styleText("green", "wrote")} ${path} (${String(lines)} lines)`,
-  );
+  console.log(`  ${paint("ok", "wrote")} ${path} (${String(lines)} lines)`);
 }
 
 // ── DOM probes used for the onboarding-vs-dashboard comparison ───────────────────
@@ -692,7 +700,7 @@ async function captureDashboard(
    * panel is open fails with "subtree intercepts pointer events". Everything below is reached either
    * from the job card (left of the aside) or from inside the aside itself, so nothing else collides.
    */
-  step("Dashboard → Advanced settings sidebar");
+  step(`Dashboard ${ARROW} Advanced settings sidebar`);
   await openBestEffort("advanced-settings", () =>
     openPanel(
       page
@@ -703,7 +711,7 @@ async function captureDashboard(
     ),
   );
 
-  step("Dashboard → Data sidebar (the chooser)");
+  step(`Dashboard ${ARROW} Data sidebar (the chooser)`);
   await openPanel(
     card.getByRole("button", { name: "Data" }),
     "#sidebar-settings-data-type .js-data-main-setting",
@@ -755,7 +763,7 @@ async function captureDashboard(
     "#sidebar-settings-data-type .js-database-settings-section",
   );
 
-  step("Dashboard → Frequency sidebar");
+  step(`Dashboard ${ARROW} Frequency sidebar`);
   await openPanel(
     card.getByRole("button", { name: "Frequency" }),
     "#sidebar-frequency .js-backwpup-frequency-job",
@@ -765,7 +773,7 @@ async function captureDashboard(
   );
   console.log(`  frequency options: ${dashboardFrequency.join(", ")}`);
 
-  step("Dashboard → Storage sidebar (the picker)");
+  step(`Dashboard ${ARROW} Storage sidebar (the picker)`);
   await openPanel(
     card.getByRole("button", { name: "Storage" }),
     "#sidebar-storages",
@@ -907,7 +915,9 @@ async function main(): Promise<void> {
   }
   const { transport } = site;
   console.log(RULE);
-  console.log(`BackWPup fixture capture → ${site.baseURL}  (cell ${CELL})`);
+  console.log(
+    `BackWPup fixture capture ${ARROW} ${site.baseURL}  (cell ${CELL})`,
+  );
   console.log(RULE);
 
   if (!SKIP_INSTALL) {
@@ -1056,7 +1066,7 @@ async function main(): Promise<void> {
   console.log(RULE);
   for (const finding of findings) {
     console.log(
-      `${finding.verdict === "same" ? "=" : "≠"} ${finding.topic}\n    onboarding: ${finding.onboarding}\n    dashboard:  ${finding.dashboard}`,
+      `${finding.verdict === "same" ? "=" : symbol("notEqual")} ${finding.topic}\n    onboarding: ${finding.onboarding}\n    dashboard:  ${finding.dashboard}`,
     );
   }
   if (redactedFields.size > 0) {

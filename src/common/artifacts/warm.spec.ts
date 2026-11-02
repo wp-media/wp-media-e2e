@@ -11,7 +11,13 @@ import {
   warmArtifacts,
 } from "./warm";
 import type { WarmOne, WarmUnit, WarmedBuild, WarmerDeps } from "./warm";
-import type { JsBuildOutput, WarmOptions } from "apvm-napi";
+import type {
+  JsBuildEvent,
+  JsBuildOutput,
+  JsBuildPhase,
+  WarmOptions,
+} from "apvm-napi";
+import { createPalette } from "../terminal/palette";
 import type { ApvmBuildParams, ArtifactEnv, ProductArtifacts } from "./types";
 
 /**
@@ -537,6 +543,38 @@ test.describe("createApvmWarmer", () => {
       createApvmWarmer({ ...deps, exists: () => true })(PARAMS),
     ).rejects.toThrow(/needs a GitHub token/);
     expect(asked).toEqual([]);
+  });
+
+  // The script's printers, not a worker's: on a terminal the progress is coloured, warnings to stderr.
+  test("prints the build's progress through the printers it is given", async () => {
+    const apvm = {
+      hasToken: (): boolean => true,
+      warmCache: (
+        _options: WarmOptions,
+        onProgress: (err: Error | null, event: JsBuildEvent) => void,
+      ): Promise<JsBuildOutput> => {
+        onProgress(null, {
+          type: "phase_started",
+          phase: "Clone" as JsBuildPhase,
+        });
+        onProgress(null, { type: "warning", message: "slow" });
+        return Promise.resolve(apvmOutput());
+      },
+    };
+    const lines: string[] = [];
+    const colour = createPalette({ tty: true, color: true, unicode: true });
+    const none = createPalette({ tty: false, color: false, unicode: true });
+    await createApvmWarmer(
+      { apvm: () => Promise.resolve(apvm), exists: () => true },
+      {
+        out: { palette: colour, print: (line) => lines.push(`out:${line}`) },
+        err: { palette: none, print: (line) => lines.push(`err:${line}`) },
+      },
+    )(PARAMS);
+    expect(lines).toEqual([
+      "out:  \x1b[2m[warm backwpup pr:123]\x1b[22m Clone",
+      "err:  [warm backwpup pr:123] warning: slow",
+    ]);
   });
 
   test("names the warm that failed and scrubs credentials from APVM's error", async () => {

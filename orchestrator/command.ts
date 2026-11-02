@@ -12,7 +12,11 @@ import { CHECKOUT, prepareStart, start, type StartOptions } from "./start";
 import type { ExitCode } from "./start-lines";
 import { unitOf, type CellUnit } from "./state/cell-lock";
 import { inspectState } from "./state/inspect";
-import { drainTerminal, MAX_WAIT_MS, type DrainableTerminal } from "./terminal";
+import {
+  drainTerminal,
+  MAX_WAIT_MS,
+  type DrainableTerminal,
+} from "../src/common/terminal/stream";
 import { safeBlock, textOf } from "./text";
 
 /**

@@ -4,10 +4,15 @@ import {
   escapeHtml,
   escapeRegExp,
   maskSiteUrl,
+  siteLabel,
   maskValues,
   NOT_A_SITE_URL,
+  MAX_COMBINING_MARKS,
   plain,
+  printableLine,
+  printableLines,
   redactSecrets,
+  withoutFormat,
 } from "./text";
 
 /** A string escaped this way must match itself, literally, and nothing else. */
@@ -203,6 +208,46 @@ test.describe("redactSecrets", () => {
   });
 });
 
+test.describe("siteLabel", () => {
+  test("host, port and path as written: no scheme, no credentials, no trailing slash", () => {
+    expect(siteLabel("https://bwu4.example/")).toBe("bwu4.example");
+    expect(siteLabel("http://admin:pw@localhost:8100/wp//")).toBe(
+      "localhost:8100/wp",
+    );
+    expect(siteLabel("HTTPS://user@Host.Example")).toBe("Host.Example");
+    expect(siteLabel("https://a.test/x?token=ghp_abc#frag")).toBe("a.test/x");
+  });
+
+  test("never shows what may be a user, a password or a session: an @ in the path, ; parameters", () => {
+    // A password holding `/`, `\\` or `%2F`: the parser reads its start as the host.
+    expect(siteLabel("https://user:123/secretpw@host.example/")).toBe(
+      "host.example",
+    );
+    expect(siteLabel("https://user:8080/x@host/")).toBe("host");
+    expect(siteLabel("https://host.example\\admin:pw@x")).toBe("x");
+    expect(siteLabel("https://host.example/%2F%2Fadmin:pw@x")).toBe("x");
+    expect(siteLabel("https:admin:pw@host.example")).toBe("host.example");
+    expect(siteLabel("https://host.example/path;jsessionid=SECRET123")).toBe(
+      "host.example/path;***",
+    );
+    for (const url of [
+      "https://user:123/secretpw@host.example/",
+      "https://host.example/a;token=SECRET123/b",
+    ]) {
+      expect(siteLabel(url)).not.toContain("secretpw");
+      expect(siteLabel(url)).not.toContain("SECRET123");
+    }
+  });
+
+  test("no label for what is not an http(s) URL; a secret-shaped path is still masked", () => {
+    expect(siteLabel("ftp://a.test")).toBe("");
+    expect(siteLabel("not a url")).toBe("");
+    expect(
+      siteLabel("https://a.test/ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
+    ).toBe("a.test/***");
+  });
+});
+
 test.describe("maskSiteUrl", () => {
   test("keeps an http(s) URL as written, a path only when it has one", () => {
     for (const url of [
@@ -241,13 +286,53 @@ test.describe("maskSiteUrl", () => {
       expect(maskSiteUrl(url), url).toBe(NOT_A_SITE_URL);
   });
 
+  test("an @ after the authority hides all before it; ; parameters are masked", () => {
+    expect(maskSiteUrl("https://user:123/secretpw@host.example/")).toBe(
+      "https://***@host.example/",
+    );
+    expect(maskSiteUrl("https://a.test/%2Fu:pw@b.test/wp?x=1")).toBe(
+      "https://***@b.test/wp",
+    );
+    expect(maskSiteUrl("https://a.test\\u:pw@b.test")).toBe(
+      "https://***@b.test",
+    );
+    // Every `@` counts: what precedes the last one is hidden.
+    expect(maskSiteUrl("https://a.test/x@y/p:w@b.test/")).toBe(
+      "https://***@b.test/",
+    );
+    expect(maskSiteUrl("https://a.test/wp;jsessionid=S3CR3T/x;v=1")).toBe(
+      "https://a.test/wp;***/x;***",
+    );
+    expect(maskSiteUrl("https:a.test/p;s=1")).toBe("https://a.test/p;***");
+  });
+
   test("is the same when applied again", () => {
     for (const url of [
       "http://admin:pw@wp.test",
       "https://a.test/wp?x=1",
       "bad url",
+      "https://user:123/secretpw@host.example/",
+      "https://a.test/wp;jsessionid=S3CR3T",
     ])
       expect(maskSiteUrl(maskSiteUrl(url))).toBe(maskSiteUrl(url));
+  });
+});
+
+test.describe("withoutFormat", () => {
+  test("drops invisible format characters only, joining what they split", () => {
+    expect(withoutFormat("ghp_\u200babc\u202ed\u2060e\u{e0067}")).toBe(
+      "ghp_abcde",
+    );
+    expect(withoutFormat("a\tb\u001b[0m漢字 👩💻")).toBe(
+      "a\tb\u001b[0m漢字 👩💻",
+    );
+  });
+
+  test("so a mask after it finds a token a format character split", () => {
+    const token = "ghp_A1b2C3d4E5f6G7h8I9\u200bj0K1l2M3n4O5p6Q7r8";
+    expect(redactSecrets(withoutFormat(`auth with ${token} failed`))).toBe(
+      "auth with *** failed",
+    );
   });
 });
 
@@ -262,6 +347,59 @@ test.describe("plain", () => {
     // U+202E shows what follows right to left: "nightly‮gnp.exe" reads as "nightlyexe.png".
     expect(plain("nightly\u202egnp.exe")).toBe("nightlygnp.exe");
     expect(plain("zero\u200bwidth\ufeff")).toBe("zerowidth");
+  });
+
+  test("replaces lone surrogates, keeps pairs", () => {
+    expect(plain("a\ud83d")).toBe("a\ufffd");
+    expect(plain("\ude00b")).toBe("\ufffdb");
+    expect(plain("\ud83d\ude00")).toBe("\ud83d\ude00");
+    expect(plain("x\ud83d\u001b[31m\ude00").isWellFormed()).toBe(true);
+  });
+
+  test("the combining-mark cap is 8", () => {
+    expect(MAX_COMBINING_MARKS).toBe(8);
+  });
+
+  test("caps each run of combining marks at the cap: Zalgo text", () => {
+    const marks = "\u0301\u0302\u0303\u0304\u0305\u0306\u0307\u0308";
+    expect(plain(`e${marks}\u0309`)).toBe(`e${marks}`);
+    expect(plain(`e${marks}\u0309a${marks}\u030a`)).toBe(`e${marks}a${marks}`);
+    expect(plain(`e${marks.repeat(1000)}`)).toBe(`e${marks}`);
+    expect(plain(`e${marks}`)).toBe(`e${marks}`);
+    // Spacing (Mc) and enclosing (Me) marks count too; a joiner between marks does not split a run.
+    expect(plain(`a${"\u093e".repeat(9)}`)).toBe(`a${"\u093e".repeat(8)}`);
+    expect(plain(`a${"\u20dd".repeat(9)}`)).toBe(`a${"\u20dd".repeat(8)}`);
+    expect(plain(`e${marks.slice(0, 3)}\u200d${marks.slice(3)}\u0309`)).toBe(
+      `e${marks}`,
+    );
+  });
+
+  /** Real text with its longest runs of marks, which must survive whole. */
+  const scripts: readonly (readonly [string, string])[] = [
+    ["Vietnamese", "Vi\u1ec7t e\u0323\u0302\u0301"],
+    [
+      "Burmese \u1019\u103b\u103e\u1031\u102c\u103a (5 marks)",
+      "\u1019\u103b\u103e\u1031\u102c\u103a",
+    ],
+    [
+      "Burmese \u101c\u103b\u103e\u1031\u102c\u1037 (5 marks)",
+      "\u101c\u103b\u103e\u1031\u102c\u1037",
+    ],
+    ["cantillated Hebrew (5 marks)", "\u05e9\u05c1\u05bc\u05b8\u05bd\u0591"],
+    ["a Tibetan stack (5 marks)", "\u0f67\u0fb9\u0fa8\u0fb3\u0fba\u0fbc"],
+    [
+      "Devanagari, with a spacing mark",
+      "\u0915\u094d\u0937\u093f\u0924\u094d\u0930\u093f\u092f",
+    ],
+  ];
+  for (const [name, text] of scripts) {
+    test(`keeps every mark of real text: ${name}`, () => {
+      expect(plain(text)).toBe(text);
+    });
+  }
+
+  test("drops the joiner of an emoji sequence, which then shows as its parts", () => {
+    expect(plain("\u{1f468}\u200d\u{1f469}")).toBe("\u{1f468}\u{1f469}");
   });
 });
 
@@ -323,5 +461,40 @@ test.describe("maskValues", () => {
     ).toBe("a *** b");
     // A value overlapping itself.
     expect(maskValues("[aaaaaaaaaaa]", ["aaaaaaaa"])).toBe("[***]");
+  });
+});
+
+/** Someone else's text as printed lines: nothing drives the terminal, no credential shows. */
+test.describe("printableLine / printableLines", () => {
+  const ESC = String.fromCharCode(27);
+  const BEL = String.fromCharCode(7);
+  const TOKEN = "ghp_16CharsOrMoreAAAA";
+
+  test("drops CSI and OSC 52 sequences and masks a token", () => {
+    expect(
+      printableLine(`fatal ${ESC}]52;c;cHduZWQ=${BEL}${ESC}[2J ${TOKEN} end`),
+    ).toBe("fatal  *** end");
+  });
+
+  test("masks a token a format character splits: plain first, then the mask", () => {
+    const split = `${TOKEN.slice(0, 8)}\u200b${TOKEN.slice(8)}`;
+    expect(printableLine(`key ${split}`)).toBe("key ***");
+    // The other order would leave the joined token in clear.
+    expect(plain(redactSecrets(`key ${split}`))).toBe(`key ${TOKEN}`);
+  });
+
+  test("keeps a line's indent (a tab as one space), trims its end; no words is empty", () => {
+    expect(printableLine("  \tat x  ")).toBe("   at x");
+    expect(printableLine(`   ${ESC}[31m `)).toBe("");
+    expect(printableLine("")).toBe("");
+  });
+
+  test("splits on \\n and \\r\\n, each line made safe; empty text is one empty line", () => {
+    expect(printableLines(`one\r\n  ${ESC}[2Jtwo\n${TOKEN}`)).toEqual([
+      "one",
+      "  two",
+      "***",
+    ]);
+    expect(printableLines("")).toEqual([""]);
   });
 });

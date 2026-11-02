@@ -33,9 +33,16 @@ export function isTempDir(path: string): boolean {
   });
 }
 
+/** How often {@link removeTempDir} retries a removal a racing writer failed. */
+const REMOVE_RETRIES = 5;
+
+/** The wait before the first retry, growing linearly with each (Node's `rmSync`). */
+const REMOVE_RETRY_DELAY_MS = 100;
+
 /**
  * Removes a spec's temporary folder, recursively: nothing when `path` is `""` (never set), the folder
- * when {@link isTempDir} says it is one.
+ * when {@link isTempDir} says it is one. Retried a few times (`ENOTEMPTY`, `EBUSY`): a child that
+ * just died may still have had a file being written there.
  *
  * @param path - the folder; `""` when the hook that makes it never got that far.
  * @throws {@link Error} when `path` is set but is no temporary folder: a spec's bug, never removed.
@@ -46,5 +53,10 @@ export function removeTempDir(path: string): void {
     throw new Error(
       `refusing to remove ${JSON.stringify(path)}: not a folder inside the temporary folder ${tmpdir()}`,
     );
-  rmSync(path, { recursive: true, force: true });
+  rmSync(path, {
+    recursive: true,
+    force: true,
+    maxRetries: REMOVE_RETRIES,
+    retryDelay: REMOVE_RETRY_DELAY_MS,
+  });
 }

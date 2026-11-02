@@ -34,6 +34,7 @@ import ResultsStreamReporter, {
   scenarioBeginEvent,
 } from "./results-stream";
 import type { RunDescription } from "./run-description";
+import { registerTerminalSink } from "./terminal-sink";
 
 /**
  * The results stream: the events each reporter call makes, the file they go to, and the reporter as
@@ -165,6 +166,33 @@ test.describe("JsonLinesFile", () => {
       events.map((e) => (e.type === "run.error" ? e.message : "")),
     ).toEqual(["three", "four"]);
     expect(skipped).toBe(1);
+  });
+
+  test("its default warning goes through the run's terminal sink when there is one, never stderr", () => {
+    const path = join(work, RESULTS_FILE);
+    mkdirSync(path);
+    const printed: string[] = [];
+    const unregister = registerTerminalSink({
+      print: (text) => printed.push(text),
+    });
+    try {
+      const file = new JsonLinesFile(path);
+      const stderr = captureWrites(process.stderr, () => {
+        file.write({ type: "run.error", message: "one" });
+      });
+      expect(stderr).toEqual([]);
+      expect(printed).toHaveLength(1);
+      expect(printed[0]).toMatch(/^\[results\] could not write .*EISDIR/);
+    } finally {
+      unregister();
+    }
+    // With no sink, stderr, as before.
+    const alone = new JsonLinesFile(path);
+    expect(
+      captureWrites(process.stderr, () => {
+        alone.write({ type: "run.error", message: "two" });
+      }),
+    ).toEqual([expect.stringMatching(/^\[results\] could not write .*\n$/)]);
   });
 
   test("a warning that itself throws is swallowed", () => {

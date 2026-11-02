@@ -3,9 +3,10 @@ import type { FullConfig } from "@playwright/test/reporter";
 
 import CellNoticeReporter, { actualWorkers, cellNotice } from "./cell-notice";
 import type { CellNoticeOptions } from "./cell-notice";
+import { registerTerminalSink } from "./terminal-sink";
 
 /**
- * The one line a run prints before "Running …": the cell, how it was chosen — which decides whether
+ * The one line a run prints before the terminal reporter's `[run]` header: the cell, how it was chosen — which decides whether
  * another cell of the product may run beside it — the workers, and where the report goes.
  */
 
@@ -85,6 +86,32 @@ test.describe("CellNoticeReporter", () => {
       process.stdout.write = original;
     }
     expect(written).toEqual([`${cellNotice(PINNED, 1)}\n`]);
+  });
+
+  test("prints through the run's terminal sink when there is one, never to stdout itself", () => {
+    const printed: string[] = [];
+    const unregister = registerTerminalSink({
+      print: (text) => {
+        printed.push(text);
+      },
+    });
+    const written: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    process.stdout.write = (chunk: string | Uint8Array): boolean => {
+      written.push(String(chunk));
+      return true;
+    };
+    try {
+      new CellNoticeReporter(PINNED).onBegin({
+        workers: 2,
+        metadata: {},
+      } as unknown as FullConfig);
+    } finally {
+      process.stdout.write = original;
+      unregister();
+    }
+    expect(written).toEqual([]);
+    expect(printed).toEqual([cellNotice(PINNED, 2)]);
   });
 
   test("does not claim the terminal, so Playwright keeps a progress reporter", () => {

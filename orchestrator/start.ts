@@ -12,7 +12,7 @@ import { allSecretValues, proxySecretValues } from "./config/secrets";
 import { builtRef } from "./dry-run";
 import { createEventBus, DEFAULT_DELIVERY_TIMEOUT_MS } from "./events/bus";
 import type { RunFinishedEvent } from "./events/run-finished";
-import { openLogger, type Logger } from "./log";
+import { openLogger, type LineOptions, type Logger } from "./log";
 import {
   subscribeNotifications,
   type NotificationOptions,
@@ -20,6 +20,12 @@ import {
 import { runByNpm, watchParent, type ParentWatch } from "./parent";
 import { suiteCommands } from "./runs/commands";
 import { RUN_FILES } from "./runs/identity";
+import {
+  openScreen,
+  type Screen,
+  type ScreenOptions,
+  type ScreenStream,
+} from "./screen";
 import { readLeaderStart } from "./runs/leader";
 import {
   createShutdown,
@@ -56,6 +62,11 @@ import {
   startedLine,
   type ExitCode,
 } from "./start-lines";
+import {
+  createStatusWatch,
+  type StatusWatch,
+  type StatusWatchOptions,
+} from "./status/watch";
 import { showPath } from "./tasks/run-lines";
 import {
   NODE_COOLDOWN_TIMERS,
@@ -69,9 +80,7 @@ import {
   drainTerminal,
   stdoutTerminal,
   type DrainableTerminal,
-  type Terminal,
-  type TerminalStream,
-} from "./terminal";
+} from "../src/common/terminal/stream";
 import { failureLine, safeBlock, safeLine, textOf } from "./text";
 
 /**
@@ -85,6 +94,13 @@ import { failureLine, safeBlock, safeLine, textOf } from "./text";
  * the runs were killed, only for {@link KILL_SETTLE_MS} more, then names what it leaves behind. Then
  * it settles the bus, closes the log, releases the lock — the log is only ever written under it — and
  * waits for the terminal and standard error.
+ *
+ * On a terminal (`screen.ts`) its lines are styled, and where the terminal redraws in place the status
+ * table is kept below them from the loops' start until they end — or the wait for them gives up —,
+ * cleared before the lines that follow and, whatever happened, before `exiting`: no stop path leaves
+ * it on the screen but a SIGKILL — a crash clears it as Node prints the error. While it shows, what
+ * the process itself writes to standard output or error prints above it. A pipe gets the plain lines
+ * alone.
  *
  * It **returns** the exit code rather than exiting: every step of the exit sequence but
  * `process.exit` itself is done here, so the command's only remaining act is `process.exit(code)` —
@@ -144,8 +160,11 @@ export interface StartProcess {
   readonly env: Readonly<Record<string, string | undefined>>;
   /** The Node binary the runs' commands run with. */
   readonly execPath: string;
-  /** The terminal: made non-blocking when it is one, and waited for before returning. */
-  readonly stdout: Terminal & TerminalStream;
+  /**
+   * The terminal: made non-blocking when it is one, and waited for before returning; on a terminal,
+   * its size is read for the status table, and its `resize` heard.
+   */
+  readonly stdout: ScreenStream;
   /**
    * Where what fails before the log is open is printed; waited for before returning, as the terminal
    * is, when it says what it still holds (`writableLength`): a pipe is written asynchronously on
@@ -160,6 +179,8 @@ export interface StartProcess {
     write(text: string): unknown;
     readonly writableLength?: number;
     readonly destroyed?: boolean;
+    /** Whether it is a terminal: then its lines print above the status table while it shows. */
+    readonly isTTY?: boolean;
   };
   /**
    * Installs a signal's handler.
@@ -238,6 +259,23 @@ export interface StartDeps {
    * second (`parent.ts`), by default.
    */
   readonly parentWatch?: ParentWatch;
+  /**
+   * The status table's sink (`status/watch.ts`): given, the start keeps each task's state and its
+   * run's progress from the loops' activity and the runs' results streams, and hands the table to
+   * `show` at each change, from the loops' start to their end. Without it, the screen's table is the
+   * sink on a terminal that redraws in place ({@link StartDeps.screen}); elsewhere no table is kept
+   * and no stream is read.
+   */
+  readonly status?: Pick<
+    StatusWatchOptions,
+    "show" | "pollMs" | "timers" | "read"
+  >;
+  /**
+   * Opens the terminal's screen — its styled lines, and the status table — when standard output is a
+   * terminal; `openScreen` by default. Its table is the status sink unless {@link StartDeps.status}
+   * gives one.
+   */
+  readonly screen?: (options: ScreenOptions) => Screen | undefined;
 }
 
 /** What `start` begins with: the product list, the config, and the tasks selected. */
@@ -354,6 +392,10 @@ class Orchestrator {
   private readonly launched = new Map<string, string>();
   /** The state directory's lock, once taken: released once the log is closed. */
   private lock: HeldLock | undefined;
+  /** The status table's source, while the loops run and a sink was given. */
+  private status: StatusWatch | undefined;
+  /** The terminal's screen, from the log's opening, when standard output is a terminal. */
+  private screen: Screen | undefined;
 
   /**
    * @param options - the command line's options.
@@ -449,6 +491,8 @@ class Orchestrator {
         `stopped on an unexpected failure: ${failureLine(error, MAX_FAILURE_LINE, this.secrets)}`,
       );
     }
+    // Every path: no table is left under the exit's lines, nor while the terminal is waited for.
+    this.stopStatus();
     this.quiet();
     if (this.logger !== undefined) this.say(`exiting ${String(code)}`);
     const waitMs = this.deps.exitWaitMs ?? EXIT_WAIT_MS;
@@ -522,11 +566,13 @@ class Orchestrator {
     lock: HeldLock,
   ): Promise<ExitCode> {
     const { loaded } = prepared;
+    this.screen = this.openScreen(prepared);
     try {
       this.logger = await openLogger(
         join(loaded.stateDir, "orchestrator.log"),
         {
           terminal: this.process.stdout,
+          ...(this.screen === undefined ? {} : { screen: this.screen }),
           secrets: this.secrets,
           ...(this.deps.now === undefined ? {} : { now: this.deps.now }),
         },
@@ -551,6 +597,59 @@ class Orchestrator {
       once: this.options.once === true,
       ...(ends === undefined ? {} : { ends }),
     });
+  }
+
+  /**
+   * The terminal's screen, when standard output is one.
+   *
+   * @param prepared - the tasks selected: their colours.
+   * @returns the screen; `undefined` for a pipe or a file, or when it cannot be opened — the lines
+   *   are then plain.
+   */
+  private openScreen(prepared: PreparedStart): Screen | undefined {
+    try {
+      return (this.deps.screen ?? openScreen)({
+        stdout: this.process.stdout,
+        env: this.process.env,
+        taskIds: prepared.selected.map(({ task }) => task.id),
+        stderr: this.process.stderr,
+        secrets: this.secrets,
+        ...(this.deps.now === undefined ? {} : { now: this.deps.now }),
+      });
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * The status table's sink: the injected one, else the screen's table when the terminal redraws in
+   * place.
+   *
+   * @returns the sink; `undefined` when nothing shows a table.
+   */
+  private statusSink(): StartDeps["status"] {
+    if (this.deps.status !== undefined) return this.deps.status;
+    const { screen } = this;
+    if (screen?.live !== true) return undefined;
+    return {
+      show: (board) => {
+        screen.show(board);
+      },
+    };
+  }
+
+  /**
+   * Stops the status table: nothing is read or shown after, and the screen's table is cleared. Never
+   * waits — a read that never settles must not hold the exit — and never throws; idempotent.
+   */
+  private stopStatus(): void {
+    this.status?.stop();
+    this.status = undefined;
+    try {
+      this.screen?.close();
+    } catch {
+      // A screen that cannot close has nothing left to clear.
+    }
   }
 
   /**
@@ -672,6 +771,12 @@ class Orchestrator {
     const deps = this.loopDeps(prepared, checkout, logger, bus, (event) =>
       notifications.datatorPayload(event),
     );
+    const sink = this.statusSink();
+    if (sink !== undefined)
+      this.status = createStatusWatch({
+        ...sink,
+        tasks: selected.map(({ task }) => ({ id: task.id, cell: task.cell })),
+      });
     // Started and made reachable in one turn: a signal is handled between turns only. Each loop holds
     // its cell's site locks from its start to its end.
     this.loops = selected.map((checked) =>
@@ -680,14 +785,22 @@ class Orchestrator {
         takeCell: () => cells.acquire(unitOf(checked)),
       }),
     );
-    const ends = await this.waitForLoops(loaded.stateDir, ids);
+    let ends: readonly TaskEnd[] | undefined;
+    try {
+      ends = await this.waitForLoops(loaded.stateDir, ids);
+    } finally {
+      // Before the exit's lines, on every path — a give-up leaves runs in flight: nothing is read or
+      // shown after. Never waits: a read that never settles must not hold the exit.
+      this.stopStatus();
+    }
     await bus.settle();
     return ends;
   }
 
   /**
    * What every loop is given: the checkout, the config, each task's commands and ref, the log and the
-   * bus, with the seams a spec injects; `onRunBegun` last, so this start always knows its own runs.
+   * bus, with the seams a spec injects; `onActivity` last, so this start always knows its own runs
+   * and its status table hears every task.
    *
    * @param prepared - the config and the product list.
    * @param checkout - the checkout the runs start in.
@@ -733,8 +846,10 @@ class Orchestrator {
       once: this.options.once === true,
       ...(this.deps.now === undefined ? {} : { now: this.deps.now }),
       ...this.deps.loop,
-      onRunBegun: (id, taskId) => {
-        this.launched.set(taskId, id);
+      onActivity: (activity) => {
+        if (activity.kind === "begun")
+          this.launched.set(activity.taskId, activity.id);
+        this.status?.tell(activity);
       },
     };
   }
@@ -763,7 +878,11 @@ class Orchestrator {
       all,
       this.giveUp.promise.then(() => undefined),
     ]);
-    if (ends === undefined) await this.sayLeftBehind(stateDir, [...pending]);
+    if (ends === undefined) {
+      // The table goes before the lines naming what is left: they are the start's last word.
+      this.stopStatus();
+      await this.sayLeftBehind(stateDir, [...pending]);
+    }
     return ends;
   }
 
@@ -842,7 +961,9 @@ class Orchestrator {
    * @param why - why.
    */
   private escalate(level: StopLevel, why: string): void {
-    this.say(escalationLine(level, why, this.budgets));
+    this.say(escalationLine(level, why, this.budgets), SCOPE, {
+      opensBlock: true,
+    });
     for (const loop of this.loops) loop.stop(level, why);
     if (level === "killed" && this.giveUpTimer === undefined)
       this.giveUpTimer = this.timers().setTimeout(() => {
@@ -874,10 +995,15 @@ class Orchestrator {
    *
    * @param text - the line.
    * @param scope - who speaks; the orchestrator by default.
+   * @param options - how it is shown on a terminal.
    */
-  private say(text: string, scope: string = SCOPE): void {
+  private say(
+    text: string,
+    scope: string = SCOPE,
+    options: LineOptions = {},
+  ): void {
     if (this.logger !== undefined) {
-      this.logger.line(scope, text);
+      this.logger.line(scope, text, options);
       return;
     }
     this.printError(`${scope}: ${text}`);

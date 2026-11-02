@@ -121,9 +121,14 @@ const URL_PARTS = /^([a-z][a-z\d+.-]*:)[\\/]{2}([^\\/]*)(.*)$/is;
  * A site's `baseURL` as safe to show, judged by a URL parser rather than by a shape: an `http(s)` URL
  * keeps its host, port and path **as written** (nothing re-encoded or case-folded, so a secret in them
  * is still masked by its value later), its user and password shown as `***@`, its query and fragment
- * dropped (either may carry a token); anything else — text that does not parse, another scheme — is
- * {@link NOT_A_SITE_URL}, since a sites file may hold anything pasted there (a password with a space
- * included). The same when applied again.
+ * dropped (either may carry a token), its `;` parameters (`;jsessionid=…`) shown as `;***`; anything
+ * else — text that does not parse, another scheme — is {@link NOT_A_SITE_URL}, since a sites file may
+ * hold anything pasted there (a password with a space included). An `@` after the authority's end
+ * (`https://user:12/pw@host/`: a password holding `/`, `\\` or `%2F` the parser reads as the host and
+ * a path) means everything before its last `@` may be a user and password: only what follows it is
+ * shown, after `***@`. The same when applied again. Accepted limit: a credential written plainly into
+ * the host or path (`https://host.test/key-abc123/`) still shows, unless a later {@link redactSecrets}
+ * knows its shape.
  *
  * @param baseURL - the site's address, as its sites file writes it.
  * @returns the address to show.
@@ -131,6 +136,7 @@ const URL_PARTS = /^([a-z][a-z\d+.-]*:)[\\/]{2}([^\\/]*)(.*)$/is;
  * ```ts
  * maskSiteUrl("http://admin:pw@wp.test"); // "http://***@wp.test"
  * maskSiteUrl("https://admin:hunter 2@bad host/"); // "(not a valid http(s) URL)"
+ * maskSiteUrl("https://user:12/secret@host.test/"); // "https://***@host.test/"
  * ```
  */
 export function maskSiteUrl(baseURL: string): string {
@@ -145,8 +151,47 @@ export function maskSiteUrl(baseURL: string): string {
   const written = parts?.[2]?.split("@").at(-1);
   if (parts === null || written === undefined)
     // Written some other way the parser still takes (`https:host`): shown as it reads it.
-    return `${url.protocol}//${credentials}${url.host}${url.pathname}`;
-  return `${url.protocol}//${credentials}${written}${parts[3] ?? ""}`;
+    return `${url.protocol}//${credentials}${url.host}${maskPathParams(url.pathname)}`;
+  const rest = parts[3] ?? "";
+  // An `@` in the path: what precedes it may be a password the parser cut at a `/`.
+  if (rest.includes("@"))
+    return `${url.protocol}//${MASK}@${maskPathParams(rest.slice(rest.lastIndexOf("@") + 1))}`;
+  return `${url.protocol}//${credentials}${written}${maskPathParams(rest)}`;
+}
+
+/**
+ * A path with each `;` parameter's text (`;jsessionid=…`, a session or a token) shown as `;***`.
+ *
+ * @param path - a URL's path, as written.
+ */
+function maskPathParams(path: string): string {
+  return path.replace(/;[^/\\]*/g, `;${MASK}`);
+}
+
+/**
+ * A site as a short label for a progress row: its {@link maskSiteUrl} address without the scheme,
+ * the `***@` of a user or password, or a trailing slash — the host, port and path a person tells sites
+ * apart by — then {@link plain} and {@link redactSecrets}. What `maskSiteUrl` hides stays hidden: a
+ * user and password, a query, a fragment, `;` parameters, all before an `@` in the path; a credential
+ * written plainly into the host or path is shown unless its shape is known. An address that is not an
+ * `http(s)` URL has no label (`""`).
+ *
+ * @param baseURL - the site's address, as its sites file writes it.
+ * @example
+ * ```ts
+ * siteLabel("https://admin:pw@bwu4.example/"); // "bwu4.example"
+ * siteLabel("http://localhost:8100/wp"); // "localhost:8100/wp"
+ * ```
+ */
+export function siteLabel(baseURL: string): string {
+  const masked = maskSiteUrl(baseURL);
+  if (masked === NOT_A_SITE_URL) return "";
+  const bare = masked
+    .replace(/^https?:\/\//i, "")
+    // `maskSiteUrl` puts the mask right after the scheme, and only there.
+    .replace(/^\*\*\*@/, "")
+    .replace(/[\\/]+$/, "");
+  return redactSecrets(plain(bare));
 }
 
 /** The shortest value {@link maskValues} masks: a shorter one would mask ordinary words. */
@@ -208,10 +253,59 @@ const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g;
 const FORMAT = /\p{Cf}/gu;
 
 /**
- * A value as one line of plain text: escape sequences removed, every other control character a
- * space, invisible format characters dropped. What sites, setups and the environment report — Site
- * Health's text, an error, a run's name — is printed and shown in the reports, and none of it may move
- * the cursor, recolour the terminal, break a line or display as something it is not.
+ * The most combining marks (Unicode `M`: nonspacing, spacing and enclosing) kept in a row. Real
+ * text stays whole: Vietnamese stacks 2; cantillated Hebrew, Burmese syllables and Tibetan stacks
+ * 5. "Zalgo" text, whose dozens of stacked marks draw over the lines above and below and cost a
+ * renderer per mark, is cut to it.
+ */
+export const MAX_COMBINING_MARKS = 8;
+
+/** A run of combining marks longer than {@link MAX_COMBINING_MARKS}: its first ones, then the rest. */
+const EXCESS_MARKS = new RegExp(
+  `(\\p{M}{${String(MAX_COMBINING_MARKS)}})\\p{M}+`,
+  "gu",
+);
+
+/**
+ * `text` with nothing in it that drives a terminal: lone surrogates (half an emoji, cut by a byte
+ * limit) made U+FFFD, escape sequences removed, every other control character (a tab, a newline,
+ * an `ESC` or C1 left of a sequence Node does not recognise, such as DCS or an unterminated OSC) a
+ * space. Nothing else changes (no trim): spacing is kept. The first half of {@link plain}, and what
+ * the terminal layout runs on its input.
+ *
+ * @param text - any text.
+ * @example
+ * ```ts
+ * withoutControls("\u001b[31mred\u001b[0m\tnext"); // "red next"
+ * ```
+ */
+export function withoutControls(text: string): string {
+  return stripVTControlCharacters(text.toWellFormed()).replace(CONTROL, " ");
+}
+
+/**
+ * `text` without its invisible format characters ({@link FORMAT}). Dropping one joins the text on its
+ * two sides — a zero-width space inside a token makes it whole again — so text is masked
+ * ({@link redactSecrets}) only after this, never before: a mask that ran first missed the token, and
+ * would leave its tail to show.
+ *
+ * @param text - any text.
+ * @example
+ * ```ts
+ * withoutFormat("ghp_\u200babc"); // "ghp_abc"
+ * ```
+ */
+export function withoutFormat(text: string): string {
+  return text.replace(FORMAT, "");
+}
+
+/**
+ * A value as one line of plain text: {@link withoutControls}, then invisible format characters
+ * dropped (the ZWJ of an emoji sequence too, which then shows as its parts), runs of combining marks
+ * capped at {@link MAX_COMBINING_MARKS}, and the ends trimmed. What sites, setups and the
+ * environment report — Site Health's text, an error, a run's name — is printed and shown in the
+ * reports, and none of it may move the cursor, recolour the terminal, break a line, spill over other
+ * lines or display as something it is not.
  *
  * @param text - the value.
  * @example
@@ -220,8 +314,41 @@ const FORMAT = /\p{Cf}/gu;
  * ```
  */
 export function plain(text: string): string {
-  return stripVTControlCharacters(text)
-    .replace(CONTROL, " ")
-    .replace(FORMAT, "")
+  return withoutFormat(withoutControls(text))
+    .replace(EXCESS_MARKS, "$1")
     .trim();
+}
+
+/**
+ * One line someone else wrote (WP-CLI's output, an error, a site's value) as safe to print:
+ * {@link plain}, then {@link redactSecrets} — in that order, since a format character inside a
+ * credential would hide it from the mask — with its leading spaces kept (a tab counts as one), so an
+ * indented line stays indented. A line with no words is empty.
+ *
+ * @param text - one line; a newline in it becomes a space (split first with {@link printableLines}).
+ * @example
+ * ```ts
+ * printableLine("  \u001b[2Jtoken ghp_\u200bAbC…"); // "  token ***"
+ * ```
+ */
+export function printableLine(text: string): string {
+  const spaced = withoutControls(text);
+  const words = redactSecrets(plain(spaced));
+  if (words === "") return "";
+  return `${/^ */.exec(spaced)?.[0] ?? ""}${words}`;
+}
+
+/**
+ * Text someone else wrote, one {@link printableLine} per line, for a printer that lays out
+ * continuation lines itself.
+ *
+ * @param text - any text; `\n` ends a line (a `\r` before it is a control: dropped at the line's end).
+ * @returns at least one line (`[""]` for empty text).
+ * @example
+ * ```ts
+ * printableLines("fatal\n  \u001b]52;c;eA==\u0007at x"); // ["fatal", "  at x"]
+ * ```
+ */
+export function printableLines(text: string): string[] {
+  return text.split("\n").map(printableLine);
 }

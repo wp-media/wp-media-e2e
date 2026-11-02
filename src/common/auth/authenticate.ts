@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 
 import type { Browser, TestInfo, test as base } from "@playwright/test";
 
+import { workerPalette } from "../config/output";
 import type { SiteConfig } from "../config/types";
 import { withinBudget } from "../deadline";
 import { errorMessage } from "../guards";
@@ -226,8 +227,10 @@ async function authenticateSite(
     onSaved();
 
     const entry = await readSiteInfo(page, site.baseURL, siteInfoMs);
-    if ("error" in entry) console.warn(`[site] ${describeSiteInfo(entry)}`);
-    else console.log(`[site] ${describeSiteInfo(entry)}`);
+    // A worker's line: the run's symbols (ASCII under plain), never colour.
+    const line = `[site] ${describeSiteInfo(entry, workerPalette())}`;
+    if ("error" in entry) console.warn(line);
+    else console.log(line);
     return entry;
   } finally {
     await context.close();
