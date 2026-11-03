@@ -548,7 +548,7 @@ test.describe("the results stream and the summary, through the real runner", () 
       /^ {2}Result {6}2 failed · 1 flaky · 2 passed · 1 stopped, in \d/,
     );
     expect(summary.at(-1)).toBe(
-      `  Allure      npm run report:allure -- ${PRODUCT} x --open`,
+      `  Allure      npm run report:allure -- ${PRODUCT} x full --open`,
     );
     expect(
       summary.some((line) =>

@@ -33,7 +33,7 @@ End-to-end (E2E) tests for WP Media plugins: WP Rocket (performance), BackWPup (
 src/
 ├── common/                 # product-agnostic, shared by every product
 │   ├── config/             # env, sites loading, run-context, run-id.ts (RUN_ID, a run's report folder), run-env.ts (run-setting variable names), cell pin, drain, metadata, devices, file-owner rule, config factory, output.ts (palettes and printers for setup lines and scripts: `E2E_OUTPUT`-aware; a worker's never coloured)
-│   ├── reporting/          # the suite's reporters (cell notice, results stream, terminal + its sink/lines/worker-output/mode/live-block/live-session/failure-block, run facts, summary), their pure parts, report retention (retention, report-tree, run-pruning, prune-command), page-loads.ts (a failed scenario's lost requests)
+│   ├── reporting/          # the suite's reporters (cell notice, results stream, terminal + its sink/lines/worker-output/mode/live-block/live-session/failure-block, run facts, summary), their pure parts, report retention (retention, report-tree, run-pruning, prune-command), page-loads.ts (a failed scenario's lost requests), one run's Allure report (allure-report: temp output + rename, traces strip/keep; allure-results, allure-errors, allure-command for `report:allure`)
 │   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ends a saved login)
 │   ├── setup/              # the auth setup's preflight (+ cell-plugin.ts: a broken copy of the cell's plugin), elevation/ownership banner, site info, check-lines.ts (one ✓/✗/→ check list for preflight, artifacts and healthcheck), healthcheck-lines.ts (the healthcheck's output, pure)
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
@@ -46,7 +46,7 @@ src/
 │   ├── pages/              # cross-product page objects (plugins, site-health) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm + warm-lines.ts its output, pin)
-│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/)
+│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/), raw Allure results and a stub Allure CLI (allure.ts), a FIFO's blocked reader released within a deadline (fifo.ts)
 │   └── wp/                 # WordPress over WP-CLI (exec, php, staging, plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
@@ -163,6 +163,7 @@ npm run report                                      # open the newest Playwright
 npm run report -- wp-rocket apache                  # a product/cell's newest
 npm run report:allure                               # Allure for the newest run
 npm run report:allure -- wp-rocket apache --open
+npm run report:allure -- backwpup pro@nginx <RUN_ID>  # that run
 npm run report:prune                                # dry run of retention over every cell
 npm run report:prune -- --apply                     # remove (--keep, --older-than, --keep-newest-for, --product, --cell)
 

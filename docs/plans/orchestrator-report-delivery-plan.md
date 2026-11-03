@@ -1,6 +1,7 @@
 # Orchestrator Report Delivery — prepared download bundles
 
-Status: planned; a Phase 1 slice, not scheduled; modernization Phase 7's renderer, which R3 needs, is done.
+Status: R1 done (2026-11-03); R2–R4 planned; a Phase 1 slice; modernization Phase 7's renderer, which
+R3 needs, is done.
 Parent: the [orchestrator plan](orchestrator-plan.md) (§2 Reports, §3 Planned). Phase 0.5 left
 Allure generation out; this plan adds the missing delivery piece: one prepared download per run.
 
@@ -133,16 +134,52 @@ scp auto-e2e:/path/to/wp-media-e2e/reports/backwpup/pro@nginx/2026-10-06T02-47-1
 
 ## Phases
 
-**R1 — Generate Allure for one run.** Depends: none. Parallel: R2. Effort: 1–2 days; medium.
-Goal: one reusable
-`generateAllureReport({ runDir, resultsDir, outputDir, name, historyPath, traces })`.
+**R1 — Generate Allure for one run.** Done 2026-11-03.
 
-- Extract from `scripts/allure.mjs`; temp output + atomic rename; trace strip/keep; explicit
-  `--name`; per-cell history; clear errors for a missing CLI or results.
-- Tests: fixture results; strip and keep; missing CLI; malformed result; history write; no
-  overwrite on failure; the script's behavior is unchanged.
-- Done: `npm run report:allure -- <product> <cell> <run>` generates a named report for that given
-  run; unit specs green.
+- As built: `src/common/reporting/allure-report.ts` (`generateAllureReport`; also `layout`
+  `single-file`/`folder`, default by `traces`; `stdio`; `signal`), `allure-results.ts` (copy, validate,
+  `stripTraces`), `allure-errors.ts`, `allure-command.ts` (`report:allure`; `scripts/allure.mjs` wires
+  it). Node builtins only, no `.env`/`RUN_ID`: added to `suite-imports.json` in a scratch copy, the
+  orchestrator's boundary spec passed; R3 admits it. `allurerc.mjs` reads `ALLURE_SINGLE_FILE=false`.
+- Work folder `<run>/.allure-work-<pid>-<hex>/` (0700; results copy, report, history copy, `target`:
+  `outputDir`); on success the report replaces `outputDir` by rename (the old one moved aside to
+  `previous/` first, back on failure), then the history; released in `finally`. The next generation in
+  the run releases a work folder whose pid is dead, or this process's when not in use: a `previous/`
+  whose `target` is empty goes back there (a kill between the renames), else it is removed. One that
+  cannot go back stays, and the error names it. The output must share the run's filesystem (`EXDEV`
+  is an error); the history falls back to copy + rename.
+- Strip: trace entries go at any depth (result, steps, container `befores`/`afters`); a step goes too
+  only in allure-playwright's exact wrapper shape (named after its one attachment, a trace; no
+  status or `passed`, empty `statusDetails`, `parameters`, `steps`; no other key: all 83 such steps
+  in the 1,705 result and container files under `reports/`); any other step keeps its place minus traces. A zip
+  goes only when no other entry references it. Links and folders in results are never followed or
+  copied (named in `skipped`).
+- `report:allure` unchanged for valid input: newest by results mtime, traces kept, single file, same
+  four lines; new: a third name (the run), `--help`; an unknown option or a fourth name exits 2;
+  SIGINT/SIGTERM abort generation (Allure ended, work folder removed) and exit 130/143; with `--open`
+  the status is the server's. The run summary's `Allure` line names its run (`… <cell> <RUN_ID>
+  --open`). `npm run report` (Playwright) still opens a cell's newest; the summary prints the run's own
+  `show-report` path, so it is left as is.
+- Measured (Allure 3.18.0, macOS): exit 0 with an empty results folder (empty report + history entry)
+  and with a malformed result (skipped, stack trace) — hence the pre-check; an existing output folder is
+  not cleared (stale files stay); the history's folder is created; no history written when the output is
+  unwritable (exit 1, log in `~/.allure/logs/`); no SIGTERM handler in `generate`. The trace-heavy run
+  (`2026-10-06T02-47-17-617Z-36442`, 4 results, 2 traces, 53.8 MB): keep + single file (the script)
+  83 MB `awesome/`; strip 16 MB total (`awesome` 11, `dashboard` 2.6, top `index.html` 2.4; tar.gz
+  8.8 MB, its two videos included); keep + folder 66 MB; each ~0.6 s. A folder report opened from
+  `file://` shows nothing (Chromium blocks its `fetch`); `allure open <report>` serves it.
+- Tests: 87 (`allure-results` 19, `allure-report` 48 incl. 4 on the real CLI, `allure-command`
+  20 incl. 4 through the real script). Mutation audit: 61 single mutations of the R1 code (and the
+  summary's hint), 55 caught. Left, all without an observable effect: the abort check after the
+  copies (a spawn with an aborted signal is killed at once, same error); `>=` for the newest run (a
+  tie's pick is arbitrary either way); dropping the product/cell check when a run is given (the
+  parser never yields a run without both); the own generation's `putBack` (only differs on a rename
+  that fails, then succeeds); the target's `isAbsolute` check (a relative target only resolves
+  against the working directory); the default server's signal (Ctrl-C reaches it with the group).
+- Left: two generations of one cell at once both succeed, but the history keeps the later entry
+  only (the site lock makes it rare); an abort sends SIGTERM only, no SIGKILL escalation, and a
+  SIGKILLed generation leaves its work folder (a full results copy: 62 MB on the heavy run) until the
+  next generation in that run (R3, with the stop budgets).
 
 **R2 — Build and archive the bundle.** Depends: none. Parallel: R1. Effort: 1–2 days; medium.
 Goal: `buildReportBundle({ runDir, name, mode, traces })` → `report/` and/or `report.tar.gz`.
@@ -162,6 +199,10 @@ Slack, CLI, config, dry run and docs.
   bundle for a run refused before its folder; retention untouched. The end summary's terminal
   lines use modernization Phase 7's renderer (`src/common/terminal`), never a second one; the
   landing page is static HTML and does not.
+- Stopping: pass the run's stop as `generateAllureReport`'s `signal` (Allure gets SIGTERM and is
+  waited for); a SIGKILL — the stop budgets' last step, or of the orchestrator itself — leaves the
+  work folder `<run>/.allure-work-*` (a full results copy) until the next generation in that run,
+  which may never come: remove it with the run, or sweep it at start-up.
 - Tests: integration with the fake suite; `bundleCommand` (exact string, quoting of a path with a
   space or `'`, over `MAX_SHOWN` → path, no `sshHost`, `folder` mode); executing the command
   against a local `scp` stub leaves `<name>/index.html` and no archive, and a failing stub or a
@@ -202,6 +243,11 @@ not in this plan.
 
 ## Open questions
 
+- Allure 3.18's awesome and dashboard plugins hard-code `analyticsEnable: true`: every report loads
+  Google Tag Manager when opened online (`ALLURE_NO_ANALYTICS` affects only the allure2 plugin).
+  That breaks "no external assets" for the bundle's Allure: accept, or strip the tag in R2.
+- `keep` (folder mode) does not open from `file://`: like rich Cucumber, the landing page must note
+  the HTTP requirement (R2), or `keep` uses single file and accepts Allure's size limit.
 - `archive` removes `report/` after packing; `both` keeps it for the dashboard and debugging. Disk:
   a heavy failed run duplicates trace zips; measure on the runner before settling retention.
 - Include `results.jsonl` in the archive for tooling, or keep it raw-only? Recommended: raw-only;

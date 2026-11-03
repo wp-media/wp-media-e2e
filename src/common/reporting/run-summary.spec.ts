@@ -362,7 +362,7 @@ test.describe("renderSummary", () => {
       "              https://bwu4.example · versions unknown — timeout",
       "  Playwright  npx playwright show-report reports/backwpup/pro@nginx/run-1/playwright",
       "  Cucumber    reports/backwpup/pro@nginx/run-1/cucumber/index.html",
-      "  Allure      npm run report:allure -- backwpup pro@nginx --open",
+      "  Allure      npm run report:allure -- backwpup pro@nginx run-1 --open",
     ]);
   });
 
@@ -454,7 +454,7 @@ test.describe("renderSummary", () => {
         "  Plugin      a: P 1",
         "              b: P 2",
         "  Previous    b: P 1",
-        "  Allure      npm run report:allure -- backwpup _all --open",
+        "  Allure      npm run report:allure -- backwpup _all run-1 --open",
       ]),
     );
   });

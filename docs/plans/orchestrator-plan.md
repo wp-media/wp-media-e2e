@@ -794,8 +794,7 @@ orchestrator's first version in Phase 0.5.
   tailing `allure-results/` (no finality, no totals, a format not ours); parsing the `list`
   reporter's text; final lines only (they lose "running now" and the retries).
 - As built: execution-model.md "Watching a run"; `src/common/reporting/results-schema.ts`.
-- Left: `npm run report:allure` opens a cell's newest results, not a given run's; a run-folder
-  argument is a small follow-up.
+- Done (report delivery R1): `npm run report:allure -- <product> <cell> <run>` reports a given run.
 
 ### 6.8 0F — Report pruning (done 2026-10-12)
 

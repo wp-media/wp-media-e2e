@@ -276,8 +276,9 @@ Three always-on reporters of the suite's own, given the run's facts (`RunDescrip
   not load plans none either and is `FAILED`); the counts (drain skips as `stopped`) and duration;
   `Failed`: each scenario that failed for good, `Feature › Scenario — <failed step>` (`failedStep`),
   the first ten, then `and N more`; each outside-test error (`Error`) and failed setup's first line; the plugin and sites tested (from the
-  setups' attachments, `setup-facts.ts`); the three reports as paths from the working directory (plain,
-  quoted when a shell would split them). Site and setup text is printed plain (no escape sequence or control
+  setups' attachments, `setup-facts.ts`); the Playwright and Cucumber reports as paths from the working
+  directory (plain, quoted when a shell would split them), Allure's as the `report:allure` command for
+  this very run (its `RUN_ID`). Site and setup text is printed plain (no escape sequence or control
   character), credentials masked (`displayText`); an interrupted setup is not called failed. Silent for
   `--list`; a SIGTERM ends a run before any `onExit`. It first prunes the run's report group
   ([Report retention](#report-retention)); a `Pruned` line says what went, only when something did.
@@ -329,7 +330,7 @@ SHA-256 — the artifacts setup's attachment) and each site's versions (the auth
 - **Says**: one line — `backwpup · pro@nginx (pro) · BackWPup Pro 9.99.99 · develop @ 1dceea8966 ·
   WordPress 7.1.3 · PHP 8.5.11 64bit · <run name or RUN_ID>`, plus `RUNNING`, `INTERRUPTED`, `STOPPED`,
   `COULD NOT TEST` or `NO TESTS` (which the reports cannot say: Cucumber never says interrupted and omits
-  setups) — as the HTML title, the Cucumber banner and Allure's `--name` (`scripts/allure.mjs`); every
+  setups) — as the HTML title, the Cucumber banner and Allure's `--name` (`reporting/allure-command.ts`); every
   fact, most important first, as Allure's Metadata (it shows eight), the HTML report's metadata and the
   banner's disclosure. An unknown fact says why (`unknown: auth setup failed`, `… skipped`,
   `… did not run`), never blank.
