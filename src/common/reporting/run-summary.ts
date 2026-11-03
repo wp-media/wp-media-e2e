@@ -73,7 +73,7 @@ import {
  *   Site        https://bwu3.example · WordPress 7.1.2 · PHP 8.5.10
  *   Playwright  npx playwright show-report reports/backwpup/pro@nginx/<RUN_ID>/playwright
  *   Cucumber    reports/backwpup/pro@nginx/<RUN_ID>/cucumber/index.html
- *   Allure      npm run report:allure -- backwpup pro@nginx --open
+ *   Allure      npm run report:allure -- backwpup pro@nginx <RUN_ID> --open
  *   Pruned      1 old report, 4.3 MB — beyond the newest 20 (E2E_REPORTS_KEEP)
  * ```
  *
@@ -558,7 +558,7 @@ export function renderSummary(
       shellWord(`${reportDir}/cucumber/index.html`),
     ]),
     ...labelled(style, "Allure", [
-      `npm run report:allure -- ${run.product} ${run.reportCell} --open`,
+      `npm run report:allure -- ${run.product} ${run.reportCell} ${run.runId} --open`,
     ]),
     ...labelled(
       style,

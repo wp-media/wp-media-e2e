@@ -188,18 +188,24 @@ npm run report:prune -- --apply                        # remove what the policy 
 npm run report:prune -- --product backwpup --cell pro@nginx --keep 5 --older-than 2w --apply
 ```
 
-Allure, from the newest run:
+Allure, from the newest run or a given one:
 
 ```bash
-npm run report:allure                              # newest run of any cell
-npm run report:allure -- wp-rocket apache          # a specific product/cell
-npm run report:allure -- wp-rocket apache --open   # generate and serve in the browser
+npm run report:allure                                                    # newest run of any cell
+npm run report:allure -- wp-rocket apache                                # a product/cell's newest
+npm run report:allure -- backwpup pro@nginx 2026-10-22T10-04-03-625Z-26885   # that run
+npm run report:allure -- wp-rocket apache --open                         # generate, then serve
 ```
 
-It lands in `reports/<product>/<cell>/<RUN_ID>/allure/`, named by the run's facts line. **Trends
-accumulate** via a per-cell `reports/<product>/<cell>/allure-history.jsonl`, so the trend chart fills
-from the second run; flaky tests are flagged per run from retries. Content (categories, widgets,
-single-file output) is set in [`allurerc.mjs`](allurerc.mjs).
+It lands in `reports/<product>/<cell>/<RUN_ID>/allure/`, named by the run's facts line, one HTML file
+per plugin (traces included) that opens from disk. **Trends accumulate** via a per-cell
+`reports/<product>/<cell>/allure-history.jsonl`, so the trend chart fills from the second run; flaky
+tests are flagged per run from retries. Generation works on a copy in a hidden folder of the run and
+replaces the report and history only once Allure succeeded: a failure, or Ctrl-C (exit 130), leaves
+both as they were. Empty results and a malformed result are refused (Allure would report them as an
+empty or partial success). A run's end summary prints the command for that very run.
+Content (categories, widgets, single-file output) is set in [`allurerc.mjs`](allurerc.mjs); the code
+is [`allure-report.ts`](src/common/reporting/allure-report.ts).
 
 ## Visual regression
 
