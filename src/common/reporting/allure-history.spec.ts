@@ -16,7 +16,7 @@ import { open } from "node:fs/promises";
 import { join } from "node:path";
 
 import { endsWithin, stopAtCheck } from "../__fixtures__/allure";
-import { openFifoWriter } from "../__fixtures__/fifo";
+import { openFifoWriter, releaseFifoReader } from "../__fixtures__/fifo";
 import { removeTempRoot, tempRoot } from "../__fixtures__/report-tree";
 import {
   AllureGenerationAbortedError,
@@ -1142,6 +1142,28 @@ test.describe("prepareHistory and settleHistory", () => {
     await expect(readHistoryText(root, 1024)).rejects.toMatchObject({
       code: "EISDIR",
     });
+  });
+
+  test("readHistoryText: anything but a regular file is an error before its size is compared, on every OS", async () => {
+    // A folder's size is the filesystem's (4096 on ext4, less on APFS): a bound of 0 is below any.
+    await expect(readHistoryText(root, 0)).rejects.toMatchObject({
+      code: "EISDIR",
+    });
+
+    const fifo = join(root, "h.fifo");
+    expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
+    try {
+      await expect(
+        endsWithin(readHistoryText(fifo, 1024), "the read"),
+      ).rejects.toMatchObject({ code: "EINVAL" });
+      // Closed, and never waiting in its open: no reader holds the FIFO for a writer to open.
+      await expect(openFifoWriter(fifo, 100)).rejects.toThrow(
+        "Nothing opened the FIFO",
+      );
+    } finally {
+      // A regressed blocking open would hold a libuv thread for good: let it go.
+      await releaseFifoReader(fifo, 100).catch(() => undefined);
+    }
   });
 
   test("historyText terminates every line", () => {
