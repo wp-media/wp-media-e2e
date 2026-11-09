@@ -657,6 +657,7 @@ function fakeReport(allure: AllureReportOptions): AllureReport {
     historyPath: allure.historyPath,
     layout: "single-file",
     analytics: { cleaned: [], left: [] },
+    historyDropped: 0,
   };
 }
 

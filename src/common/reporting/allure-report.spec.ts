@@ -20,17 +20,19 @@ import { promisify } from "node:util";
 
 import {
   endsWithin,
+  stopAtCheck,
   STUB_OUTPUT_HEAD,
   stubCalls,
   writeAllureResults,
   writeAllureStub,
 } from "../__fixtures__/allure";
-import { releaseFifoReader } from "../__fixtures__/fifo";
 import { removeTempRoot, tempRoot } from "../__fixtures__/report-tree";
+import { HISTORY_LIMIT } from "./allure-history";
 import {
   AllureCliMissingError,
   AllureGenerationAbortedError,
   AllureGenerationFailedError,
+  AllureReportError,
   AllureResultsMissingError,
   MalformedAllureResultError,
 } from "./allure-errors";
@@ -291,6 +293,7 @@ test.describe("generateAllureReport, with a stub CLI", () => {
       layout: "single-file",
       // The stub's page has no analytics loader.
       analytics: { cleaned: [], left: [] },
+      historyDropped: 0,
     });
     expect(
       readFileSync(join(runDir, "allure", "awesome", "index.html"), "utf8"),
@@ -347,6 +350,22 @@ test.describe("generateAllureReport, with a stub CLI", () => {
     );
   });
 
+  test("a new history is owner-only; an existing one keeps its mode across generations", async () => {
+    const bin = writeAllureStub(stubDir, "ok");
+    const history = join(cellDir, "allure-history.jsonl");
+    const mode = (): string => (statSync(history).mode & 0o777).toString(8);
+
+    await generateAllureReport(options(bin));
+    expect(mode()).toBe("600");
+
+    for (const kept of [0o640, 0o644]) {
+      chmodSync(history, kept);
+      await generateAllureReport(options(bin));
+      expect(mode()).toBe(kept.toString(8));
+    }
+    expect(readFileSync(history, "utf8").split("\n")).toHaveLength(2);
+  });
+
   test("a run reported again keeps one history line: its own, in its place and time", async () => {
     const bin = writeAllureStub(stubDir, "ok");
     const run = basename(runDir);
@@ -363,6 +382,132 @@ test.describe("generateAllureReport, with a stub CLI", () => {
       `{"name":"untagged"}\n` +
         `{"name":"BackWPup · pro@nginx · run 1","e2eRun":"${run}","timestamp":5}\n${other}`,
     );
+    // Allure is given only what came before the run's own line: never that line (it would draw it
+    // as a previous run), nor a later run's.
+    expect(stubCalls(stubDir).map((call) => call.historyText)).toEqual([
+      `{"name":"untagged"}\n`,
+      `{"name":"untagged"}\n`,
+    ]);
+  });
+
+  test("another run's non-ASCII line goes to Allure and back byte for byte", async () => {
+    const bin = writeAllureStub(stubDir, "ok");
+    const other = Buffer.concat([
+      Buffer.from(
+        `{"name":"BackWPup · pro@nginx · é","e2eRun":"other-run","x":"`,
+      ),
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from('"}\n'),
+    ]);
+    writeFileSync(join(cellDir, "allure-history.jsonl"), other);
+
+    await generateAllureReport(options(bin));
+
+    expect(stubCalls(stubDir)[0]?.historyText).toBe(other.toString("latin1"));
+    expect(readFileSync(join(cellDir, "allure-history.jsonl"))).toEqual(
+      Buffer.concat([
+        other,
+        Buffer.from(
+          `{"name":"BackWPup · pro@nginx · run 1","e2eRun":"${basename(runDir)}"}\n`,
+        ),
+      ]),
+    );
+  });
+
+  test("a run with a non-ASCII folder name keeps one history line", async () => {
+    const bin = writeAllureStub(stubDir, "ok");
+    const run = join(cellDir, "run · é");
+    writeAllureResults(join(run, "allure-results"));
+    const own = options(bin, {
+      runDir: run,
+      resultsDir: join(run, "allure-results"),
+      outputDir: join(run, "allure"),
+    });
+
+    await generateAllureReport(own);
+    await generateAllureReport(own);
+
+    expect(readFileSync(join(cellDir, "allure-history.jsonl"), "utf8")).toBe(
+      `{"name":"BackWPup · pro@nginx · run 1","e2eRun":"run · é"}\n`,
+    );
+    expect(stubCalls(stubDir).map((call) => call.historyText)).toEqual([
+      null,
+      null,
+    ]);
+  });
+
+  test("Allure appending nothing (3.18 logs a failed append and exits 0) keeps the cell's history whole", async () => {
+    const bin = writeAllureStub(stubDir, "no-history");
+    const cell =
+      `{"name":"first","timestamp":5,"e2eRun":"${basename(runDir)}"}\n` +
+      `{"name":"o","e2eRun":"r2"}\n`;
+    writeFileSync(join(cellDir, "allure-history.jsonl"), cell);
+
+    await generateAllureReport(options(bin));
+
+    expect(readFileSync(join(cellDir, "allure-history.jsonl"), "utf8")).toBe(
+      cell,
+    );
+  });
+
+  test("Allure appending two lines: both kept after the cell's history, the run's earlier line kept", async () => {
+    const bin = writeAllureStub(stubDir, "two-lines");
+    const cell = `{"name":"first","timestamp":5,"e2eRun":"${basename(runDir)}"}\n`;
+    writeFileSync(join(cellDir, "allure-history.jsonl"), cell);
+
+    await generateAllureReport(options(bin));
+
+    expect(readFileSync(join(cellDir, "allure-history.jsonl"), "utf8")).toBe(
+      `${cell}{"name":"BackWPup · pro@nginx · run 1"}\n{"name":"extra"}\n`,
+    );
+  });
+
+  test("Allure's line past the line bound is not kept but counted, the cell's history kept", async () => {
+    const bin = writeAllureStub(stubDir, "long-line");
+    const cell = `{"name":"o","e2eRun":"r2"}\n`;
+    writeFileSync(join(cellDir, "allure-history.jsonl"), cell);
+
+    const report = await generateAllureReport(options(bin));
+
+    expect(report.historyDropped).toBe(1);
+    expect(readFileSync(join(cellDir, "allure-history.jsonl"), "utf8")).toBe(
+      cell,
+    );
+  });
+
+  test("the history keeps the newest HISTORY_LIMIT runs", async () => {
+    const bin = writeAllureStub(stubDir, "ok");
+    const lines = Array.from(
+      { length: HISTORY_LIMIT + 3 },
+      (_, n) => `{"name":"r${String(n)}","e2eRun":"r${String(n)}"}\n`,
+    );
+    writeFileSync(join(cellDir, "allure-history.jsonl"), lines.join(""));
+
+    await generateAllureReport(options(bin));
+
+    expect(stubCalls(stubDir)[0]?.historyText).toBe(lines.slice(3).join(""));
+    const after = historyLines();
+    expect(after).toHaveLength(HISTORY_LIMIT);
+    expect(after[0]?.e2eRun).toBe("r4");
+    expect(after.at(-1)?.e2eRun).toBe(basename(runDir));
+  });
+
+  test("history lines Allure could not read are dropped and counted, never handed to it", async () => {
+    const bin = writeAllureStub(stubDir, "ok");
+    const kept = `{"name":"o","e2eRun":"r2"}\n`;
+    writeFileSync(
+      join(cellDir, "allure-history.jsonl"),
+      `{ broken\n${kept}null\n`,
+    );
+
+    const report = await generateAllureReport(options(bin));
+
+    expect(report.historyDropped).toBe(2);
+    expect(stubCalls(stubDir)[0]?.historyText).toBe(kept);
+    expect(historyLines().map((line) => line.e2eRun)).toEqual([
+      "r2",
+      basename(runDir),
+    ]);
   });
 
   test("replaces an existing report whole: nothing of the old one is left", async () => {
@@ -692,24 +837,41 @@ test.describe("generateAllureReport, with a stub CLI", () => {
   });
 
   test("a stop while the history is read runs nothing", async () => {
-    // A history that blocks its reader until something opens it for writing.
-    const fifo = join(cellDir, "allure-history.jsonl");
-    expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
-    const stop = new AbortController();
+    const history = join(cellDir, "allure-history.jsonl");
+    writeFileSync(history, `{"n":1}\n`);
+    // Checked before the work folder is made (1), before the history is opened (2), as its one
+    // chunk arrives (3): the stop lands mid-read.
+    const stop = stopAtCheck(3);
 
-    const generating = generateAllureReport(
-      options(writeAllureStub(stubDir, "ok"), { signal: stop.signal }),
-    ).catch((caught: unknown) => caught);
-    stop.abort();
-    await releaseFifoReader(fifo);
+    await expect(
+      generateAllureReport(
+        options(writeAllureStub(stubDir, "ok"), { signal: stop.signal }),
+      ),
+    ).rejects.toBeInstanceOf(AllureGenerationAbortedError);
 
-    expect(
-      await endsWithin(generating, "the stopped generation"),
-    ).toBeInstanceOf(AllureGenerationAbortedError);
+    expect(stop.checks()).toBe(3);
     expect(stubCalls(stubDir)).toEqual([]);
-    expect(lstatSync(fifo).isFIFO()).toBe(true);
+    expect(readFileSync(history, "utf8")).toBe(`{"n":1}\n`);
     expect(existsSync(join(runDir, "allure"))).toBe(false);
     expect(workDirs()).toEqual([]);
+  });
+
+  test("a FIFO where the history should be never holds the generation: replaced by a history, counted", async () => {
+    // Read, its open would wait for a writer and its reads for bytes: nothing would end it but a stop.
+    const fifo = join(cellDir, "allure-history.jsonl");
+    expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
+
+    const report = await endsWithin(
+      generateAllureReport(options(writeAllureStub(stubDir, "ok"))),
+      "the generation",
+    );
+
+    expect(report.historyDropped).toBe(1);
+    expect(stubCalls(stubDir)[0]?.historyText).toBeNull();
+    expect(lstatSync(fifo).isFile()).toBe(true);
+    expect(historyLines().map((line) => line.e2eRun)).toEqual([
+      basename(runDir),
+    ]);
   });
 
   test("a stop before it starts leaves even a dead generation's work folder alone", async () => {
@@ -740,7 +902,14 @@ test.describe("generateAllureReport, with a stub CLI", () => {
       options(writeAllureStub(stubDir, "ok")),
     ).catch((caught: unknown) => caught);
 
-    expect((error as NodeJS.ErrnoException).code).toMatch(/^E[A-Z]+$/);
+    // A typed error naming the file and why; the filesystem's error is its cause.
+    expect(error).toBeInstanceOf(AllureReportError);
+    expect((error as Error).message).toMatch(
+      /^Cannot read the Allure history .*allure-history\.jsonl \(E[A-Z]+\)\.$/,
+    );
+    expect(((error as Error).cause as NodeJS.ErrnoException).code).toMatch(
+      /^E[A-Z]+$/,
+    );
     expect(stubCalls(stubDir)).toEqual([]);
     expect(readdirSync(join(cellDir, "allure-history.jsonl"))).toEqual([
       "inside",
@@ -949,6 +1118,8 @@ test.describe("placing the report and the history", () => {
     const history = join(root, "cell", "allure-history.jsonl");
     mkdirSync(dirname(history));
     writeFileSync(history, "old\n");
+    chmodSync(history, 0o644);
+    chmodSync(updated, 0o600);
 
     await placeHistory(
       updated,
@@ -958,6 +1129,7 @@ test.describe("placing the report and the history", () => {
     );
 
     expect(readFileSync(history, "utf8")).toBe("updated\n");
+    expect(statSync(history).mode & 0o777).toBe(0o644);
     expect(readdirSync(dirname(history))).toEqual([basename(history)]);
   });
 
@@ -1100,6 +1272,49 @@ test.describe("generateAllureReport, with the real Allure CLI", () => {
     );
     // The earlier run once, and this one.
     expect(trend?.data).toHaveLength(2);
+  });
+
+  test("a run generated again is one point in its own trend, not its earlier generation too", async () => {
+    const keep = options(undefined, { traces: "keep" });
+
+    await generateAllureReport(keep);
+    await generateAllureReport(keep);
+
+    const trend = dashboardCharts(runDir).find(
+      (chart) => chart.type === "statusDynamics",
+    );
+    expect(trend?.data).toHaveLength(1);
+    expect(historyLines().map((line) => line.e2eRun)).toEqual([
+      basename(runDir),
+    ]);
+  });
+
+  test("an older run generated again draws the trend it drew first: no later run's point in it", async () => {
+    const r1 = options(undefined, { traces: "keep" });
+    const otherRun = join(cellDir, "2026-10-22T11-00-00-000Z-26886");
+    writeAllureResults(join(otherRun, "allure-results"));
+    const r2 = {
+      ...r1,
+      runDir: otherRun,
+      resultsDir: join(otherRun, "allure-results"),
+      outputDir: join(otherRun, "allure"),
+    };
+    const trend = (run: string): unknown[] | undefined =>
+      dashboardCharts(run).find((chart) => chart.type === "statusDynamics")
+        ?.data;
+
+    await generateAllureReport(r1);
+    await generateAllureReport(r2);
+    await generateAllureReport(r1);
+
+    expect(trend(runDir)).toHaveLength(1);
+    await generateAllureReport(r2);
+    // r1's point once, and r2's own.
+    expect(trend(otherRun)).toHaveLength(2);
+    expect(historyLines().map((line) => line.e2eRun)).toEqual([
+      basename(runDir),
+      basename(otherRun),
+    ]);
   });
 
   test("two cells generate at once, each into its own report and history", async () => {

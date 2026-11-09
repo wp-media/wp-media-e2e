@@ -202,10 +202,12 @@ per plugin (traces included) that opens from disk. **Trends accumulate** via a p
 `reports/<product>/<cell>/allure-history.jsonl`, so the trend chart fills from the second run; flaky
 tests are flagged per run from retries. Each line is tagged with its run (`"e2eRun": "<RUN_ID>"`): a run
 reported again (a rebuilt bundle, a later `report:allure`) replaces its own line, keeping its place and
-time, so the trend has one point per run. Generation works on a copy in a hidden folder of the run and
-replaces the report and history only once Allure succeeded: a failure, or Ctrl-C (exit 130), leaves
-both as they were. Empty results and a malformed result are refused (Allure would report them as an
-empty or partial success). A run's end summary prints the command for that very run.
+time, and Allure is given only the lines before it, so the trend has one point per run and a report
+made again draws the trend it drew first. The history keeps the newest 100 runs (at most 64 MiB); a
+line Allure could not read, or a FIFO or device at its path (an edit by hand), is dropped, with a warning. Generation works on a copy in a hidden folder of
+the run and replaces the report and history only once Allure succeeded: a failure, or Ctrl-C (exit
+130), leaves both as they were. Empty results and a malformed result are refused (Allure would report
+them as an empty or partial success). A run's end summary prints the command for that very run.
 Allure 3's plugins hard-code a Google Tag Manager loader; generation removes that exact block from
 every page (a page where it is not recognised is left as written, and the command warns).
 Content (categories, widgets, single-file output) is set in [`allurerc.mjs`](allurerc.mjs); the code
@@ -221,6 +223,10 @@ whose one top-level entry is `<product>-<cell>-<RUN_ID>/` (never starting with `
 are copied: links, FIFOs and sockets are left out and logged. The landing page opens from disk; where a
 report needs HTTP (Playwright's trace viewer, rich Cucumber, an Allure that keeps traces) it gives the
 command, run from the unpacked folder: `npx playwright show-report playwright`, `npx allure open allure`.
+Its Allure leaves Playwright's traces out by default (one HTML file per page; the traces stay in
+`playwright/`). A failed run of 6–7 MB packs to about 6 MB, 16 MB unpacked, in under 2 s; a small
+passing one to about 4 MB (Allure's pages). Modes, the fetch command and sizes:
+[orchestrator guide → Report bundle](docs/guides/orchestrator.md#report-bundle).
 
 ## Visual regression
 

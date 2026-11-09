@@ -16,7 +16,6 @@ import {
   writeAllureResults,
   writeServeStub,
 } from "../__fixtures__/allure";
-import { releaseFifoReader } from "../__fixtures__/fifo";
 import { removeTempRoot, tempRoot } from "../__fixtures__/report-tree";
 import {
   AllureGenerationAbortedError,
@@ -217,6 +216,7 @@ test.describe("runAllureCommand", () => {
           historyPath: options.historyPath,
           layout: "single-file",
           analytics: { cleaned: ["awesome/index.html"], left: [] },
+          historyDropped: 0,
         };
       },
       serve: (outputDir) => {
@@ -305,6 +305,7 @@ test.describe("runAllureCommand", () => {
           cleaned: [],
           left: ["awesome/index.html", "dashboard/index.html"],
         },
+        historyDropped: 0,
       }),
     );
 
@@ -327,6 +328,7 @@ test.describe("runAllureCommand", () => {
         historyPath: options.historyPath,
         layout: "single-file",
         analytics: { cleaned: [], left: ["awesome/index.html"] },
+        historyDropped: 0,
       }),
     );
 
@@ -334,6 +336,28 @@ test.describe("runAllureCommand", () => {
     expect(errors).toEqual([
       "Warning: Allure's analytics loader (Google Tag Manager) was not recognised in " +
         "awesome/index.html: left as Allure wrote it, so those pages load it when opened online.",
+    ]);
+  });
+
+  test("history lines Allure could not read are warned about as dropped, and the report still counts", async () => {
+    makeRun("wp-rocket", "apache", "r", 1);
+    const { io, errors } = recordingIo((options) =>
+      Promise.resolve({
+        results: 1,
+        strippedTraces: 0,
+        skipped: [],
+        outputDir: options.outputDir,
+        historyPath: options.historyPath,
+        layout: "single-file",
+        analytics: { cleaned: [], left: [] },
+        historyDropped: 2,
+      }),
+    );
+
+    expect(await runAllureCommand(parseRun([]), io)).toBe(EXIT.ok);
+    expect(errors).toEqual([
+      `Warning: 2 line(s) of ${join(root, "wp-rocket", "apache", "allure-history.jsonl")} were ` +
+        "dropped: not JSON objects Allure could read, not a regular file, or past the history's size bounds.",
     ]);
   });
 
@@ -552,9 +576,6 @@ test.describe("npm run report:allure, through the real script and Allure", () =>
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
     test(`${signal} to its process group stops generation cleanly and exits as the signal would`, async () => {
       const run = makeRun("backwpup", "pro@nginx", "r", 1);
-      // A history that holds the generation until it is opened for writing.
-      const fifo = join(root, "backwpup", "pro@nginx", "allure-history.jsonl");
-      expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
       const child = spawn(
         join(checkout, "node_modules", ".bin", "tsx"),
         [join(checkout, "scripts", "allure.mjs"), "backwpup", "pro@nginx", "r"],
@@ -577,10 +598,14 @@ test.describe("npm run report:allure, through the real script and Allure", () =>
       if (pid === undefined) throw new Error("the script did not start");
       const workDirs = (): string[] =>
         readdirSync(run).filter((name) => name.startsWith(".allure-work-"));
-      await expect.poll(workDirs).toHaveLength(1);
-
+      // Signalled while Allure runs (its arguments name the work folder): seconds, for its startup alone.
+      await expect
+        .poll(
+          () => spawnSync("pgrep", ["-f", join(run, ".allure-work-")]).status,
+          { intervals: [20] },
+        )
+        .toBe(0);
       process.kill(-pid, signal);
-      await releaseFifoReader(fifo);
 
       // tsx relays SIGINT and SIGTERM and exits as its script did; SIGHUP ends tsx itself, while
       // the script under it, in the same group, gets it too and stops Allure (the checks below).

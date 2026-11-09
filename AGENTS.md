@@ -46,7 +46,7 @@ src/
 │   ├── pages/              # cross-product page objects (plugins, site-health) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm + warm-lines.ts its output, pin)
-│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/), raw Allure results and a stub Allure CLI (allure.ts), a FIFO's blocked reader released within a deadline (fifo.ts), a `.tar.gz` listed from its raw headers (tar-listing.ts)
+│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/), raw Allure results, a stub Allure CLI and a stop at a chosen check (allure.ts), a FIFO's blocked reader released, or fed chunk by chunk, within a deadline (fifo.ts), a `.tar.gz` listed from its raw headers (tar-listing.ts)
 │   └── wp/                 # WordPress over WP-CLI (exec, php, staging, plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
@@ -577,6 +577,8 @@ history:
 - [`orchestrator-phase-0.5-plan.md`](docs/plans/orchestrator-phase-0.5-plan.md) — the minimal
   orchestrator (cycling cells, Slack, Datator) replacing AutoE2E's BackWPup instances; its design and
   decisions.
+- [`orchestrator-report-delivery-plan.md`](docs/plans/orchestrator-report-delivery-plan.md) — each
+  run's report bundle (Allure, `report.tar.gz`, Slack's fetch command; done): its standing decisions.
 
 ## When to update these docs
 
