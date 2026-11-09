@@ -812,12 +812,16 @@ function givenText(scan: HistoryScan): string {
 }
 
 /**
- * Reads the history Allure left as `latin1` text, unless it is longer than `maxBytes`.
+ * Reads the history Allure left as `latin1` text, unless it is longer than `maxBytes`. Only a
+ * regular file is read, and anything else fails before its size is looked at: a folder's size is
+ * the filesystem's (4096 on ext4, a few dozen bytes on APFS), and a FIFO's or a device's reads may
+ * wait forever.
  *
  * @param path - the file.
  * @param maxBytes - the most read.
  * @returns its text; `""` when there is none; `undefined` when it is longer.
- * @throws the filesystem's error for anything but a missing file.
+ * @throws the filesystem's error for anything but a missing file; one coded `EISDIR` for a folder,
+ *   `EINVAL` for anything else that is not a regular file.
  */
 export async function readHistoryText(
   path: string,
@@ -825,18 +829,39 @@ export async function readHistoryText(
 ): Promise<string | undefined> {
   let handle: FileHandle;
   try {
-    handle = await open(path, "r");
+    // Non-blocking: a FIFO's open would otherwise wait for a writer. A regular file's reads ignore it.
+    handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
   } catch (error) {
     if (errnoCode(error) === "ENOENT") return "";
     throw error;
   }
   try {
+    const stats = await handle.stat();
+    if (!stats.isFile()) throw notRegularFile(path, stats.isDirectory());
     // Allure has exited and the work folder is the owner's alone: the size cannot change.
-    if ((await handle.stat()).size > maxBytes) return undefined;
+    if (stats.size > maxBytes) return undefined;
     return await handle.readFile("latin1");
   } finally {
     await handle.close();
   }
+}
+
+/**
+ * The error for a history that is not a regular file, coded as a read of a folder is, so every OS
+ * fails alike.
+ *
+ * @param path - the file.
+ * @param directory - whether it is a folder (`EISDIR`); anything else is `EINVAL`.
+ */
+function notRegularFile(
+  path: string,
+  directory: boolean,
+): NodeJS.ErrnoException {
+  const code = directory ? "EISDIR" : "EINVAL";
+  return Object.assign(
+    new Error(`${code}: not a regular file, read '${path}'`),
+    { code, syscall: "read", path },
+  );
 }
 
 /**
