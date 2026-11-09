@@ -5,10 +5,12 @@ import type {
   RunFinishedEvent,
   RunFinishedInput,
 } from "../events/run-finished";
-import { formatDuration } from "../notify/slack";
+import { MAX_TEXT_LENGTH } from "../log";
+import { fitsSlack, formatDuration } from "../notify/slack";
+import { downloadCommand } from "../runs/bundle";
 import type { RunOutcome, RunStatus, StopTaken } from "../runs/outcome";
 import { STOP_RANK, type StopLevel } from "../runs/stop";
-import { failureLine } from "../text";
+import { failureLine, safeLine } from "../text";
 
 /**
  * The pure parts of one run (`cycle.ts`): what its terminal lines say, what its `run.finished` is
@@ -122,6 +124,53 @@ export function outcomeLine(
     formatDuration(event.durationMs),
     ...pathShown(tested ? event.report.dir : event.report.log, show),
   ].join(" · ");
+}
+
+/** A line under a run's end, and whether it must never be wrapped (a command to copy). */
+export interface BundleLine {
+  readonly text: string;
+  readonly verbatim: boolean;
+}
+
+/**
+ * The lines under a run's end when it has a bundle: where the bundle and the raw folder are, then —
+ * with an `scp` host — the command that fetches it, Slack's own, verbatim (never wrapped). The
+ * command is left out when Slack would leave it out ({@link fitsSlack}: a cut command is a broken
+ * one), and when the log would change it — masking, or a run of spaces made one ({@link safeLine}) —
+ * since a changed command fetches nothing; the `report:` line still names the bundle.
+ *
+ * ```text
+ * bpng-12 report: reports/backwpup/pro@nginx/<RUN_ID>/report.tar.gz · raw: reports/backwpup/pro@nginx/<RUN_ID>
+ * bpng-12 fetch: scp auto-e2e:/srv/e2e/reports/…/report.tar.gz backwpup-pro@nginx-<RUN_ID>.tar.gz && tar -xzf … && rm …
+ * ```
+ *
+ * @param event - the run's `run.finished`.
+ * @param show - how a path is shown ({@link showPath}).
+ * @param sshHost - the config's `reports.sshHost`.
+ * @param secrets - every secret value, as the log masks them.
+ * @returns the lines; none without a bundle.
+ */
+export function bundleLines(
+  event: RunFinishedEvent,
+  show: (path: string) => string,
+  sshHost: string | undefined,
+  secrets: readonly string[],
+): BundleLine[] {
+  const { bundle, dir } = event.report;
+  if (bundle === null || dir === null) return [];
+  const id = event.run.id;
+  const lines: BundleLine[] = [
+    {
+      text: `${id} report: ${show(bundle.path)} · raw: ${show(dir)}`,
+      verbatim: false,
+    },
+  ];
+  if (sshHost === undefined) return lines;
+  const command = downloadCommand(bundle, sshHost);
+  const fetch = `${id} fetch: ${command}`;
+  if (fitsSlack(command) && safeLine(fetch, MAX_TEXT_LENGTH, secrets) === fetch)
+    lines.push({ text: fetch, verbatim: true });
+  return lines;
 }
 
 /**

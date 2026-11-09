@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
   copyFile,
@@ -29,7 +28,8 @@ import {
   type AllureTraces,
   type CopiedResults,
 } from "./allure-results";
-import { errnoCode } from "./report-tree";
+import { KILL_GRACE_MS, runInOwnGroup } from "./child-group";
+import { errnoCode, untouchedFor } from "./report-tree";
 
 /**
  * Generating one run's Allure report: `allure generate` over a copy of the run's results (traces
@@ -105,10 +105,15 @@ export interface AllureReportOptions {
   /** Allure's own output: printed through (`inherit`) or captured for an error (`pipe`, default). */
   readonly stdio?: "inherit" | "pipe";
   /**
-   * Stops generation: Allure is sent SIGTERM and waited for, nothing is put in place. Not checked
-   * once the report is being put in place (two renames).
+   * Stops generation: Allure's process group is sent SIGTERM and waited for, nothing is put in
+   * place. Not checked once the report is being put in place (two renames). Allure still running
+   * {@link AllureReportOptions.killGraceMs} after SIGTERM is sent SIGKILL. Allure runs in a group of
+   * its own (`child-group.ts`): only this signal stops it, never one sent to the caller's group —
+   * so a caller must abort it on every stop it handles.
    */
   readonly signal?: AbortSignal;
+  /** How long Allure has to end after a stop's SIGTERM; default {@link KILL_GRACE_MS}. */
+  readonly killGraceMs?: number;
   /** The CLI to run; default {@link DEFAULT_ALLURE_BIN}. */
   readonly allureBin?: string;
   /** The Allure config; default {@link DEFAULT_ALLURE_CONFIG}. */
@@ -184,6 +189,7 @@ export async function generateAllureReport(
       cwd: work,
       stdio: options.stdio ?? "pipe",
       signal: options.signal,
+      killGraceMs: options.killGraceMs ?? KILL_GRACE_MS,
     });
     const analytics = await removeAllureAnalytics(join(work, "report"));
     await keepOneLinePerRun(workHistory, historyBefore, basename(runDir));
@@ -294,12 +300,46 @@ export function isProcessAlive(pid: number): boolean {
 }
 
 /**
+ * What else a sweep of work folders asks before releasing one its pid calls stale
+ * ({@link staleWorkDirNames}): for a caller sweeping runs it does not build, whose folders may belong
+ * to another host's process (a pid is per host).
+ */
+export interface StaleWorkDirSweep {
+  /** Releases only a folder nothing in has been modified for longer than this ({@link untouchedFor}). */
+  readonly idleMs?: number;
+  /** Ends the sweep before its next folder; a folder being judged is then kept. */
+  readonly signal?: AbortSignal;
+  /** The clock, in epoch milliseconds; `Date.now` by default. */
+  readonly now?: () => number;
+}
+
+/**
+ * Whether a stale work folder may go under a sweep's terms: untouched long enough, when it asks so.
+ *
+ * @param work - the work folder.
+ * @param sweep - the sweep's terms.
+ * @returns `true` when it may be released.
+ */
+export async function sweepMayRelease(
+  work: string,
+  sweep: StaleWorkDirSweep,
+): Promise<boolean> {
+  if (sweep.idleMs === undefined) return true;
+  return untouchedFor(work, sweep.idleMs, sweep.signal, sweep.now);
+}
+
+/**
  * Releases the work folders no generation uses any more ({@link staleWorkDirNames}), a report left
- * aside put back. Best-effort: one that cannot be released stays, and goes with the run.
+ * aside put back. Best-effort: one that cannot be released stays, and goes with the run. Exported for
+ * a caller sweeping what a SIGKILLed generation left in runs it will not generate again.
  *
  * @param runDir - the run's folder.
+ * @param sweep - a sweep's further terms; none for a generation's own run.
  */
-async function releaseStaleWorkDirs(runDir: string): Promise<void> {
+export async function releaseStaleWorkDirs(
+  runDir: string,
+  sweep: StaleWorkDirSweep = {},
+): Promise<void> {
   let names: string[];
   try {
     names = await readdir(runDir);
@@ -312,9 +352,10 @@ async function releaseStaleWorkDirs(runDir: string): Promise<void> {
     active: new Set([...activeWorkDirs].map((work) => basename(work))),
   };
   for (const name of staleWorkDirNames(names, owners)) {
-    await releaseWorkDir(join(runDir, name), { putBack: true }).catch(
-      () => undefined,
-    );
+    if (sweep.signal?.aborted === true) return;
+    const work = join(runDir, name);
+    if (!(await sweepMayRelease(work, sweep))) continue;
+    await releaseWorkDir(work, { putBack: true }).catch(() => undefined);
   }
 }
 
@@ -456,6 +497,7 @@ interface AllureInvocation {
   readonly cwd: string;
   readonly stdio: "inherit" | "pipe";
   readonly signal: AbortSignal | undefined;
+  readonly killGraceMs: number;
 }
 
 /**
@@ -468,33 +510,20 @@ interface AllureInvocation {
  *   fails.
  */
 async function runAllureGenerate(invocation: AllureInvocation): Promise<void> {
-  const child = spawn(invocation.bin, invocation.args, {
+  let output: Buffer = Buffer.alloc(0);
+  const ended = await runInOwnGroup({
+    bin: invocation.bin,
+    args: invocation.args,
     cwd: invocation.cwd,
     env: invocation.env,
-    stdio: ["ignore", invocation.stdio, invocation.stdio],
+    stdout: invocation.stdio,
+    stderr: invocation.stdio,
+    onOutput: (chunk) => {
+      // Keeps the end of what Allure printed.
+      output = keepTail(output, chunk);
+    },
     signal: invocation.signal,
-  });
-  let output: Buffer = Buffer.alloc(0);
-  /** Keeps the end of what Allure printed. */
-  const capture = (chunk: Buffer): void => {
-    output = keepTail(output, chunk);
-  };
-  child.stdout?.on("data", capture);
-  child.stderr?.on("data", capture);
-  const ended = await new Promise<
-    | { kind: "spawn-error"; code: string }
-    | { kind: "closed"; code: number | null; signal: NodeJS.Signals | null }
-  >((settle) => {
-    child.once("error", (error) => {
-      // A child that never started (no pid) ends here. Anything else — an abort's `AbortError`
-      // included — comes from a running one, and its `close` follows: waited for.
-      if (child.pid === undefined) {
-        settle({ kind: "spawn-error", code: errnoCode(error) ?? error.name });
-      }
-    });
-    child.once("close", (code, signal) => {
-      settle({ kind: "closed", code, signal });
-    });
+    killGraceMs: invocation.killGraceMs,
   });
   throwIfAborted(invocation.signal);
   if (ended.kind === "spawn-error") {

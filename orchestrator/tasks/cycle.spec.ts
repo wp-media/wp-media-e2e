@@ -1,6 +1,16 @@
 import { test, expect } from "@playwright/test";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -17,7 +27,18 @@ import {
   scenarioEnd,
   streamOf,
 } from "../__fixtures__/results";
+import {
+  endsWithin,
+  writeAllureResults,
+  writeAllureStub,
+  type StubBehaviour,
+} from "../../src/common/__fixtures__/allure";
+import {
+  buildReportBundle,
+  type ReportBundleOptions,
+} from "../../src/common/reporting/report-bundle";
 import { RESULTS_FILE } from "../../src/common/reporting/results-schema";
+import type { ReportBundler } from "../runs/bundle";
 import type { RunFinishedEvent } from "../events/run-finished";
 import { datatorPayload } from "../notify/datator";
 import { runIdentity } from "../runs/identity";
@@ -1016,7 +1037,7 @@ test.describe("runOnce — stopped at each stage", () => {
       const run = runOnce(TASK, deps);
       await runnerReady(seen);
       run.stop(level, `asked: ${level}`);
-      const result = ended(await run.done);
+      const result = ended(await endsWithin(run.done, `the run ${level}`));
       expect(result.status).toBe(status);
       const record = (await recordOf()) as EndedRecord;
       expect(exits).toContainEqual(record.playwright);
@@ -1589,7 +1610,11 @@ test.describe("runOnce — the cell's site locks, which its loop holds", () => {
       const event = seen.published[0];
       expect(event?.reason).toMatch(/^the run could not start: /);
       // No folder: no report, no log, and the outcome line ends at the duration.
-      expect(event?.report).toEqual({ dir: null, log: null });
+      expect(event?.report).toEqual({
+        dir: null,
+        log: null,
+        bundle: null,
+      });
       expect(
         seen.lines.find((line) => line.startsWith("bpng bpng-1 ✘ error")),
       ).toMatch(/ · 0s$/);
@@ -1606,7 +1631,11 @@ test.describe("runOnce — the cell's site locks, which its loop holds", () => {
       },
     });
     expect(ended(await runOnce(TASK, deps).done).status).toBe("error");
-    expect(seen.published[0]?.report).toEqual({ dir: null, log: null });
+    expect(seen.published[0]?.report).toEqual({
+      dir: null,
+      log: null,
+      bundle: null,
+    });
   });
 
   test("a run that could not be watched to its end says so in its result", async () => {
@@ -1659,5 +1688,374 @@ test.describe("runOnce — the cell's site locks, which its loop holds", () => {
     expect(seen.lines).toContain(
       "bpng bpng-1: playwright's process group (4242) is still not empty ***",
     );
+  });
+});
+
+test.describe("runOnce — the run's download bundle", () => {
+  /** Where stub CLIs go: outside the checkout, so no run folder holds them. */
+  let stubs: string;
+  test.beforeEach(async () => {
+    stubs = join(checkout, "..", `${basename(checkout)}-stubs`);
+    await mkdir(stubs, { recursive: true });
+  });
+  test.afterEach(async () => {
+    await rm(stubs, { recursive: true, force: true });
+  });
+
+  const NAME = (): string => `backwpup-pro@nginx-${identityOf().runId}`;
+
+  /** The run's report folder as the suite leaves it: a Playwright report and raw Allure results. */
+  async function suiteReports(): Promise<void> {
+    const dir = identityOf().reportDir;
+    await mkdir(join(dir, "playwright"), { recursive: true });
+    await writeFile(join(dir, "playwright", "index.html"), "<html>pw</html>");
+    writeAllureResults(join(dir, "allure-results"));
+  }
+
+  /**
+   * The real builder, with a stub Allure and, optionally, a stub `tar`; each call counted.
+   *
+   * @param allure - the stub's behaviour.
+   * @param more - options to add.
+   */
+  function realBuild(
+    allure: StubBehaviour = "ok",
+    more: Partial<ReportBundleOptions> = {},
+  ): { build: ReportBundler; calls: ReportBundleOptions[] } {
+    const calls: ReportBundleOptions[] = [];
+    return {
+      calls,
+      build: (options) => {
+        calls.push(options);
+        return buildReportBundle({
+          ...options,
+          allureBin: writeAllureStub(stubs, allure),
+          ...more,
+        });
+      },
+    };
+  }
+
+  /** The report folder's hidden entries: a build's work folders. */
+  async function hidden(): Promise<string[]> {
+    return (await readdir(identityOf().reportDir)).filter((name) =>
+      name.startsWith("."),
+    );
+  }
+
+  test("a run that ended gets its archive before its event: the event, run-finished.json and the lines name it", async () => {
+    await suiteReports();
+    const { build } = realBuild();
+    const archive = join(identityOf().reportDir, "report.tar.gz");
+    const atPublish: boolean[] = [];
+    const { deps, seen } = harness({ exitCode: 0 }, runnerWith("passed"), {
+      bundle: build,
+      config: { secrets: {}, reports: { sshHost: "auto-e2e" } },
+      bus: {
+        publish: (event) => {
+          atPublish.push(existsSync(archive));
+          seen.published.push(event);
+        },
+      },
+    });
+    const result = ended(await runOnce(TASK, deps).done);
+    expect(result.status).toBe("passed");
+    const bundle = { kind: "archive", path: archive, name: NAME() };
+    expect(result.event?.report.bundle).toEqual(bundle);
+    expect(atPublish).toEqual([true]);
+    expect(
+      ((await keptOf("run-finished.json")) as RunFinishedEvent).report.bundle,
+    ).toEqual(bundle);
+    expect((await stat(archive)).mode & 0o777).toBe(0o600);
+    const shown = identityOf().reportDir.slice(checkout.length + 1);
+    const outcome = seen.lines.findIndex((line) =>
+      line.startsWith("bpng bpng-1 ✔ passed"),
+    );
+    expect(seen.lines.slice(outcome + 1, outcome + 3)).toEqual([
+      `bpng bpng-1 report: ${shown}/report.tar.gz · raw: ${shown}`,
+      `bpng bpng-1 fetch: scp auto-e2e:${archive} ${NAME()}.tar.gz && tar -xzf ${NAME()}.tar.gz && rm ${NAME()}.tar.gz`,
+    ]);
+    // The build's own line, with its sizes, before the outcome.
+    expect(
+      seen.lines
+        .slice(0, outcome)
+        .some((line) =>
+          line.startsWith(`bpng bpng-1: Report bundle ${NAME()}: `),
+        ),
+    ).toBe(true);
+    expect(await hidden()).toEqual([]);
+  });
+
+  test("folder mode, Allure keeping its traces: the event names report/, and the build is told the traces", async () => {
+    await suiteReports();
+    const { build, calls } = realBuild();
+    const { deps } = harness({ exitCode: 0 }, runnerWith("passed"), {
+      bundle: build,
+      config: {
+        secrets: {},
+        reports: { bundle: { mode: "folder", traces: "keep" } },
+      },
+    });
+    const result = ended(await runOnce(TASK, deps).done);
+    expect(calls.map((call) => [call.mode, call.traces])).toEqual([
+      ["folder", "keep"],
+    ]);
+    expect(result.event?.report.bundle).toEqual({
+      kind: "folder",
+      path: join(identityOf().reportDir, "report"),
+      name: NAME(),
+    });
+  });
+
+  test("none builds nothing: no bundle, no line, the raw folder as before", async () => {
+    await suiteReports();
+    const { build, calls } = realBuild();
+    const { deps, seen } = harness({ exitCode: 0 }, runnerWith("passed"), {
+      bundle: build,
+      config: { secrets: {}, reports: { bundle: { mode: "none" } } },
+    });
+    const result = ended(await runOnce(TASK, deps).done);
+    expect(result.event?.report.bundle).toBeNull();
+    expect(calls).toEqual([]);
+    expect(existsSync(join(identityOf().reportDir, "report.tar.gz"))).toBe(
+      false,
+    );
+    expect(seen.lines.some((line) => line.includes("bundle"))).toBe(false);
+  });
+
+  test("a tar that fails is a line and no bundle; the run keeps its status", async () => {
+    await suiteReports();
+    const tar = join(stubs, "tar-fail");
+    await writeFile(tar, "#!/bin/sh\necho 'tar: no space' >&2\nexit 2\n", {
+      mode: 0o755,
+    });
+    const { build } = realBuild("ok", { tarBin: tar });
+    const { deps, seen } = harness({ exitCode: 0 }, runnerWith("failed"), {
+      bundle: build,
+    });
+    const result = ended(await runOnce(TASK, deps).done);
+    expect(result.status).toBe("failed");
+    expect(result.event?.report.bundle).toBeNull();
+    expect(
+      seen.lines.find((line) =>
+        line.startsWith("bpng bpng-1: no report bundle: "),
+      ),
+    ).toMatch(/tar/);
+    expect(await hidden()).toEqual([]);
+  });
+
+  test("a bundle over its budget is stopped: no bundle, no temp output, the run's status kept", async () => {
+    await suiteReports();
+    const { build } = realBuild("hang");
+    const { deps, seen } = harness({ exitCode: 0 }, runnerWith("passed"), {
+      bundle: build,
+      bundleBudgetMs: 1_000,
+    });
+    const result = ended(
+      await endsWithin(runOnce(TASK, deps).done, "the run over its budget"),
+    );
+    expect(result.status).toBe("passed");
+    expect(result.event?.report.bundle).toBeNull();
+    expect(seen.lines).toContain(
+      "bpng bpng-1: no report bundle: it took over 1 s, so it was stopped",
+    );
+    expect(await hidden()).toEqual([]);
+    expect(existsSync(join(identityOf().reportDir, "report.tar.gz"))).toBe(
+      false,
+    );
+  });
+
+  for (const level of ["interrupted", "killed"] as const)
+    test(`a stop ${level} mid-bundle ends it: no bundle, no temp output, the run's status kept`, async () => {
+      await suiteReports();
+      const { build } = realBuild("hang");
+      const { deps, seen } = harness({ exitCode: 0 }, runnerWith("passed"), {
+        bundle: build,
+      });
+      const run = runOnce(TASK, deps);
+      // The stub Allure records its call as it starts: the bundle is under way.
+      await expect
+        .poll(() => existsSync(join(stubs, "calls.jsonl")), { timeout: 10_000 })
+        .toBe(true);
+      run.stop(level, `asked: ${level}`);
+      const result = ended(await endsWithin(run.done, `the run ${level}`));
+      expect(result.status).toBe("passed");
+      expect(result.event?.report.bundle).toBeNull();
+      expect(seen.lines).toContain(
+        `bpng bpng-1: no report bundle: the run was stopped: asked: ${level}`,
+      );
+      expect(await hidden()).toEqual([]);
+    });
+
+  test("the run's end and duration are read before the bundle: bundling time is never the run's", async () => {
+    await suiteReports();
+    const { build } = realBuild();
+    const at = { ms: START };
+    const { deps } = harness({ exitCode: 0 }, runnerWith("passed"), {
+      now: () => new Date(at.ms),
+      bundle: (options) => {
+        // The bundle takes a minute on the cycle's clock.
+        at.ms += 60_000;
+        return build(options);
+      },
+    });
+    const result = ended(await runOnce(TASK, deps).done);
+    expect(result.event?.report.bundle?.kind).toBe("archive");
+    expect(result.event?.endedAt).toBe(new Date(START).toISOString());
+    expect(result.event?.durationMs).toBe(0);
+  });
+
+  test("the fetch command is logged verbatim: one line, never wrapped, its spacing kept", async () => {
+    await suiteReports();
+    const { build } = realBuild();
+    const logged: { text: string; verbatim: boolean }[] = [];
+    const { deps } = harness({ exitCode: 0 }, runnerWith("passed"), {
+      bundle: build,
+      config: { secrets: {}, reports: { sshHost: "auto-e2e" } },
+      logger: {
+        line: (_scope, text, options) => {
+          logged.push({ text, verbatim: options?.verbatim === true });
+        },
+      },
+    });
+    ended(await runOnce(TASK, deps).done);
+    const fetch = logged.filter((line) => line.text.includes(" fetch: "));
+    expect(fetch).toHaveLength(1);
+    expect(fetch[0]?.verbatim).toBe(true);
+    // Every other line may wrap.
+    expect(logged.filter((line) => line.verbatim)).toHaveLength(1);
+  });
+
+  test("a drain mid-bundle lets it finish: a drain lets a run end, its bundle with it", async () => {
+    await suiteReports();
+    const { build } = realBuild();
+    let started!: () => void;
+    const bundling = new Promise<void>((settle) => {
+      started = settle;
+    });
+    let release!: () => void;
+    const released = new Promise<void>((settle) => {
+      release = settle;
+    });
+    const { deps } = harness({ exitCode: 0 }, runnerWith("passed"), {
+      bundle: async (options) => {
+        started();
+        await released;
+        return build(options);
+      },
+    });
+    const run = runOnce(TASK, deps);
+    await bundling;
+    run.stop("drained", "the orchestrator was stopped (SIGINT)");
+    release();
+    const result = ended(await run.done);
+    expect(result.event?.report.bundle?.kind).toBe("archive");
+  });
+
+  test("a run killed before its end gets no bundle, and says why", async () => {
+    await suiteReports();
+    const { build, calls } = realBuild();
+    const { deps, seen } = harness(
+      { exitCode: 0 },
+      { runMs: 60_000, ignoreSigint: true, ignoreDrain: true },
+      { bundle: build },
+    );
+    const run = runOnce(TASK, deps);
+    await runnerReady(seen);
+    run.stop("killed", "asked: killed");
+    const result = ended(await run.done);
+    expect(result.status).toBe("killed");
+    expect(result.event?.report.bundle).toBeNull();
+    expect(calls).toEqual([]);
+    expect(seen.lines).toContain(
+      "bpng bpng-1: no report bundle: the run was stopped: asked: killed",
+    );
+  });
+
+  test("a run its launch took past a drain gets no bundle, though no stop reached the cycle", async () => {
+    await suiteReports();
+    const { build, calls } = realBuild();
+    const { deps, seen } = harness(
+      {},
+      {},
+      {
+        bundle: build,
+        launch: async (options) => {
+          await mkdir(options.identity.dir, { recursive: true });
+          await options.onSpawning?.("bddgen");
+          return {
+            stop: () => undefined,
+            done: Promise.resolve({
+              bddgen: { code: 0, signal: null },
+              playwright: { code: null, signal: "SIGKILL" },
+              stop: { level: "killed", why: "killed by its launch" },
+            }),
+          };
+        },
+      },
+    );
+    const result = ended(await runOnce(TASK, deps).done);
+    expect(result.status).toBe("killed");
+    expect(calls).toEqual([]);
+    expect(seen.lines).toContain(
+      "bpng bpng-1: no report bundle: the run was stopped: killed by its launch",
+    );
+  });
+
+  test("a run refused before its folder gets no bundle: nothing is built", async () => {
+    const { build, calls } = realBuild();
+    const { deps, seen } = harness({ exitCode: 0 }, runnerWith("passed"), {
+      bundle: build,
+      claimCell: () => Promise.resolve("the locks are gone"),
+    });
+    const result = ended(await runOnce(TASK, deps).done);
+    expect(result.status).toBe("error");
+    expect(result.event?.report.bundle).toBeNull();
+    expect(calls).toEqual([]);
+    expect(seen.lines.some((line) => line.includes("bundle"))).toBe(false);
+  });
+
+  test("an end that cannot be read still names the bundle built", async () => {
+    await suiteReports();
+    const { build } = realBuild();
+    const { deps } = harness({ exitCode: 0 }, runnerWith("passed"), {
+      bundle: build,
+      end: () => Promise.reject(new Error("unread")),
+    });
+    const result = ended(await runOnce(TASK, deps).done);
+    expect(result.status).toBe("error");
+    expect(result.event?.report.bundle?.path).toBe(
+      join(identityOf().reportDir, "report.tar.gz"),
+    );
+  });
+
+  test("sweeps what killed builds left in the cell's other runs", async () => {
+    await suiteReports();
+    const dead = String(spawnSync(process.execPath, ["-e", ""]).pid);
+    const older = join(
+      identityOf().reportDir,
+      "..",
+      "2026-10-01T00-00-00-000Z-bpng-0",
+    );
+    await mkdir(join(older, `.allure-work-${dead}-deadbeef`, "results"), {
+      recursive: true,
+    });
+    await mkdir(join(older, `.bundle-work-${dead}-deadbeef`), {
+      recursive: true,
+    });
+    // Untouched an hour: a sweep leaves a folder modified within the budget (another host's build).
+    const hourAgo = new Date(Date.now() - 3_600_000);
+    for (const path of [
+      join(older, `.allure-work-${dead}-deadbeef`, "results"),
+      join(older, `.allure-work-${dead}-deadbeef`),
+      join(older, `.bundle-work-${dead}-deadbeef`),
+    ])
+      await utimes(path, hourAgo, hourAgo);
+    const { build } = realBuild();
+    const { deps } = harness({ exitCode: 0 }, runnerWith("passed"), {
+      bundle: build,
+    });
+    ended(await runOnce(TASK, deps).done);
+    expect(await readdir(older)).toEqual([]);
   });
 });

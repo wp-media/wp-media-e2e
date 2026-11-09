@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { execFile, spawn, spawnSync } from "node:child_process";
+import { getEventListeners } from "node:events";
 import {
   chmodSync,
   existsSync,
@@ -18,6 +19,7 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  endsWithin,
   STUB_OUTPUT_HEAD,
   stubCalls,
   writeAllureResults,
@@ -482,10 +484,55 @@ test.describe("generateAllureReport, with a stub CLI", () => {
     const { pid } = await stubStarted();
     stop.abort();
 
-    expect(await generating).toBeInstanceOf(AllureGenerationAbortedError);
+    expect(
+      await endsWithin(generating, "the stopped generation"),
+    ).toBeInstanceOf(AllureGenerationAbortedError);
     expect(isProcessAlive(pid)).toBe(false);
     expectPreviousUntouched(previous);
     expect(workDirs()).toEqual([]);
+  });
+
+  test("a stopped Allure that ignores SIGTERM is killed once its grace is over, nothing put in place", async () => {
+    const bin = writeAllureStub(stubDir, "ignore-term");
+    const previous = writePrevious();
+    const stop = new AbortController();
+
+    const generating = generateAllureReport(
+      options(bin, { signal: stop.signal, killGraceMs: 100 }),
+    ).catch((caught: unknown) => caught);
+    const { pid } = await stubStarted();
+    const stoppedAt = performance.now();
+    stop.abort();
+
+    // Without the SIGKILL it never ends: the spec's timeout fails it.
+    expect(
+      await endsWithin(generating, "the stopped generation"),
+    ).toBeInstanceOf(AllureGenerationAbortedError);
+    // Its own 100 ms grace: neither none nor the 5 s default.
+    expect(performance.now() - stoppedAt).toBeGreaterThanOrEqual(90);
+    expect(performance.now() - stoppedAt).toBeLessThan(3_000);
+    expect(isProcessAlive(pid)).toBe(false);
+    expectPreviousUntouched(previous);
+    expect(workDirs()).toEqual([]);
+  });
+
+  test("leaves nothing armed on its signal once Allure has ended, stopped or not", async () => {
+    const done = new AbortController();
+    await generateAllureReport(
+      options(writeAllureStub(stubDir, "ok"), { signal: done.signal }),
+    );
+    expect(getEventListeners(done.signal, "abort")).toEqual([]);
+
+    const stop = new AbortController();
+    const generating = generateAllureReport(
+      options(writeAllureStub(join(root, "hang stub"), "hang"), {
+        signal: stop.signal,
+      }),
+    ).catch((caught: unknown) => caught);
+    await expect.poll(() => stubCalls(join(root, "hang stub")).length).toBe(1);
+    stop.abort();
+    await endsWithin(generating, "the stopped generation");
+    expect(getEventListeners(stop.signal, "abort")).toEqual([]);
   });
 
   test("a stop before it starts runs nothing", async () => {
@@ -554,7 +601,9 @@ test.describe("generateAllureReport, with a stub CLI", () => {
 
     expect(workDirs()).toEqual([working]);
     stop.abort();
-    expect(await first).toBeInstanceOf(AllureGenerationAbortedError);
+    expect(
+      await endsWithin(first, "the first, stopped generation"),
+    ).toBeInstanceOf(AllureGenerationAbortedError);
   });
 
   test("a report a killed generation left aside goes back before anything else, even when this one fails", async () => {
@@ -621,7 +670,9 @@ test.describe("generateAllureReport, with a stub CLI", () => {
     expect(cwd).toBe(realpathSync(join(runDir, work)));
 
     stop.abort();
-    expect(await generating).toBeInstanceOf(AllureGenerationAbortedError);
+    expect(
+      await endsWithin(generating, "the stopped generation"),
+    ).toBeInstanceOf(AllureGenerationAbortedError);
   });
 
   test("a stop waits for Allure to end, so nothing writes into the work folder once it is gone", async () => {
@@ -632,7 +683,9 @@ test.describe("generateAllureReport, with a stub CLI", () => {
     const { pid } = await stubStarted();
     stop.abort();
 
-    expect(await generating).toBeInstanceOf(AllureGenerationAbortedError);
+    expect(
+      await endsWithin(generating, "the stopped generation"),
+    ).toBeInstanceOf(AllureGenerationAbortedError);
     // Ended before the generation did: its late write landed in a folder removed after it.
     expect(isProcessAlive(pid)).toBe(false);
     expect(workDirs()).toEqual([]);
@@ -650,7 +703,9 @@ test.describe("generateAllureReport, with a stub CLI", () => {
     stop.abort();
     await releaseFifoReader(fifo);
 
-    expect(await generating).toBeInstanceOf(AllureGenerationAbortedError);
+    expect(
+      await endsWithin(generating, "the stopped generation"),
+    ).toBeInstanceOf(AllureGenerationAbortedError);
     expect(stubCalls(stubDir)).toEqual([]);
     expect(lstatSync(fifo).isFIFO()).toBe(true);
     expect(existsSync(join(runDir, "allure"))).toBe(false);

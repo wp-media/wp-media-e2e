@@ -45,6 +45,19 @@ export interface FinishedScenario {
   readonly error?: string;
 }
 
+/**
+ * The run's download bundle, as the orchestrator prepared it after the run: what Slack's `Report:`
+ * command fetches. Added within version 1 — a new field misleads no subscriber that ignores it.
+ */
+export interface RunBundle {
+  /** `archive`: `report.tar.gz`, one top-level folder `name`; `folder`: the unpacked `report/`. */
+  readonly kind: "archive" | "folder";
+  /** The archive or folder, absolute. */
+  readonly path: string;
+  /** `<product>-<cell>-<RUN_ID>`: the folder the archive unpacks to. */
+  readonly name: string;
+}
+
 /** A run has ended. */
 export interface RunFinishedEvent {
   readonly v: typeof RUN_FINISHED_VERSION;
@@ -118,6 +131,11 @@ export interface RunFinishedEvent {
     readonly dir: string | null;
     /** The run's log, absolute. */
     readonly log: string | null;
+    /**
+     * Its download bundle (the archive when there is one); `null` when none was built — the mode is
+     * `none`, the run never ran or was stopped past a drain, or building failed or ran out of time.
+     */
+    readonly bundle: RunBundle | null;
   };
 }
 
@@ -145,8 +163,10 @@ export interface RunFinishedInput {
   readonly facts?: RunFactsRead;
   readonly reportDir: string;
   readonly log: string;
-  /** `false` for a run that never had a folder: its report and log are then `null`. */
+  /** `false` for a run that never had a folder: its report, log and bundle are then `null`. */
   readonly hadFolder?: boolean;
+  /** The run's download bundle, when one was built. */
+  readonly bundle?: RunBundle | null;
   /** The secret values the orchestrator holds, masked in every text the run's files gave. */
   readonly secrets: readonly string[];
 }
@@ -213,8 +233,12 @@ export function buildRunFinished(input: RunFinishedInput): RunFinishedEvent {
     ),
     report:
       input.hadFolder === false
-        ? { dir: null, log: null }
-        : { dir: input.reportDir, log: input.log },
+        ? { dir: null, log: null, bundle: null }
+        : {
+            dir: input.reportDir,
+            log: input.log,
+            bundle: input.bundle ?? null,
+          },
   };
 }
 

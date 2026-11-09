@@ -1,6 +1,7 @@
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { buildReportBundle } from "../src/common/reporting/report-bundle";
 import type { CheckedTask } from "./config/check";
 import {
   DEFAULT_CONFIG_PATH,
@@ -211,6 +212,8 @@ export type LoopSeams = Partial<
     | "nextNumber"
     | "end"
     | "prune"
+    | "bundle"
+    | "bundleBudgetMs"
   >
 >;
 
@@ -843,6 +846,7 @@ class Orchestrator {
       logger,
       bus,
       datatorPayload,
+      bundle: buildReportBundle,
       once: this.options.once === true,
       ...(this.deps.now === undefined ? {} : { now: this.deps.now }),
       ...this.deps.loop,

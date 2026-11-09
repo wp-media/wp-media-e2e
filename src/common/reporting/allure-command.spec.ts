@@ -11,7 +11,11 @@ import {
 import { join } from "node:path";
 import { promisify } from "node:util";
 
-import { writeAllureResults, writeServeStub } from "../__fixtures__/allure";
+import {
+  endsWithin,
+  writeAllureResults,
+  writeServeStub,
+} from "../__fixtures__/allure";
 import { releaseFifoReader } from "../__fixtures__/fifo";
 import { removeTempRoot, tempRoot } from "../__fixtures__/report-tree";
 import {
@@ -545,7 +549,7 @@ test.describe("npm run report:allure, through the real script and Allure", () =>
     expect(usage.stderr).toContain("Usage: npm run report:allure");
   });
 
-  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
     test(`${signal} to its process group stops generation cleanly and exits as the signal would`, async () => {
       const run = makeRun("backwpup", "pro@nginx", "r", 1);
       // A history that holds the generation until it is opened for writing.
@@ -578,10 +582,16 @@ test.describe("npm run report:allure, through the real script and Allure", () =>
       process.kill(-pid, signal);
       await releaseFifoReader(fifo);
 
-      expect(await ended).toBe(signal === "SIGINT" ? 130 : 143);
+      // tsx relays SIGINT and SIGTERM and exits as its script did; SIGHUP ends tsx itself, while
+      // the script under it, in the same group, gets it too and stops Allure (the checks below).
+      expect(await endsWithin(ended, "the stopped script")).toBe(
+        { SIGINT: 130, SIGTERM: 143, SIGHUP: null }[signal],
+      );
       expect(stderr).toContain("Allure generation was stopped");
       expect(workDirs()).toEqual([]);
       expect(existsSync(join(run, "allure"))).toBe(false);
+      // Allure, in a group of its own, was ended by the script: no process names the run any more.
+      expect(spawnSync("pgrep", ["-f", run]).status).toBe(1);
     });
   }
 });

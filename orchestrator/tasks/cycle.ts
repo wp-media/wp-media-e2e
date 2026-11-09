@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import {
   buildRunFinished,
+  type RunBundle,
   type RunFinishedEvent,
   type RunFinishedInput,
 } from "../events/run-finished";
@@ -14,6 +15,12 @@ import {
   type TaskActivity,
 } from "./activity";
 import type { DatatorPayload } from "../notify/datator";
+import {
+  bundleSettings,
+  prepareBundle,
+  runBundleName,
+  type ReportBundler,
+} from "../runs/bundle";
 import type { RunCommands } from "../runs/commands";
 import { endRun, type RunEnd, type RunEndInput } from "../runs/end";
 import { runEnvironment } from "../runs/environment";
@@ -41,7 +48,12 @@ import {
   type RunningProcess,
   type RunProcessName,
 } from "../runs/record";
-import { INITIAL_RUN_STOP, stepRunStop, type StopLevel } from "../runs/stop";
+import {
+  INITIAL_RUN_STOP,
+  STOP_RANK,
+  stepRunStop,
+  type StopLevel,
+} from "../runs/stop";
 import { writeJsonAtomic } from "../state/atomic";
 import { nextRunNumber } from "../state/counter";
 import {
@@ -52,6 +64,7 @@ import {
 } from "../state/run-retention";
 import { failureLine, safeLine, textOf } from "../text";
 import {
+  bundleLines,
   eventTask,
   furtherStop,
   MAX_RUN_FAILURE_LENGTH,
@@ -69,8 +82,9 @@ export type { CycleTask } from "./run-lines";
 
 /**
  * One run of a task, from its number to its `run.finished`: the counter hands out the number, the
- * run is launched with its record written before each process is spawned and once it runs, then its
- * end is read and kept — its `run.finished` and the Datator record it is sent beside its record, then
+ * run is launched with its record written before each process is spawned and once it runs, its
+ * download bundle prepared once its processes have ended (`runs/bundle.ts`), then its end is read and
+ * kept — its `run.finished` and the Datator record it is sent beside its record, then
  * the `ended` record —, told in the log, published, and the task's old run folders pruned.
  *
  * Nothing a dependency does — a throw, a rejection, a logger that fails — escapes: each failure is a
@@ -125,8 +139,11 @@ export interface CycleDeps {
   readonly stateDir: string;
   /** The checkout the runs start in: absolute. */
   readonly checkout: string;
-  /** The config's runs settings and secrets, for the run's environment and pruning. */
-  readonly config: Pick<OrchestratorConfig, "runs" | "secrets">;
+  /**
+   * The config's runs settings and secrets, for the run's environment and pruning; its `reports`, for
+   * the bundle and the `scp` host its lines name.
+   */
+  readonly config: Pick<OrchestratorConfig, "runs" | "secrets" | "reports">;
   /** Every secret value the orchestrator holds (`allSecretValues(config, tasks)`), masked in every line. */
   readonly secrets: readonly string[];
   /** The orchestrator's environment: only what `runEnvironment` inherits is read. */
@@ -180,6 +197,13 @@ export interface CycleDeps {
    * `error`, nothing launched. Without it no lock is named: for specs of the cycle alone.
    */
   readonly claimCell?: (record: string) => Promise<string | undefined>;
+  /**
+   * Builds a run's report bundle (`buildReportBundle`) once its processes have ended, as
+   * `config.reports.bundle` says. Without it no bundle is built: for specs of the cycle alone.
+   */
+  readonly bundle?: ReportBundler;
+  /** The bundle's time limit; `BUNDLE_BUDGET_MS` by default. */
+  readonly bundleBudgetMs?: number;
 }
 
 /** What a run that ended may record: its writer, and how its processes ended. */
@@ -229,6 +253,8 @@ class Cycle {
   private readonly now: () => Date;
   /** The run's id once it has begun and until its end is told: only then is a stop told. */
   private begunId: string | undefined;
+  /** Aborted by a stop past a drain: it ends the bundle's build, or keeps it from starting. */
+  private readonly bundleStop = new AbortController();
 
   /**
    * @param task - the task.
@@ -252,6 +278,7 @@ class Cycle {
   stop(level: StopLevel, why: string): void {
     const safe = safeLine(why, MAX_REASON_LENGTH, this.deps.secrets);
     this.asked = furtherStop(this.asked, { level, why: safe });
+    this.stopBundle(this.asked);
     this.forward();
     const id = this.begunId;
     if (id !== undefined)
@@ -499,6 +526,8 @@ class Cycle {
       return result.kind === "ended" ? { ...result, unwatched: true } : result;
     }
     const endedAt = this.now();
+    // After the reporters (the runner has exited), before the event: the event names the bundle.
+    const bundle = await this.bundle(identity, launch);
     let end: RunEnd | undefined;
     try {
       end = await (this.deps.end ?? endRun)({
@@ -507,6 +536,7 @@ class Cycle {
         launch,
         secrets: this.deps.secrets,
         endedAt,
+        bundle,
       });
     } catch (error) {
       this.say(
@@ -517,9 +547,58 @@ class Cycle {
         { writer, launch },
         endedAt,
         unreadOutcome(launch.stop, error, this.deps.secrets),
+        true,
+        bundle,
       );
     }
     return this.conclude(identity, { writer, launch }, endedAt, end.event);
+  }
+
+  /**
+   * Prepares the run's download bundle, as `config.reports.bundle` says; none without
+   * {@link CycleDeps.bundle}. A stop past a drain — asked of the cycle, or taken by the launch — keeps
+   * it from starting, or ends it. Never rejects.
+   *
+   * @param identity - the run.
+   * @param launch - how its processes ended.
+   * @returns the event's bundle, or `null`.
+   */
+  private async bundle(
+    identity: RunIdentity,
+    launch: LaunchResult,
+  ): Promise<RunBundle | null> {
+    const build = this.deps.bundle;
+    if (build === undefined) return null;
+    this.stopBundle(launch.stop);
+    try {
+      return await prepareBundle({
+        reportDir: identity.reportDir,
+        name: runBundleName(this.task.product, this.task.cell, identity.runId),
+        settings: bundleSettings(this.deps.config.reports),
+        stop: this.bundleStop.signal,
+        ...(this.deps.bundleBudgetMs === undefined
+          ? {}
+          : { budgetMs: this.deps.bundleBudgetMs }),
+        build,
+        say: (line) => {
+          this.say(`${identity.id}: ${line}`);
+        },
+      });
+    } catch (error) {
+      this.say(`${identity.id}: no report bundle: ${this.failure(error)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Ends the bundle — or keeps it from starting — once a stop goes past a drain: a drain lets a run
+   * finish, and its bundle with it; an interrupt or a kill wants the orchestrator out.
+   *
+   * @param stop - the stop asked for or taken.
+   */
+  private stopBundle(stop: StopAsked | LaunchResult["stop"]): void {
+    if (STOP_RANK[stop.level] < STOP_RANK.interrupted) return;
+    this.bundleStop.abort("why" in stop ? stop.why : undefined);
   }
 
   /**
@@ -588,6 +667,7 @@ class Cycle {
    * @param ending - its `run.finished`, or the outcome to build one from.
    * @param hadFolder - `false` for a run refused before its launch made its folder: its event then
    *   points at no report or log.
+   * @param bundle - the run's download bundle, for an event built here.
    * @returns how it ended.
    */
   private async conclude(
@@ -596,11 +676,12 @@ class Cycle {
     endedAt: Date,
     ending: RunFinishedEvent | RunOutcome,
     hadFolder = true,
+    bundle: RunBundle | null = null,
   ): Promise<RunResult> {
     const event =
       "type" in ending
         ? ending
-        : this.event(identity, endedAt, ending, hadFolder);
+        : this.event(identity, endedAt, ending, hadFolder, bundle);
     if (event === undefined) {
       await this.prune(identity);
       return { kind: "ended", id: identity.id, status: "error", endedAt };
@@ -612,6 +693,13 @@ class Cycle {
         opensBlock: true,
       },
     );
+    for (const line of bundleLines(
+      event,
+      (path) => this.show(path),
+      this.deps.config.reports?.sshHost,
+      this.deps.secrets,
+    ))
+      this.say(line.text, line.verbatim ? { verbatim: true } : undefined);
     try {
       this.deps.bus.publish(event);
     } catch (error) {
@@ -637,6 +725,7 @@ class Cycle {
    * @param endedAt - when it ended.
    * @param outcome - its outcome.
    * @param hadFolder - whether the run had a folder of its own.
+   * @param bundle - the run's download bundle.
    * @returns the event, or `undefined`.
    */
   private event(
@@ -644,6 +733,7 @@ class Cycle {
     endedAt: Date,
     outcome: RunOutcome,
     hadFolder: boolean,
+    bundle: RunBundle | null,
   ): RunFinishedEvent | undefined {
     try {
       return (this.deps.buildEvent ?? buildRunFinished)({
@@ -656,6 +746,7 @@ class Cycle {
         reportDir: identity.reportDir,
         log: identity.log,
         hadFolder,
+        bundle,
         secrets: this.deps.secrets,
       });
     } catch (error) {

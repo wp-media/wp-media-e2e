@@ -212,7 +212,8 @@ Content (categories, widgets, single-file output) is set in [`allurerc.mjs`](all
 is [`allure-report.ts`](src/common/reporting/allure-report.ts).
 
 A run's **download bundle** ([`report-bundle.ts`](src/common/reporting/report-bundle.ts),
-`buildReportBundle`; the orchestrator will call it at each run's end) puts only what a person opens —
+`buildReportBundle`; the orchestrator builds one after each run, as `reports.bundle` says, and Slack
+gives the command that downloads and unpacks it) puts only what a person opens —
 a landing `index.html`, `playwright/`, `cucumber/`, a fresh `allure/` and `run-facts.json`, never
 `allure-results/` or `results.jsonl` — in `<run>/report/` (0700) and/or `<run>/report.tar.gz` (0600),
 whose one top-level entry is `<product>-<cell>-<RUN_ID>/` (never starting with `-`, `.` or `@`, no

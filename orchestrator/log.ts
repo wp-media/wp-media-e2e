@@ -96,6 +96,12 @@ export interface Logger {
 export interface LineOptions {
   /** It starts a run's end or a stop's escalation: on a terminal, an empty line comes first. */
   readonly opensBlock?: boolean;
+  /**
+   * Never wrapped on a terminal: a command meant to be copied stays one line (the terminal soft-wraps
+   * it, and copying a soft-wrapped line yields it whole), never split into lines a shell would run
+   * one by one.
+   */
+  readonly verbatim?: boolean;
 }
 
 /**
@@ -697,6 +703,7 @@ class TwoWayLogger implements Logger {
               at,
               ...safeParts(scope, text, this.secrets),
               ...(options.opensBlock === true ? { opensBlock: true } : {}),
+              ...(options.verbatim === true ? { verbatim: true } : {}),
             }),
       file: `${formatFileLine(at, scope, text, this.secrets)}\n`,
     };

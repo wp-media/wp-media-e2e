@@ -8,6 +8,7 @@ import {
   readdirSync,
   type Stats,
 } from "node:fs";
+import { lstat, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
 /**
@@ -90,6 +91,92 @@ export function treeBytes(root: string): number {
     }
   }
   return bytes;
+}
+
+/**
+ * Visits the status of a folder and of everything in it, without following a link, one folder at a
+ * time, asynchronously — so a long walk never blocks the event loop, and a stop ends it. An entry that
+ * cannot be read is passed over.
+ *
+ * @param root - the folder.
+ * @param visit - gets each entry's own status, the folder's first.
+ * @param signal - ends the walk early, before its next folder; what was visited stays visited.
+ */
+async function walkTree(
+  root: string,
+  visit: (stats: Stats) => void,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  const top = await lstat(root).catch(() => undefined);
+  if (top === undefined) return;
+  visit(top);
+  if (!top.isDirectory()) return;
+  const pending = [root];
+  for (let dir = pending.pop(); dir !== undefined; dir = pending.pop()) {
+    if (signal?.aborted === true) return;
+    const names = await readdir(dir).catch(() => [] as string[]);
+    for (const name of names) {
+      const path = join(dir, name);
+      const stats = await lstat(path).catch(() => undefined);
+      if (stats === undefined) continue;
+      visit(stats);
+      if (stats.isDirectory()) pending.push(path);
+    }
+  }
+}
+
+/**
+ * {@link treeBytes}, walked asynchronously and stopped by `signal`: a bundle's size is measured
+ * within its budget, never past a stop.
+ *
+ * @param root - the folder.
+ * @param signal - ends the walk early; the sum is then partial, so the caller checks it.
+ * @returns the sum; 0 when it holds nothing readable.
+ */
+export async function treeBytesWithin(
+  root: string,
+  signal?: AbortSignal,
+): Promise<number> {
+  let bytes = 0;
+  await walkTree(
+    root,
+    (stats) => {
+      if (stats.isFile()) bytes += stats.size;
+    },
+    signal,
+  );
+  return bytes;
+}
+
+/**
+ * Whether nothing in a folder — the folder, any entry at any depth, a link itself — was modified
+ * (`mtime`) for longer than `idleMs`: how a folder another host may still be writing is told from one
+ * left behind, when its owner's pid says nothing (a pid is per host). Writing a file, or adding,
+ * removing or renaming an entry, modifies it or its folder.
+ *
+ * @param root - the folder.
+ * @param idleMs - how long it must have been untouched.
+ * @param signal - ends the walk early: then it is not known untouched (`false`).
+ * @param now - the clock, in epoch milliseconds; `Date.now` by default.
+ * @returns `true` when untouched that long; `false` when touched since, absent, or stopped.
+ */
+export async function untouchedFor(
+  root: string,
+  idleMs: number,
+  signal?: AbortSignal,
+  now: () => number = Date.now,
+): Promise<boolean> {
+  let newest = Number.NEGATIVE_INFINITY;
+  await walkTree(
+    root,
+    (stats) => {
+      newest = Math.max(newest, stats.mtimeMs);
+    },
+    signal,
+  );
+  if (signal?.aborted === true || newest === Number.NEGATIVE_INFINITY)
+    return false;
+  return now() - newest > idleMs;
 }
 
 /**

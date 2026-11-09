@@ -88,6 +88,25 @@ test.describe("styleLine", () => {
     expect(lines.map((line) => line.slice(15)).join(" ")).toBe(words.join(" "));
   });
 
+  test("never wraps a verbatim line at any width: one line, the command whole, its spacing kept", () => {
+    const command =
+      "scp auto-e2e:'/srv/my  e2e/R/report.tar.gz' b-c-R.tar.gz && tar -xzf b-c-R.tar.gz && rm b-c-R.tar.gz";
+    const text = `bpng-12 fetch: ${command}`;
+    const plain = createPalette({ tty: true, color: false, unicode: true });
+    for (const width of [20, 40, 80, 120]) {
+      expect(
+        styleLine(
+          { at: AT, scope: "bpng", text, verbatim: true },
+          styleOf(width, plain),
+        ),
+      ).toEqual([`10:15:30 bpng  ${text}`]);
+    }
+    // The same line, not verbatim, wraps.
+    expect(
+      styleLine({ at: AT, scope: "bpng", text }, styleOf(40, plain)).length,
+    ).toBeGreaterThan(1);
+  });
+
   test("never breaks a word: a path wider than the room takes a line of its own, whole", () => {
     const path = `.orchestrator/runs/bpng-12/${"x".repeat(60)}/run.log`;
     const lines = styleLine(

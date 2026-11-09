@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { execFile, spawn, spawnSync } from "node:child_process";
+import { getEventListeners } from "node:events";
 import {
   chmodSync,
   existsSync,
@@ -19,7 +20,11 @@ import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { writeAllureResults, writeAllureStub } from "../__fixtures__/allure";
+import {
+  endsWithin,
+  writeAllureResults,
+  writeAllureStub,
+} from "../__fixtures__/allure";
 import { removeTempRoot, tempRoot } from "../__fixtures__/report-tree";
 import { listTarGz } from "../__fixtures__/tar-listing";
 import {
@@ -40,6 +45,7 @@ import {
   bundleLog,
   inspectReportFolder,
   placeFolder,
+  releaseLeftoverWorkDirs,
   tarArgs,
   tarEnv,
   type ReportBundle,
@@ -172,9 +178,13 @@ async function unpack(archive: string): Promise<string> {
 
 /**
  * Writes a stub `tar` that records its pid, then fails; or hangs until a signal ends it; or hangs and,
- * on SIGTERM, writes into its working folder (the build's work folder) 300 ms later, then exits.
+ * on SIGTERM, writes into its working folder (the build's work folder) 300 ms later, then exits; or
+ * hangs ignoring SIGTERM, so only SIGKILL ends it; or packs with the system `tar` after 1.5 s
+ * (`slow-ok`). A hanging one ends on its own after 60 s.
  */
-function tarStub(behaviour: "fail" | "hang" | "slow-stop"): {
+function tarStub(
+  behaviour: "fail" | "hang" | "slow-stop" | "ignore-term" | "slow-ok",
+): {
   bin: string;
   pidFile: string;
 } {
@@ -184,9 +194,14 @@ function tarStub(behaviour: "fail" | "hang" | "slow-stop"): {
   const pidFile = `${bin}.pid`;
   const scripts = {
     fail: `echo "tar: cannot write" >&2\nexit 2\n`,
-    hang: `exec sleep 600\n`,
+    // 60 s, not forever: a spec that fails to stop one never leaves it running.
+    hang: `exec sleep 60\n`,
+    // An ignored signal stays ignored across `exec`: `sleep` itself ignores SIGTERM.
+    "ignore-term": `trap '' TERM\nexec sleep 60\n`,
     // `wait` returns on a trapped signal; `sleep` in the foreground would hold the trap back.
-    "slow-stop": `trap 'kill $!; sleep 0.3; mkdir -p "$PWD/late"; exit 143' TERM\nsleep 600 &\nwait\n`,
+    "slow-stop": `trap 'kill $!; sleep 0.3; mkdir -p "$PWD/late"; exit 143' TERM\nsleep 60 &\nwait\n`,
+    // Packs for real after 1.5 s; a signal in that time ends it as it would end `tar`.
+    "slow-ok": `sleep 1.5\nexec tar "$@"\n`,
   };
   writeFileSync(bin, `#!/bin/sh\necho $$ > "$0.pid"\n${scripts[behaviour]}`);
   chmodSync(bin, 0o755);
@@ -918,9 +933,117 @@ test.describe("buildReportBundle: stopping and killing", () => {
 
     stop.abort();
 
-    expect(await building).toBeInstanceOf(ReportBundleAbortedError);
+    expect(await endsWithin(building, "the stopped build")).toBeInstanceOf(
+      ReportBundleAbortedError,
+    );
     expect(alive(pid)).toBe(false);
     expect(runEntries()).toEqual(RAW);
+  });
+
+  test("a stopped tar that ignores SIGTERM is killed once its grace is over, nothing put in place", async () => {
+    const { bin, pidFile } = tarStub("ignore-term");
+    const stop = new AbortController();
+    const building = buildReportBundle(
+      options({ tarBin: bin, signal: stop.signal, killGraceMs: 100 }),
+    ).catch((caught: unknown) => caught);
+    const pid = await stubPid(pidFile);
+
+    const stoppedAt = performance.now();
+    stop.abort();
+
+    // Without the SIGKILL it never ends: the deadline fails it.
+    expect(await endsWithin(building, "the stopped build")).toBeInstanceOf(
+      ReportBundleAbortedError,
+    );
+    // Its own 100 ms grace: neither none nor the 5 s default.
+    expect(performance.now() - stoppedAt).toBeGreaterThanOrEqual(90);
+    expect(performance.now() - stoppedAt).toBeLessThan(3_000);
+    expect(alive(pid)).toBe(false);
+    expect(runEntries()).toEqual(RAW);
+  });
+
+  test("a stopped Allure that ignores SIGTERM is killed through the bundle's own grace", async () => {
+    const stop = new AbortController();
+    const building = buildReportBundle(
+      options({
+        allureBin: writeAllureStub(stubDir, "ignore-term"),
+        signal: stop.signal,
+        killGraceMs: 100,
+      }),
+    ).catch((caught: unknown) => caught);
+    await expect
+      .poll(() => existsSync(join(stubDir, "calls.jsonl")))
+      .toBe(true);
+
+    const stoppedAt = performance.now();
+    stop.abort();
+
+    expect(await endsWithin(building, "the stopped build")).toBeInstanceOf(
+      ReportBundleAbortedError,
+    );
+    // The bundle's 100 ms grace: neither none nor Allure's default 5 s.
+    expect(performance.now() - stoppedAt).toBeGreaterThanOrEqual(90);
+    expect(performance.now() - stoppedAt).toBeLessThan(3_000);
+    expect(runEntries()).toEqual(RAW);
+  });
+
+  test("leaves nothing armed on its signal once tar and Allure have ended", async () => {
+    const done = new AbortController();
+    await buildReportBundle(options({ signal: done.signal }));
+    expect(getEventListeners(done.signal, "abort")).toEqual([]);
+  });
+
+  test("a SIGINT to the builder's process group mid-Allure and mid-tar reaches neither: a drain still gets a full bundle", async () => {
+    const tar = tarStub("slow-ok");
+    const allureStubs = join(root, "slow allure");
+    const module = pathToFileURL(join(import.meta.dirname, "report-bundle.ts"));
+    const result = join(root, "result.json");
+    // A builder in a group of its own, standing in for the orchestrator: a SIGINT is its drain, so it
+    // ignores it and goes on — as a terminal's Ctrl-C reaches every process of its group.
+    const child = spawn(
+      process.execPath,
+      [
+        "--import",
+        import.meta.resolve("tsx"),
+        "--input-type=module",
+        "--eval",
+        `import { writeFileSync } from "node:fs";
+         process.on("SIGINT", () => undefined);
+         const { buildReportBundle } = await import(${JSON.stringify(module.href)});
+         const built = await buildReportBundle(${JSON.stringify(
+           options({
+             allureBin: writeAllureStub(allureStubs, "slow-ok"),
+             tarBin: tar.bin,
+           }),
+         )});
+         writeFileSync(${JSON.stringify(result)}, JSON.stringify({ archive: built.archive?.path ?? null, allureError: built.allureError }));`,
+      ],
+      { stdio: "ignore", detached: true },
+    );
+    const ended = new Promise<number | null>((settle) =>
+      child.once("close", settle),
+    );
+    const group = child.pid;
+    if (group === undefined) throw new Error("the builder did not start");
+    // Mid-Allure: the stub has recorded its call and blocks 1.5 s.
+    const quickly = { intervals: [20], timeout: 10_000 };
+    await expect
+      .poll(() => existsSync(join(allureStubs, "calls.jsonl")), quickly)
+      .toBe(true);
+    process.kill(-group, "SIGINT");
+    // Mid-tar: the stub has recorded its pid and waits 1.5 s before packing.
+    await expect.poll(() => existsSync(tar.pidFile), quickly).toBe(true);
+    process.kill(-group, "SIGINT");
+
+    expect(await endsWithin(ended, "the builder")).toBe(0);
+    expect(JSON.parse(readFileSync(result, "utf8"))).toEqual({
+      archive: join(runDir, BUNDLE_ARCHIVE),
+      allureError: null,
+    });
+    const listed = listTarGz(join(runDir, BUNDLE_ARCHIVE));
+    expect(listed.map((entry) => entry.path)).toContain(
+      `${NAME}/allure/awesome/index.html`,
+    );
   });
 
   test("a stop waits for tar to end, so nothing writes into the work folder once it is gone", async () => {
@@ -933,7 +1056,9 @@ test.describe("buildReportBundle: stopping and killing", () => {
 
     stop.abort();
 
-    expect(await building).toBeInstanceOf(ReportBundleAbortedError);
+    expect(await endsWithin(building, "the stopped build")).toBeInstanceOf(
+      ReportBundleAbortedError,
+    );
     // A build that did not wait returns while tar still runs; once tar ends it has written.
     await expect.poll(() => alive(pid)).toBe(false);
     expect(runEntries()).toEqual(RAW);
@@ -953,7 +1078,9 @@ test.describe("buildReportBundle: stopping and killing", () => {
 
     stop.abort();
 
-    expect(await building).toBeInstanceOf(ReportBundleAbortedError);
+    expect(await endsWithin(building, "the stopped build")).toBeInstanceOf(
+      ReportBundleAbortedError,
+    );
     expect(runEntries()).toEqual(RAW);
   });
 
@@ -1010,6 +1137,39 @@ test.describe("buildReportBundle: stopping and killing", () => {
     expect(existsSync(join(runDir, allureWork))).toBe(true);
   });
 
+  test("releaseLeftoverWorkDirs: both kinds of ended work folder go, an earlier report/ put back; a live one's stay", async () => {
+    const deadOwner = String(deadPid());
+    // A build killed between moving report/ aside and moving the new one in.
+    const killedBuild = `.bundle-work-${deadOwner}-deadbeef`;
+    mkdirSync(join(runDir, killedBuild, "previous"), { recursive: true });
+    writeFileSync(join(runDir, killedBuild, "previous", "index.html"), "old");
+    writeFileSync(
+      join(runDir, killedBuild, "target"),
+      join(runDir, BUNDLE_DIR),
+    );
+    const killedAllure = `.allure-work-${deadOwner}-0123abcd`;
+    mkdirSync(join(runDir, killedAllure, "results"), { recursive: true });
+    // This process's, in use by no build: as stale as a dead one's.
+    const ownIdle = `.bundle-work-${String(process.pid)}-aaaaaaaa`;
+    mkdirSync(join(runDir, ownIdle));
+    // pid 1 runs everywhere, and is never this process.
+    const liveBuild = ".bundle-work-1-0123abcd";
+    const liveAllure = ".allure-work-1-0123abcd";
+    mkdirSync(join(runDir, liveBuild));
+    mkdirSync(join(runDir, liveAllure));
+
+    await releaseLeftoverWorkDirs(runDir);
+
+    expect(runEntries().filter((name) => name.startsWith("."))).toEqual(
+      [liveAllure, liveBuild].sort(),
+    );
+    expect(readFileSync(join(runDir, BUNDLE_DIR, "index.html"), "utf8")).toBe(
+      "old",
+    );
+    // Never rejects, even for a run folder that is gone.
+    await releaseLeftoverWorkDirs(join(cellDir, "gone"));
+  });
+
   test("two builds of one run in one process leave each other's work folder alone", async () => {
     const { bin, pidFile } = tarStub("hang");
     const stop = new AbortController();
@@ -1023,7 +1183,9 @@ test.describe("buildReportBundle: stopping and killing", () => {
 
     expect(workDirs()).toEqual([working]);
     stop.abort();
-    expect(await first).toBeInstanceOf(ReportBundleAbortedError);
+    expect(await endsWithin(first, "the first, stopped build")).toBeInstanceOf(
+      ReportBundleAbortedError,
+    );
   });
 });
 

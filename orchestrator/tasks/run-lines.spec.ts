@@ -1,8 +1,12 @@
 import { test, expect } from "@playwright/test";
 
 import { finishedEvent } from "../__fixtures__/run-finished";
+import type { RunBundle } from "../events/run-finished";
+import { fitsSlack, MAX_SHOWN, slackMessage } from "../notify/slack";
+import { downloadCommand } from "../runs/bundle";
 import type { StopLevel } from "../runs/stop";
 import {
+  bundleLines,
   eventTask,
   furtherStop,
   MAX_RUN_FAILURE_LENGTH,
@@ -139,7 +143,7 @@ test.describe("outcomeLine", () => {
         skipped: 0,
         didNotRun: 0,
       },
-      report: { dir: null, log: null },
+      report: { dir: null, log: null, bundle: null },
     });
     expect(outcomeLine(event, AS_IS)).toBe(
       "bpng-12 ✘ error · the run could not start: gone · 0s",
@@ -292,5 +296,100 @@ test.describe("notStartedOutcome", () => {
     expect(notStartedOutcome("", []).reason).toBe(
       "the run could not start: failed",
     );
+  });
+});
+
+test.describe("bundleLines", () => {
+  const DIR = "/home/e2e/reports/backwpup/pro@nginx/R";
+  const ARCHIVE: RunBundle = {
+    kind: "archive",
+    path: `${DIR}/report.tar.gz`,
+    name: "backwpup-pro@nginx-R",
+  };
+  /** The event with this bundle. */
+  const withBundle = (bundle: RunBundle | null, dir: string | null = DIR) =>
+    finishedEvent({ report: { dir, log: "/home/e2e/run.log", bundle } });
+  /** Paths shown from the checkout, as the cycle shows them. */
+  const show = (path: string): string => showPath(path, "/home/e2e");
+
+  /** The report line, wrappable. */
+  const REPORT_LINE = {
+    text: "bpng-12 report: reports/backwpup/pro@nginx/R/report.tar.gz · raw: reports/backwpup/pro@nginx/R",
+    verbatim: false,
+  };
+
+  test("names the bundle and the raw folder, then the command that fetches it, verbatim", () => {
+    expect(bundleLines(withBundle(ARCHIVE), show, "auto-e2e", [])).toEqual([
+      REPORT_LINE,
+      {
+        text: `bpng-12 fetch: scp auto-e2e:${DIR}/report.tar.gz backwpup-pro@nginx-R.tar.gz && tar -xzf backwpup-pro@nginx-R.tar.gz && rm backwpup-pro@nginx-R.tar.gz`,
+        verbatim: true,
+      },
+    ]);
+  });
+
+  test("without an scp host, the paths only", () => {
+    expect(bundleLines(withBundle(ARCHIVE), show, undefined, [])).toEqual([
+      REPORT_LINE,
+    ]);
+  });
+
+  test("a command Slack would not show whole is not shown either: never a cut command", () => {
+    const long = { ...ARCHIVE, path: `/${"p".repeat(600)}/report.tar.gz` };
+    expect(bundleLines(withBundle(long), show, "auto-e2e", [])).toHaveLength(1);
+  });
+
+  test("Slack's rule decides at the boundary: a command that fits raw but not escaped is left out, as Slack leaves it", () => {
+    /** The archive under a folder of `n` characters. */
+    const under = (n: number): RunBundle => ({
+      ...ARCHIVE,
+      path: `/${"p".repeat(n)}/report.tar.gz`,
+    });
+    // The command's raw length is n + a fixed part; its escaped length 16 more (each `&` of the two `&&` is `&amp;`).
+    const fixed = downloadCommand(under(0), "auto-e2e").length;
+    const fitsEscaped = MAX_SHOWN - 16 - fixed;
+    for (const [n, shown] of [
+      [fitsEscaped, true],
+      // Fits raw (≤ 600), not escaped (> 600): the terminal follows Slack.
+      [fitsEscaped + 1, false],
+      [MAX_SHOWN - fixed, false],
+    ] as const) {
+      const command = downloadCommand(under(n), "auto-e2e");
+      expect(command.length <= MAX_SHOWN).toBe(true);
+      expect(fitsSlack(command)).toBe(shown);
+      expect(
+        bundleLines(withBundle(under(n)), show, "auto-e2e", []),
+      ).toHaveLength(shown ? 2 : 1);
+      expect(
+        slackMessage(
+          finishedEvent({ report: { dir: DIR, log: null, bundle: under(n) } }),
+          {
+            sshHost: "auto-e2e",
+          },
+        ).includes("scp auto-e2e:"),
+      ).toBe(shown);
+    }
+  });
+
+  test("a command the log would change is left out: a run of spaces made one, or a secret masked", () => {
+    const spaced = { ...ARCHIVE, path: "/home/e2e  two/report.tar.gz" };
+    expect(bundleLines(withBundle(spaced), show, "auto-e2e", [])).toHaveLength(
+      1,
+    );
+    const secret = "s3cr3t-value-1234";
+    const masked = { ...ARCHIVE, path: `/home/${secret}/report.tar.gz` };
+    expect(
+      bundleLines(withBundle(masked), show, "auto-e2e", [secret]),
+    ).toHaveLength(1);
+    expect(bundleLines(withBundle(masked), show, "auto-e2e", [])).toHaveLength(
+      2,
+    );
+  });
+
+  test("nothing without a bundle, or without a folder", () => {
+    expect(bundleLines(withBundle(null), show, "auto-e2e", [])).toEqual([]);
+    expect(
+      bundleLines(withBundle(ARCHIVE, null), show, "auto-e2e", []),
+    ).toEqual([]);
   });
 });

@@ -129,7 +129,7 @@ test.describe("buildRunFinished", () => {
           durationMs: 100,
         },
       ],
-      report: { dir: INPUT.reportDir, log: INPUT.log },
+      report: { dir: INPUT.reportDir, log: INPUT.log, bundle: null },
     });
   });
 
@@ -168,11 +168,38 @@ test.describe("buildRunFinished", () => {
     expect(buildRunFinished({ ...INPUT, hadFolder: false }).report).toEqual({
       dir: null,
       log: null,
+      bundle: null,
     });
     expect(buildRunFinished({ ...INPUT, hadFolder: true }).report).toEqual({
       dir: INPUT.reportDir,
       log: INPUT.log,
+      bundle: null,
     });
+  });
+
+  test("names the run's bundle when one was built, within version 1, and never for a run with no folder", () => {
+    const bundle = {
+      kind: "archive",
+      path: `${INPUT.reportDir}/report.tar.gz`,
+      name: "backwpup-pro@nginx-2026-10-13T10-15-31-042Z-bpng-12",
+    } as const;
+    const event = buildRunFinished({ ...INPUT, bundle });
+    expect(event.v).toBe(1);
+    expect(event.report).toEqual({
+      dir: INPUT.reportDir,
+      log: INPUT.log,
+      bundle,
+    });
+    // The event goes to subscribers as JSON: the bundle is plain data, `null` when absent.
+    expect(
+      (JSON.parse(JSON.stringify(event)) as typeof event).report.bundle,
+    ).toEqual(bundle);
+    expect(
+      buildRunFinished({ ...INPUT, bundle, hadFolder: false }).report.bundle,
+    ).toBeNull();
+    expect(
+      buildRunFinished({ ...INPUT, bundle: null }).report.bundle,
+    ).toBeNull();
   });
 
   test("takes the edition from the stream when the facts are missing", () => {

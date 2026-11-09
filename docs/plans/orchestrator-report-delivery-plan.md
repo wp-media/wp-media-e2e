@@ -1,6 +1,6 @@
 # Orchestrator Report Delivery — prepared download bundles
 
-Status: R1 and R2 done (2026-11-03); R3–R4 planned; a Phase 1 slice; modernization Phase 7's
+Status: R1 and R2 done (2026-11-03), R3 done (2026-11-09); R4 planned; a Phase 1 slice; modernization Phase 7's
 renderer, which R3 needs, is done.
 Parent: the [orchestrator plan](orchestrator-plan.md) (§2 Reports, §3 Planned). Phase 0.5 left
 Allure generation out; this plan adds the missing delivery piece: one prepared download per run.
@@ -79,7 +79,7 @@ scp auto-e2e:/path/to/wp-media-e2e/reports/backwpup/pro@nginx/2026-10-06T02-47-1
 
 - Pipeline: after the run's reporters finish and before `run.finished` is built, bounded (240 s,
   one budget for Allure, copy and tar together) and best-effort. The event gains `report.bundle`
-  (absolute path or `null`). Any failure is one log line and a `null` bundle; the run keeps its
+  (`{ kind, path, name }` or `null`, R3). Any failure is one log line and a `null` bundle; the run keeps its
   status.
 - Allure: `allure generate <filtered results> -o <run>/allure -c allurerc.mjs --name "<facts title>"`,
   with `ALLURE_HISTORY=<cell>/allure-history.jsonl`; write to a temp directory and rename, never
@@ -269,29 +269,102 @@ scp auto-e2e:/path/to/wp-media-e2e/reports/backwpup/pro@nginx/2026-10-06T02-47-1
   build leaves its work folder until the next build of that run (R3, with R1's); in `keep` mode
   Allure's awesome plugin links traces to `trace.playwright.dev` (user-initiated, not removed).
 
-**R3 — Wire into the run end.** Depends: R1, R2, modernization Phase 7's 7.1a–7.1b (the
-terminal renderer). Effort: 1 day; medium.
-Goal: every completed run with a folder prepares its bundle; `run.finished.report.bundle`;
-Slack, CLI, config, dry run and docs.
+**R3 — Wire into the run end.** Done 2026-11-09.
 
-- Call after the reporters, bounded by 240 s; `bundleCommand`; fallback to the raw path; no
-  bundle for a run refused before its folder; retention untouched. The end summary's terminal
-  lines use modernization Phase 7's renderer (`src/common/terminal`), never a second one; the
-  landing page is static HTML and does not.
-- Stopping: pass the run's stop as `generateAllureReport`'s `signal` (Allure gets SIGTERM and is
-  waited for); a SIGKILL — the stop budgets' last step, or of the orchestrator itself — leaves the
-  work folder `<run>/.allure-work-*` (a full results copy) until the next generation in that run,
-  which may never come: remove it with the run, or sweep it at start-up — and `.bundle-work-*` (a
-  whole bundle) likewise. Pass the stop and the 240 s budget as one `buildReportBundle` `signal`
-  (`AbortSignal.any`); admit `report-bundle.ts` in `suite-imports.json` (its closure passed the
-  boundary spec in R2).
-- Tests: integration with the fake suite; `bundleCommand` (exact string, quoting of a path with a
-  space or `'`, over `MAX_SHOWN` → path, no `sshHost`, `folder` mode); executing the command
-  against a local `scp` stub leaves `<name>/index.html` and no archive, and a failing stub or a
-  corrupt archive leaves the archive and no `rm`; archive failure → raw hint; budget exceeded →
-  raw hint, no temp output; a stop mid-bundle; `none`; killed run; event schema; dry run.
-- Done: a real or fake run's Slack command, pasted in a shell, leaves `<name>/index.html` and no
-  archive; it opens.
+- As built: `orchestrator/runs/bundle.ts` — `bundleSettings` (defaults `archive`/`strip`),
+  `runBundleName`, `eventBundle`, pure `bundleCommand`/`folderCommand`/`downloadCommand`,
+  `sweepCellLeftovers`, `prepareBundle` (never rejects: `none` → nothing; a stop already past a drain
+  → a line; else the 240 s budget armed first, then no report folder → a line, the cell's sweep and the
+  build under `AbortSignal.any([stop, budget])`, the stop checked between them, the timer cleared after;
+  a failure → `no report bundle: <why>`, `null`). `cycle.ts` calls it in `ended()` after the launch's
+  `done` (reporters over) and `endedAt`, before `endRun`, so the duration excludes it;
+  `CycleDeps.bundle` (absent → none, as `claimCell`), `bundleBudgetMs`; `start.ts` wires
+  `buildReportBundle` (`LoopSeams` may replace it). Config `reports.bundle.{mode, traces}` (zod enums,
+  optional; `BUNDLE_MODES`, `KILL_GRACE_MS` re-exported by `report-bundle.ts`, the one admitted module);
+  dry run `reports: bundle archive (default) · Allure traces strip (default)` or `bundle none · no
+  Allure report`, and a warning when `sshHost` is set and the checkout's path holds a character
+  `shellWord` would quote (`checkoutWarnings`). Slack `Report:` (`reportWhere`): bundle + `sshHost` →
+  the command when `fitsSlack` (escaped ≤ `MAX_SHOWN`), else the bundle's path; no `sshHost` → the
+  bundle's path; no bundle → the raw hint as before. Terminal, under the outcome line, through the
+  logger (Phase 7's line style): `<id> report: <bundle> · raw: <dir>` and, with `sshHost`, `<id> fetch:
+  <command>` under the same `fitsSlack` rule and only when the log's cleaning leaves it unchanged
+  (`safeLine`: masking, runs of spaces), logged `verbatim` (`LineOptions`/`LoggedLine`: `styleLine`
+  never wraps it; a terminal soft-wraps it, so a copy is one command — chosen over printing the command
+  alone: every log line keeps its time and scope, and the file and pipe lines were never wrapped); R2's
+  `bundleLog` lines (sizes, missing reports) come before, `<id>: Report bundle …`.
+- Event decision: `report.bundle: { kind: "archive" | "folder", path, name } | null`, **within `v: 1`**.
+  The schema's rule bumps `v` only for a change that would mislead a subscriber; a new field under
+  `report` misleads none (Slack/Datator read named fields; Datator never sends `report`), and keeping
+  `null` (never absent) follows §4.6's "unknown is `null`". An object, not the planned bare path: Slack
+  needs the kind and the unpacked name, which a path would make it re-derive. `both` names the archive.
+- Stopping decision: a **drain lets the bundle run** (a drained run is still a finished run worth
+  bundling; the drain's 15 min budget bounds it: its escalation aborts it); an **interrupt or kill
+  aborts it** (`Cycle.stopBundle`: a stop asked of the cycle or taken by the launch ≥ `interrupted`),
+  and a run already stopped that far builds none. Allure and `tar` run detached, each the leader of its
+  own process group (`src/common/reporting/child-group.ts`: `runInOwnGroup`, `stopGroupOnAbort`), so
+  the terminal's Ctrl-C (the drain) or SIGHUP never reaches them; the abort sends their group SIGTERM,
+  then SIGKILL `killGraceMs` (default 5 s) later, and the child is still waited for. Budgets hold without
+  growing: at worst the bundle ends 5 s after the interrupt, far inside the 4 min to the kill and
+  `KILL_SETTLE_MS` (60 s). R1/R2's "SIGTERM only" gap is closed the same way. `report:allure`
+  (`scripts/allure.mjs`) now also aborts on SIGHUP: Allure no longer shares its group, so the script's
+  abort is the only stop it gets (tsx relays SIGINT/SIGTERM; on SIGHUP tsx itself dies, the script
+  under it still stops Allure). Not interruptible: a stalled filesystem call (`fs.cp`, a rename);
+  the size walk is now async and stops with the build (`treeBytesWithin`).
+- Leftovers: `releaseLeftoverWorkDirs(runDir, sweep)` (report-bundle.ts: R2's `.bundle-work-*` release
+  plus R1's `.allure-work-*`, now exported as `releaseStaleWorkDirs`); each bundle first sweeps every
+  non-hidden real run folder of its cell, within its budget. The sweep releases a work folder only
+  when its pid is dead (or this process's, idle) **and** nothing in it was modified for the budget plus
+  `KILL_GRACE_MS` (`untouchedFor`, mtime of every entry): a pid is per host, so another host's live
+  build in a shared `reports/` would otherwise look dead — the guide says never to share it. A build's
+  own-run release (R1/R2) is unchanged. Chosen over a start-up sweep: no new start step, and it runs
+  whenever the cell runs again. Retention: unchanged and checked — the suite's per-run prune removes
+  the run folder whole, bundle and hidden work folders included (R2's retention spec: a bundled run
+  stays one complete run); the orchestrator's `state/run-retention.ts` prunes
+  `.orchestrator/runs/<id>/`, which holds no bundle.
+- Measured: the command (built from a real-Allure bundle on macOS, bsdtar, under a path with a space
+  and `'`) pasted in macOS `sh`/`bash`/`zsh` and in Docker `ubuntu:24.04` (bash 5.2.21, GNU tar 1.35;
+  again after the audit fixes): `./<name>/index.html`, no archive, nothing on stderr; a corrupt
+  download (`gzip: stdin: not in gzip format`, exit 2) and an `scp` failing after its copy (exit 1)
+  keep the archive, no folder. The unpacked landing page, Allure and Playwright opened from `file://`
+  in Chromium, no external request. Soak after the fixes (`ORCHESTRATOR_SOAK_RUNS=60`, its three
+  tests: capped on a TTY and a pipe, uncapped): listeners 17/15/17, resources 6, timers 2, fds 22
+  flat; pruning 0.362 ms a folder.
+- Tests: 106 new (470 → 576 in the 15 specs touched, as `--list` counts them). As first built, 70:
+  `runs/bundle.spec.ts` 34 (each failure mode of the command run in `sh`, `bash`, `zsh` against a stub
+  `scp` and a real archive; skipped where a shell is missing — CI now installs zsh beside tmux),
+  `cycle.spec` +13, `slack.spec` +7 (payload over the HTTP sink holds `&amp;&amp;`), `run-lines` +4,
+  `allure-report` +5, `report-bundle` +3, `start.spec` +1 (the real wiring, Slack via the sink),
+  schema, dry run, event +1 each. The audit fixes, +36: `child-group.spec` 10 (own group, the whole
+  group stopped — a grandchild too —, the grace, listeners), `report-tree.spec` 7, `bundle.spec` +10
+  (idle and stop terms of the sweep, budget before the sweep, the defensive branches), `dry-run` +4,
+  `cycle` +2 (duration excludes bundling, `fetch:` verbatim), `run-lines` +2 (the `fitsSlack` boundary:
+  raw fits, escaped does not; a command the log would change), `report-bundle` +2 (a SIGINT to the
+  builder's own group mid-Allure and mid-`tar` still gives a full bundle with Allure; nothing armed
+  after), `allure-command` +1 (SIGHUP, and no Allure left after any stop), `line-style` +1; the four
+  `killAfterGrace` specs moved to `child-group` (`allure-report` −3 net). Hanging stubs end on their
+  own after 60 s and every hang spec awaits through `endsWithin` (10 s, a named failure). Changed, as
+  the schema change requires: exact `report` objects and fixtures gained `bundle: null`; the dry run's
+  exact lines gained the `reports:` line.
+- Mutation audit (fresh scratch copy). As first built: the implementer's 34 all caught, but review
+  B's 20 independent ones left 12 survivors (sweep `.catch`, stop-reason type, budget-vs-stop
+  precedence, the terminal's and Slack's caps, `endedAt` after the bundle, report path a file, both
+  `disarm`s, the tar grace twice) and two caught only by 30 s timeouts. After the audit fixes, rerun
+  on the fixed code (moved code mutated where it now lives; both `disarm`s are one in
+  `runInOwnGroup`, plus its listener removal): B's 20 → 21 caught, the implementer's 34 caught (an
+  early-stop check needed "a stopped run sweeps nothing"), 21 new on the fixes (detached, group
+  kill, SIGTERM, `verbatim` through cycle/log/style, the clean-line check, `checkoutWarnings`, idle
+  check, walk depth, stopped walk, idle time, sweep signal, stop checks in the sweep and both
+  releases, size walk, `report:allure` SIGHUP, `fitsSlack`'s `<=`) all caught but one — a stop check
+  right after the build's own-run release, equivalent (the copy loop checks first), so removed. No
+  survivor; no catch by spec timeout (hang specs fail through `endsWithin` in 10 s); no
+  `allure-hang`/`allure-ignore-term`/`sleep 60` left after the runs. A `detached: false` mutant once
+  ended the mutation harness itself (the "group gone" spec signalled the runner's group): that spec now
+  asserts the child leads its own group first.
+- Left: an orchestrator killed outright (SIGKILL) or crashing leaves a running Allure/`tar` until it
+  ends on its own (seconds); the sweep leaves its work folder while it writes (idle time). A stalled
+  filesystem call holds the build past its budget (documented; a shutdown stays bounded). The docker
+  paste check is manual (CI is Linux: `bash`/`sh`/`zsh` with GNU tar run there); `scp -r` of `folder`
+  into an existing `./<name>` nests it (`<name>/report`).
 
 **R4 — Real-run verification and docs.** Depends: R3. Effort: 1 day; low–medium.
 Goal: prove sizes and both trace policies on a real failed run; update the guide.

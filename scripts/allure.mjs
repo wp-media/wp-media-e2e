@@ -31,9 +31,11 @@ if (parsed.kind === "error") {
   process.exit(EXIT.usage);
 }
 
-// Ctrl-C or SIGTERM stops generation cleanly — Allure ended, its work folder (a full copy of the
-// results) removed — or the server, and the script then exits as the signal would have (130, 143).
-// Repeats are ignored: a terminal's Ctrl-C reaches the whole process group, tsx relays it too.
+// Ctrl-C, SIGTERM or SIGHUP (a closed terminal) stops generation cleanly — Allure ended, its work
+// folder (a full copy of the results) removed — or the server, and the script then exits as the signal
+// would have (130, 143, 129). Allure runs in a process group of its own, so no signal reaches it but
+// this one: every stop must abort. Repeats are ignored: a terminal's Ctrl-C reaches the whole process
+// group, tsx relays it too.
 const stop = new AbortController();
 /** @type {NodeJS.Signals | undefined} */
 let stoppedBy;
@@ -48,6 +50,7 @@ function onStop(signal) {
 }
 process.on("SIGINT", onStop);
 process.on("SIGTERM", onStop);
+process.on("SIGHUP", onStop);
 
 const status = await runAllureCommand(parsed.options, {
   reportRoot: resolve(repoRoot, process.env.REPORT_ROOT || "reports"),

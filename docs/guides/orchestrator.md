@@ -63,7 +63,10 @@ file, and with it another state directory. It must be yours and closed to other 
       "apiKey": "…"
     }
   },
-  "reports": { "sshHost": "auto-e2e" },
+  "reports": {
+    "sshHost": "auto-e2e",
+    "bundle": { "mode": "archive", "traces": "strip" }
+  },
   "serverWarningThreshold": 5
 }
 ```
@@ -85,6 +88,8 @@ file, and with it another state directory. It must be yours and closed to other 
 | `notifications.slack.webhookUrl` | An incoming webhook, `https://hooks.slack.com/services/…`. Omit `slack` to turn it off                                                                                       |
 | `notifications.datator`          | `url`: HTTPS, ending with `/` (Datator answers `301` without it). `apiKey`. Omit `datator` to turn it off                                                                    |
 | `reports.sshHost`                | Optional host or `user@host`: Slack's report paths become `scp` commands from it                                                                                             |
+| `reports.bundle.mode`            | `archive` (default): `report.tar.gz`; `folder`: `report/`; `both`; `none`: no bundle, no Allure ([Report bundle](#report-bundle))                                           |
+| `reports.bundle.traces`          | `strip` (default): Allure without Playwright traces, one file per page; `keep`: with them, a folder report that needs `npx allure open`                                       |
 | `serverWarningThreshold`         | 1–1000, default 5: warns when that many tasks share one server                                                                                                               |
 
 Checked at start and by `--dry-run`: a misspelt key, a value out of bounds, an unknown product or
@@ -112,6 +117,7 @@ bpng · BackWPup Pro on nginx
   site https://bwu2.qa.test · qa-lnmp
 servers: qa-lnmp (bpng)
 runs: retries 2 · reports kept 20
+reports: bundle archive · Allure traces strip
 notifications: slack ("E2E Orchestrator", scp from auto-e2e) · datator
 secrets for the runs: GITHUB_TOKEN, BWP_S3_ACCESS_KEY_ID
 no warnings
@@ -245,7 +251,8 @@ npm run orchestrator -- start --help
   `.orchestrator/runs/<id>/` holds `run.log` (both processes' output, our `[orchestrator]` lines),
   `run.json` (its record), `run-finished.json` (everything Slack was told), `datator.json` (the record
   posted) and, once drained, `stop` (the drain's stop file).
-- Its reports are the suite's: `reports/<product>/<cell>/<RUN_ID>/`.
+- Its reports are the suite's: `reports/<product>/<cell>/<RUN_ID>/`, plus its
+  [report bundle](#report-bundle).
 - Its environment is an allowlist: `PATH`, `HOME`, `LANG`, `TMPDIR`, `PLAYWRIGHT_BROWSERS_PATH`,
   `XDG_CACHE_HOME`, the proxy variables (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`, either
   case; `NODE_USE_ENV_PROXY`) and CA files (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`);
@@ -259,12 +266,57 @@ npm run orchestrator -- start --help
   a setup failed, no scenario ran, an error outside the tests, the runner died, a process could not
   start — `bddgen could not start: ENOENT`), `failed`, `flaky`, `passed`.
 
+## Report bundle
+
+After a run's processes end (its reporters done) and before its `run.finished`, the orchestrator builds
+one download from its report folder: a landing page, the Playwright and Cucumber reports, a fresh
+Allure report (the cell's history; traces stripped unless `traces: keep`) and `run-facts.json` —
+nothing raw. `archive` packs it as `<run>/report.tar.gz` (0600), `folder` keeps `<run>/report/` (0700).
+Slack's `Report:` line, pasted in a POSIX shell (macOS, Linux, WSL), leaves `./<name>/index.html` and
+no archive — `<name>` is `<product>-<cell>-<RUN_ID>`, so runs unpacked side by side never mix:
+
+```sh
+scp auto-e2e:/…/reports/backwpup/pro@nginx/<RUN_ID>/report.tar.gz backwpup-pro@nginx-<RUN_ID>.tar.gz && tar -xzf backwpup-pro@nginx-<RUN_ID>.tar.gz && rm backwpup-pro@nginx-<RUN_ID>.tar.gz
+```
+
+`&&` stops at a failed download or unpack, keeping the archive. `folder`: `scp -r <host>:<run>/report
+<name>`. A command Slack would not show whole (over 600 characters once escaped, `&&` being
+`&amp;&amp;`) is never cut: the bundle's path instead. The terminal follows the same rule under the
+run's end (`report: <bundle> · raw: <folder>`, then `fetch: <command>`), after the build's own line
+with its sizes; `fetch:` is never wrapped (the terminal soft-wraps it, so a copy is one command), and
+it is left out when the log would change it (a secret masked, a run of spaces made one).
+
+- **Checkout path:** the command quotes the remote path for the local shell only; `scp` then hands it
+  to SFTP's glob (or, with `scp -O`, the remote shell), which reads it again. Keep the checkout under letters, digits and
+  `_ @ % + = : , . / -`: a space, a quote, `$`, a backtick or `\` can make the pasted `scp` fail (before
+  `tar` and `rm`, so the archive stays). `--dry-run` warns about such a path.
+- Best-effort: a failure is a `no report bundle: …` line, the event's `report.bundle` is `null` and
+  Slack points at the raw folder; the run keeps its status. None for a run that never ran (refused, or
+  could not start), or with `none`.
+- Bounded by 4 min (a measured trace-heavy run took 2.7 s), from before the cell's sweep (below) to
+  the archive; the stop and the budget are checked between steps. A filesystem call that stalls (a
+  hung mount) cannot be interrupted, so the build returns once it does, past its budget; a shutdown
+  still gives up `KILL_SETTLE_MS` (60 s) after its kill.
+- Allure and `tar` run in their own process group: a Ctrl-C (a drain) or a closing terminal's SIGHUP
+  never reaches them, so a drain lets the bundle finish. An interrupt or a kill — the second Ctrl-C,
+  or the drain's budget running out — ends it (their group gets SIGTERM, then SIGKILL after 5 s) and
+  puts nothing in place, so it never extends a shutdown's budgets. An orchestrator killed outright
+  (SIGKILL) leaves them running until they end on their own (seconds).
+- A build killed outright leaves a hidden `.bundle-work-*` or `.allure-work-*` folder in that run;
+  each bundle sweeps its cell's runs and removes such a folder when its process is not running **and**
+  nothing in it was modified for the budget plus 5 s, putting back any `report/` it held. A pid is
+  per host: **never share `reports/` between hosts or containers** running bundles — the idle time is
+  what keeps another host's live build from looking dead. The bundle is pruned with its run; the
+  cell's `allure-history.jsonl` stays.
+- As sensitive as the raw folder: traces hold session cookies.
+
 ## Notifications
 
 - **Slack**: one message per run, every status — the outcome, counts, plugin and commit, each site's
   WordPress and PHP, up to 20 failed then flaky scenarios with their first error line, the reason for
-  a run that did not test or was stopped, and where its report is (an `scp` command with
-  `reports.sshHost`). Success is `200 ok`; anything else is logged, no retry.
+  a run that did not test or was stopped, and where its report is: `Report:` gives the
+  [bundle](#report-bundle)'s download command with `reports.sshHost`, its path without; no bundle,
+  the raw report folder (`scp -r`). Success is `200 ok`; anything else is logged, no retry.
 - **Datator**: only runs that tested — `passed`, `flaky`, `failed`. `test_suite` is the cell
   (`pro@nginx`, or `pro@nginx @smoke` with a `grep`); a flaky scenario counts as passed;
   `website_url` is the first site's address without its credentials. Success is `201`; anything else
