@@ -310,7 +310,9 @@ commander 15, croner 10, pino 10, react 19.3, vite 8.3, tailwindcss 4.3).
   can be removed by hand (command, dashboard). A run's summary record stays (it is small), so
   history and trends survive. It reuses the suite's planner, grouped by task (0F). Until then the
   suite prunes each cell as a run ends; before the orchestrator takes over, the suite needs a switch
-  turning its own pruning off (`E2E_REPORTS_KEEP=0` lifts only the cap; 0F, V293).
+  turning its own pruning off (`E2E_REPORTS_KEEP=0` lifts only the cap; 0F, V293). Allure history
+  (done 2026-11-09): each cell's `allure-history.jsonl` keeps its newest 100 runs, at most 64 MiB
+  ([orchestrator.md](../guides/orchestrator.md#report-bundle)).
 - Report delivery — at each run's end generate Allure and prepare a minimal `report.tar.gz` (one
   file for `scp`): landing page, Playwright, Cucumber, Allure and the run facts; no raw results.
   Traces stay in Playwright; Allure strips them by default because `singleFile` embeds every
@@ -366,7 +368,6 @@ commander 15, croner 10, pino 10, react 19.3, vite 8.3, tailwindcss 4.3).
   suite survives it since phase-6's 6H.0).
 - Run the orchestrator in a container (e.g. the Playwright image: pinned browser and system
   packages, deterministic `@visual` rendering).
-- Retention of Allure history (reports, run logs and APVM's cache are planned, §3).
 - Where "AutoE2E" appears (outputs, dashboard).
 
 ## 5. Open questions
