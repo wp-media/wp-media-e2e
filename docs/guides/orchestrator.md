@@ -7,10 +7,8 @@ plugin through the suite (`artifacts:<cell>`, APVM).
 
 Not yet (later phases): run as a service (systemd), take commands while running
 (`status`, `stop`, a dashboard), schedules or on-demand runs, back off after failures, build or pin
-plugins itself, warn about disk space, clean a site after a killed run (the cell's next run does),
-generate Allure at run end and prepare a one-file `report.tar.gz`
-([plan](../plans/orchestrator-report-delivery-plan.md)). The config is read once: a change needs a
-restart.
+plugins itself, warn about disk space, clean a site after a killed run (the cell's next run does).
+The config is read once: a change needs a restart.
 
 Design and the decisions behind it: [`docs/plans/orchestrator-phase-0.5-plan.md`](../plans/orchestrator-phase-0.5-plan.md).
 
@@ -269,27 +267,48 @@ npm run orchestrator -- start --help
 ## Report bundle
 
 After a run's processes end (its reporters done) and before its `run.finished`, the orchestrator builds
-one download from its report folder: a landing page, the Playwright and Cucumber reports, a fresh
-Allure report (the cell's history; traces stripped unless `traces: keep`) and `run-facts.json` —
-nothing raw. `archive` packs it as `<run>/report.tar.gz` (0600), `folder` keeps `<run>/report/` (0700).
-Slack's `Report:` line, pasted in a POSIX shell (macOS, Linux, WSL), leaves `./<name>/index.html` and
-no archive — `<name>` is `<product>-<cell>-<RUN_ID>`, so runs unpacked side by side never mix:
+one download from its report folder ([design](../plans/orchestrator-report-delivery-plan.md)): a
+landing page (`index.html`), `playwright/` and `cucumber/` as the run wrote them (Playwright's traces
+included), a fresh `allure/` (named by the run's facts line, with the cell's `allure-history.jsonl`) and
+`run-facts.json` — never `allure-results/`, `results.jsonl`, logs or work folders.
+
+| `reports.bundle` | What lands in `<run>/`                                                                 |
+| ---------------- | -------------------------------------------------------------------------------------- |
+| `mode: archive`  | Default. `report.tar.gz` (0600), one top-level folder `<name>/`; no `report/` kept      |
+| `mode: folder`   | `report/` (0700); Slack gives `scp -r`                                                 |
+| `mode: both`     | Both; Slack gives the archive's command                                                |
+| `mode: none`     | Nothing, no Allure                                                                     |
+| `traces: strip`  | Default. Allure without Playwright traces, one HTML file per page: opens from disk     |
+| `traces: keep`   | Allure with them, a folder report: served with `npx allure open allure`                |
+
+The landing page opens from disk and names what needs HTTP, with the command to run from the unpacked
+folder: Playwright's trace viewer (`npx playwright show-report playwright`), rich Cucumber
+(`REPORT_MODE=rich`: `npx playwright show-report cucumber`), a `keep` Allure. Measured on three real
+failed runs (6–7 MB raw, 1–23 traces): archive 5.7–6.6 MB, 16 MB unpacked (Allure 12 MB of it),
+1.3–1.7 s (`keep`: 4.8–6.7 MB, ~3 s); a run with 54 MB of traces: 75 MB archive, 2.7 s. Slack's
+`Report:` line, pasted in a POSIX shell (macOS, Linux, WSL), leaves `./<name>/index.html` and no
+archive — `<name>` is `<product>-<cell>-<RUN_ID>`, so runs unpacked side by side never mix:
 
 ```sh
 scp auto-e2e:/…/reports/backwpup/pro@nginx/<RUN_ID>/report.tar.gz backwpup-pro@nginx-<RUN_ID>.tar.gz && tar -xzf backwpup-pro@nginx-<RUN_ID>.tar.gz && rm backwpup-pro@nginx-<RUN_ID>.tar.gz
 ```
 
-`&&` stops at a failed download or unpack, keeping the archive. `folder`: `scp -r <host>:<run>/report
-<name>`. A command Slack would not show whole (over 600 characters once escaped, `&&` being
-`&amp;&amp;`) is never cut: the bundle's path instead. The terminal follows the same rule under the
-run's end (`report: <bundle> · raw: <folder>`, then `fetch: <command>`), after the build's own line
-with its sizes; `fetch:` is never wrapped (the terminal soft-wraps it, so a copy is one command), and
-it is left out when the log would change it (a secret masked, a run of spaces made one).
+`&&` stops at a failed download or unpack, keeping the archive; re-running it rewrites the same
+folder. Pasted unchanged in macOS `zsh`/`bash`/`sh` (bsdtar) and Ubuntu 24.04 `bash`/`sh` (GNU tar
+1.35), as root or not, it leaves only `./<name>/`, nothing on stderr (checked by hand: CI runs Linux
+only). `folder`: `scp -r <host>:<run>/report <name>` (into an existing `./<name>/` it nests as
+`<name>/report/`: remove it first). A command Slack would not show whole (over 600 characters once
+escaped, `&&` being `&amp;&amp;`) is never cut: the bundle's path instead. The terminal follows the
+same rule under the run's end (`report: <bundle> · raw: <folder>`, then `fetch: <command>`), after
+the build's own line with its sizes; `fetch:` is never wrapped (the terminal soft-wraps it, so a copy
+is one command), and it is left out when the log would change it (a secret masked, a run of spaces
+made one).
 
 - **Checkout path:** the command quotes the remote path for the local shell only; `scp` then hands it
-  to SFTP's glob (or, with `scp -O`, the remote shell), which reads it again. Keep the checkout under letters, digits and
-  `_ @ % + = : , . / -`: a space, a quote, `$`, a backtick or `\` can make the pasted `scp` fail (before
-  `tar` and `rm`, so the archive stays). `--dry-run` warns about such a path.
+  to SFTP's glob (or, with `scp -O`, the remote shell), which reads it again. Keep the checkout
+  under letters, digits and `_ @ % + = : , . / -`: a space, a quote, `$`, a backtick or `\` can make
+  the pasted `scp` fail (before `tar` and `rm`, so the archive stays). `--dry-run` warns about such a
+  path.
 - Best-effort: a failure is a `no report bundle: …` line, the event's `report.bundle` is `null` and
   Slack points at the raw folder; the run keeps its status. None for a run that never ran (refused, or
   could not start), or with `none`.
@@ -306,9 +325,21 @@ it is left out when the log would change it (a secret masked, a run of spaces ma
   each bundle sweeps its cell's runs and removes such a folder when its process is not running **and**
   nothing in it was modified for the budget plus 5 s, putting back any `report/` it held. A pid is
   per host: **never share `reports/` between hosts or containers** running bundles — the idle time is
-  what keeps another host's live build from looking dead. The bundle is pruned with its run; the
-  cell's `allure-history.jsonl` stays.
-- As sensitive as the raw folder: traces hold session cookies.
+  what keeps another host's live build from looking dead.
+- Disk: Allure's pages weigh about the same whatever the run (~9–12 MB unpacked), so small runs grow
+  most. Measured: passing runs of 1.6–2.3 MB → archive 3.6–4.5 MB (1.6–2.7×), `folder` 8.9–11.3 MB
+  (4.3–6.6×); failed runs of 6–7 MB → archive 0.78–0.95×, `folder` 2.2–2.6×; a trace-heavy run
+  (135 MB raw, 54 MB of traces) → archive 75 MB (0.56×, `strip`). `both` = archive + `folder`.
+  Bounded by [retention](#retention): the bundle is pruned with its run. The cell's
+  `allure-history.jsonl` stays, one line per run (~110–180 KB each), the newest 100 runs only (under
+  ~20 MB; at most 64 MiB, a line over 8 MiB dropped unread), its mode kept (a new one `0600`): older
+  lines go as each report is made, and a line Allure could not read, or a FIFO or device at its path
+  (only an edit by hand makes one), is dropped and replaced (`report:allure` warns).
+- As sensitive as the raw folder: traces hold session cookies. A `keep` Allure's trace button opens
+  `https://trace.playwright.dev/` in a new tab and hands it the trace there (`postMessage`): it needs
+  the internet, and the trace goes to that site's code in the viewer's browser — Playwright documents
+  the site as processing traces locally, uploading nothing. Playwright's own report (`playwright/`)
+  serves its viewer itself.
 
 ## Notifications
 

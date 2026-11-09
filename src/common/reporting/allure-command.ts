@@ -262,6 +262,8 @@ export async function runAllureCommand(
   }
   const loaders = analyticsWarning(report);
   if (loaders !== undefined) io.printError(loaders);
+  const dropped = historyWarning(report);
+  if (dropped !== undefined) io.printError(dropped);
   if (!options.open) return EXIT.ok;
   return io.serve !== undefined
     ? io.serve(outputDir)
@@ -283,6 +285,21 @@ export function analyticsWarning(report: AllureReport): string | undefined {
     ? undefined
     : `Warning: Allure's analytics loader (Google Tag Manager) was not recognised in ${left.join(", ")}: ` +
         "left as Allure wrote it, so those pages load it when opened online.";
+}
+
+/**
+ * The warning for history lines dropped: ones Allure could not read (or a history that is not a
+ * regular file), or past the history's size bounds. Only an outside edit makes one, and it would have
+ * failed every later generation of the cell.
+ *
+ * @param report - the report made.
+ * @returns the line, or `undefined` when none was dropped.
+ */
+export function historyWarning(report: AllureReport): string | undefined {
+  return report.historyDropped === 0
+    ? undefined
+    : `Warning: ${String(report.historyDropped)} line(s) of ${report.historyPath} were dropped: ` +
+        "not JSON objects Allure could read, not a regular file, or past the history's size bounds.";
 }
 
 /**

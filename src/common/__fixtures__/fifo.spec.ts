@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { releaseFifoReader } from "./fifo";
+import { openFifoWriter, releaseFifoReader } from "./fifo";
 
 /** The FIFO release the Allure specs block their code under test on. */
 
@@ -37,6 +37,18 @@ test("a reader blocked in its open goes on and reads end of file", async () => {
   await releaseFifoReader(fifo);
 
   expect(await reading).toBe("");
+});
+
+test("an open writer lets the reader go on, which reads what is written until it is closed", async () => {
+  const fifo = makeFifo();
+  const reading = readFile(fifo, "utf8");
+
+  const writer = await openFifoWriter(fifo);
+  await writer.write("a\n");
+  await writer.write("b\n");
+  await writer.close();
+
+  expect(await reading).toBe("a\nb\n");
 });
 
 test("a reader that opens only after the first attempts is still waited for", async () => {

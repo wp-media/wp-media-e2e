@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import {
+  chmod,
   copyFile,
   lstat,
   mkdir,
@@ -7,6 +8,7 @@ import {
   readdir,
   rename,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -16,7 +18,7 @@ import {
   removeAllureAnalytics,
   type AnalyticsCleanup,
 } from "./allure-analytics";
-import { keepOneLinePerRun, readHistoryText } from "./allure-history";
+import { prepareHistory, settleHistory } from "./allure-history";
 import {
   AllureCliMissingError,
   AllureGenerationAbortedError,
@@ -129,17 +131,23 @@ export interface AllureReport extends CopiedResults {
   readonly layout: AllureLayout;
   /** The pages the analytics loader was removed from, and those it could not be (left as written). */
   readonly analytics: AnalyticsCleanup;
+  /**
+   * History lines dropped: unreadable by Allure (or not a regular file), or past its size bounds —
+   * only an outside edit — or Allure's own line, too long to keep.
+   */
+  readonly historyDropped: number;
 }
 
 /**
  * Generates one run's Allure report. First releases the work folders an ended generation left in
  * the run ({@link releaseWorkDir}: a report left aside goes back); copies the results (validated,
- * traces stripped or kept); runs `allure generate` on the copy into the work folder, against a copy
- * of the history; removes the analytics loader from its pages; keeps one history line per run
- * (`allure-history.ts`: a run reported again replaces its own line); then puts the report in place
- * (an existing one is replaced whole) and the history after it. On any failure the previous report and history are left as they were — or, when the old
- * report cannot be moved back, kept in the work folder for the next generation in that run (the
- * error says where) — and the work folder is otherwise removed.
+ * traces stripped or kept); runs `allure generate` on the copy into the work folder, given the
+ * history's lines from before this run's own; removes the analytics loader from its pages; keeps one
+ * history line per run, the newest `HISTORY_LIMIT` runs (`allure-history.ts`: a run reported
+ * again replaces its own line); then puts the report in place (an existing one is replaced whole)
+ * and the history after it. On any failure the previous report and history are left as they were —
+ * or, when the old report cannot be moved back, kept in the work folder for the next generation in
+ * that run (the error says where) — and the work folder is otherwise removed.
  *
  * Two runs of different cells may generate at once (separate folders and histories). Two of the
  * same cell at once both succeed, but the history keeps only the last one's entry.
@@ -149,8 +157,9 @@ export interface AllureReport extends CopiedResults {
  * @throws {@link RangeError} for a blank name; {@link AllureResultsMissingError} or
  *   {@link MalformedAllureResultError} for results with nothing (valid) to report;
  *   {@link AllureCliMissingError}; {@link AllureGenerationFailedError};
- *   {@link AllureGenerationAbortedError}; {@link AllureReportError} when the report or history
- *   cannot be put in place; the filesystem's error when copying fails.
+ *   {@link AllureGenerationAbortedError}; {@link AllureReportError} when the history cannot be
+ *   read or updated, or the report or history put in place; the filesystem's error when copying
+ *   fails.
  */
 export async function generateAllureReport(
   options: AllureReportOptions,
@@ -174,8 +183,12 @@ export async function generateAllureReport(
       options.traces,
     );
     const workHistory = join(work, "history.jsonl");
-    await copyIfPresent(historyPath, workHistory);
-    const historyBefore = await readHistoryText(workHistory);
+    const history = await prepareHistory(
+      historyPath,
+      workHistory,
+      basename(runDir),
+      { signal: options.signal },
+    );
     throwIfAborted(options.signal);
     await runAllureGenerate({
       bin: options.allureBin ?? DEFAULT_ALLURE_BIN,
@@ -192,14 +205,25 @@ export async function generateAllureReport(
       killGraceMs: options.killGraceMs ?? KILL_GRACE_MS,
     });
     const analytics = await removeAllureAnalytics(join(work, "report"));
-    await keepOneLinePerRun(workHistory, historyBefore, basename(runDir));
+    const settleDropped = await settleHistory(
+      workHistory,
+      history,
+      basename(runDir),
+    );
     await placeReport(
       join(work, "report"),
       outputDir,
       join(work, WORK_ASIDE_DIR),
     );
     await placeHistory(workHistory, historyPath, outputDir);
-    return { ...copied, outputDir, historyPath, layout, analytics };
+    return {
+      ...copied,
+      outputDir,
+      historyPath,
+      layout,
+      analytics,
+      historyDropped: history.dropped + settleDropped,
+    };
   } finally {
     activeWorkDirs.delete(work);
     await releaseWorkDir(work, { putBack: false });
@@ -466,20 +490,6 @@ async function createWorkDir(
 }
 
 /**
- * Copies a file, if there is one: the history the first run of a cell does not have yet.
- *
- * @param from - the file.
- * @param to - the copy.
- */
-async function copyIfPresent(from: string, to: string): Promise<void> {
-  try {
-    await copyFile(from, to);
-  } catch (error) {
-    if (errnoCode(error) !== "ENOENT") throw error;
-  }
-}
-
-/**
  * Throws when the caller asked to stop.
  *
  * @param signal - the caller's abort signal.
@@ -621,8 +631,12 @@ export async function placeReport(
   }
 }
 
+/** A new history's mode: owner-only, like everything else the generation makes. */
+const NEW_HISTORY_MODE = 0o600;
+
 /**
- * Replaces the cell's history with the updated copy, once the report is in place.
+ * Replaces the cell's history with the updated copy, once the report is in place, keeping the
+ * history's mode ({@link NEW_HISTORY_MODE} for a new one).
  *
  * @param updated - the copy Allure appended this run to.
  * @param historyPath - the cell's history file.
@@ -638,6 +652,8 @@ export async function placeHistory(
 ): Promise<void> {
   try {
     await mkdir(dirname(historyPath), { recursive: true });
+    // Set before the move: the history is never seen with another mode, on either path below.
+    await chmod(updated, await historyMode(historyPath));
     await move(updated, historyPath).catch(async (error: unknown) => {
       if (errnoCode(error) !== "EXDEV") throw error;
       // Another filesystem: copied beside the history first, so the replacement is still a rename.
@@ -655,5 +671,21 @@ export async function placeHistory(
         `(${errnoCode(error) ?? "unknown error"}).`,
       { cause: error },
     );
+  }
+}
+
+/**
+ * The mode the history keeps.
+ *
+ * @param historyPath - the cell's history file.
+ * @returns its permission bits; {@link NEW_HISTORY_MODE} when there is none yet.
+ * @throws the filesystem's error for anything but a missing file.
+ */
+async function historyMode(historyPath: string): Promise<number> {
+  try {
+    return (await stat(historyPath)).mode & 0o777;
+  } catch (error) {
+    if (errnoCode(error) === "ENOENT") return NEW_HISTORY_MODE;
+    throw error;
   }
 }

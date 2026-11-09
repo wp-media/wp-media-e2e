@@ -7,6 +7,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
+import { MAX_HISTORY_LINE_BYTES } from "../reporting/allure-history";
 import { PLAYWRIGHT_TRACE_TYPE } from "../reporting/allure-results";
 
 /**
@@ -139,7 +140,10 @@ export type StubBehaviour =
   | "fail"
   | "hang"
   | "slow-stop"
-  | "ignore-term";
+  | "ignore-term"
+  | "no-history"
+  | "two-lines"
+  | "long-line";
 
 /** How long a hanging stub runs before it exits on its own: far past any spec's deadline. */
 export const STUB_HANG_MS = 60_000;
@@ -175,6 +179,35 @@ export async function endsWithin<T>(
   }
 }
 
+/**
+ * A stop that comes the `nth` time code under test checks it (`signal.aborted`), and stays: a spec
+ * stops a read at a chosen point instead of racing it. Everything else is the real signal's.
+ *
+ * @param nth - the check that aborts, from 1.
+ * @returns the signal, and how many times it was checked so far.
+ */
+export function stopAtCheck(nth: number): {
+  readonly signal: AbortSignal;
+  readonly checks: () => number;
+} {
+  const stop = new AbortController();
+  let checks = 0;
+  const signal = new Proxy(stop.signal, {
+    get(target, key) {
+      if (key === "aborted") {
+        checks += 1;
+        if (checks === nth) stop.abort();
+      }
+      const value: unknown = Reflect.get(target, key, target);
+      // Its methods need the real signal as `this`.
+      return typeof value === "function"
+        ? (value as (...args: unknown[]) => unknown).bind(target)
+        : value;
+    },
+  });
+  return { signal, checks: () => checks };
+}
+
 /** The first line the `fail` stub prints: far more than an error keeps comes after it. */
 export const STUB_OUTPUT_HEAD = "stub: first line";
 
@@ -184,6 +217,8 @@ export interface StubCall {
   readonly cwd: string;
   readonly pid: number;
   readonly history: string | undefined;
+  /** What the history file held when the stub started (`latin1`); `null` when there was none. */
+  readonly historyText: string | null;
   readonly singleFile: string | undefined;
   /** The results folder's entries, as the stub saw them. */
   readonly results: readonly string[];
@@ -194,7 +229,10 @@ export interface StubCall {
  * `--name`) and appends one line to `ALLURE_HISTORY`; `fail` also does both before exiting 3 after
  * printing {@link STUB_OUTPUT_HEAD}, 20 KiB of two-byte characters and a last line on stderr; `hang`
  * writes a partial output and ends only when killed (or after {@link STUB_HANG_MS}, exit 9);
- * `slow-stop` too, but answers SIGTERM by writing into its output 300 ms later, then exiting.
+ * `slow-stop` too, but answers SIGTERM by writing into its output 300 ms later, then exiting;
+ * `no-history` appends nothing (as Allure 3.18 does when its append fails: it logs and exits 0);
+ * `two-lines` appends a second line, `{"name":"extra"}`; `long-line` appends, instead of its line, one
+ * of `MAX_HISTORY_LINE_BYTES + 1` bytes.
  *
  * @param dir - where it goes; its calls are logged to `<dir>/calls.jsonl`.
  * @param behaviour - what it does.
@@ -215,7 +253,9 @@ const name = args[args.indexOf("--name") + 1];
 const results = args[1];
 fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({
   args, cwd: process.cwd(), pid: process.pid,
-  history: process.env.ALLURE_HISTORY, singleFile: process.env.ALLURE_SINGLE_FILE,
+  history: process.env.ALLURE_HISTORY,
+  historyText: fs.existsSync(process.env.ALLURE_HISTORY ?? "") ? fs.readFileSync(process.env.ALLURE_HISTORY, "latin1") : null,
+  singleFile: process.env.ALLURE_SINGLE_FILE,
   results: fs.readdirSync(results).sort(),
 }) + "\\n");
 fs.mkdirSync(path.join(out, "awesome"), { recursive: true });
@@ -236,7 +276,12 @@ if (behaviour === "hang" || behaviour === "slow-stop" || behaviour === "ignore-t
 }
 // Blocks without a handler: a signal now ends it as its default action would end Allure.
 if (behaviour === "slow-ok") Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
-fs.appendFileSync(process.env.ALLURE_HISTORY, JSON.stringify({ name }) + "\\n");
+if (behaviour === "long-line") {
+  fs.appendFileSync(process.env.ALLURE_HISTORY, '{"name":"' + "x".repeat(${String(MAX_HISTORY_LINE_BYTES + 1 - 11)}) + '"}\\n');
+  return;
+}
+if (behaviour !== "no-history") fs.appendFileSync(process.env.ALLURE_HISTORY, JSON.stringify({ name }) + "\\n");
+if (behaviour === "two-lines") fs.appendFileSync(process.env.ALLURE_HISTORY, '{"name":"extra"}\\n');
 if (behaviour === "fail") {
   // Written synchronously: a pipe is asynchronous on macOS, and the exit would cut it short.
   fs.writeSync(2, ${JSON.stringify(STUB_OUTPUT_HEAD)} + "\\n" + "é".repeat(10240) + "\\n");

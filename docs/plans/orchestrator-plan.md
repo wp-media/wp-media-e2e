@@ -7,8 +7,8 @@ Status:
   orchestrator-side recommendations (0A.3–0A.5, 0B.2's consumption, 0C's orchestrator half) are
   design inputs for Phase 1+.
 - Phase 0.5, the minimal orchestrator: done 2026-10-19 (§7); its first deployment needs the runner.
-- Later phases: one planned slice — [report delivery](orchestrator-report-delivery-plan.md): Allure
-  generated at each run's end and a prepared `report.tar.gz` for one-file download; the rest not
+- Later phases: [report delivery](orchestrator-report-delivery-plan.md) done 2026-11-09 (Allure
+  generated at each run's end and a prepared `report.tar.gz` for one-file download); the rest not
   planned yet.
 
 Replaces the [modernization plan](e2e-modernization-plan.md)'s orchestrator section and Phase 9.
@@ -201,7 +201,7 @@ Reports
   ref.
 - Opened from the dashboard directly, behind its login: Playwright HTML with its trace viewer,
   Cucumber, and Allure, generated when the run ends. The command prints their paths.
-- Planned delivery: each run's end also prepares a minimal `report.tar.gz` — a landing page,
+- Delivery (done): each run's end also prepares a minimal `report.tar.gz` — a landing page,
   Playwright, Cucumber, Allure and the run facts — for one `scp`. The raw folder stays for
   debugging. Traces stay in the Playwright report; the bundle strips them before generating
   Allure's single-file report. See the
@@ -315,8 +315,8 @@ commander 15, croner 10, pino 10, react 19.3, vite 8.3, tailwindcss 4.3).
   file for `scp`): landing page, Playwright, Cucumber, Allure and the run facts; no raw results.
   Traces stay in Playwright; Allure strips them by default because `singleFile` embeds every
   attachment (measured: 53.8 MB of traces → 82.6 MB HTML). `reports.bundle.mode` is
-  `archive`/`folder`/`both`/`none`, `reports.bundle.traces` is `strip`/`keep`. Four phases, about
-  4–6 days. See the [report delivery plan](orchestrator-report-delivery-plan.md).
+  `archive`/`folder`/`both`/`none`, `reports.bundle.traces` is `strip`/`keep`. Done 2026-11-09.
+  See the [report delivery plan](orchestrator-report-delivery-plan.md).
 - Updating the suite — decided 2026-10-05: stop, update, resume. One checkout serves every cell,
   and a run reads its files while it runs (`bddgen`, step files, `node_modules`), so nothing is
   updated under a running cell. Until this exists, the suite is updated by hand while the
