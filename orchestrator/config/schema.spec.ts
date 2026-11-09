@@ -558,6 +558,36 @@ test.describe("configSchema", () => {
       ]);
   });
 
+  test("a bundle's mode and traces are among their choices, each optional, nothing else", () => {
+    /**
+     * The issues of a config whose bundle is `bundle`.
+     *
+     * @param bundle - `reports.bundle`.
+     * @returns the issues.
+     */
+    const bundle = (value: unknown): string[] =>
+      issuesOf(withRoot({ reports: { bundle: value } }));
+    for (const mode of ["archive", "folder", "both", "none"])
+      expect(bundle({ mode }), mode).toEqual([]);
+    for (const traces of ["strip", "keep"])
+      expect(bundle({ traces }), traces).toEqual([]);
+    expect(bundle({})).toEqual([]);
+    expect(bundle({ mode: "zip" })).toEqual([
+      'reports.bundle.mode: Invalid option: expected one of "archive"|"folder"|"both"|"none"',
+    ]);
+    expect(bundle({ traces: "drop" })).toEqual([
+      'reports.bundle.traces: Invalid option: expected one of "strip"|"keep"',
+    ]);
+    expect(bundle({ mode: "archive", tar: "gz" })).toEqual([
+      "reports.bundle: no such setting: tar",
+    ]);
+    expect(
+      configSchema.parse(
+        withRoot({ reports: { bundle: { mode: "both", traces: "keep" } } }),
+      ).reports,
+    ).toEqual({ bundle: { mode: "both", traces: "keep" } });
+  });
+
   test("a server warning threshold is a whole number from 1", () => {
     expect(
       issuesOf(

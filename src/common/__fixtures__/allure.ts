@@ -125,12 +125,55 @@ export function writeAllureResults(dir: string): string {
 }
 
 /**
- * What a stub CLI does: succeed; succeed with a page nobody may read (`unreadable-page`: its
+ * What a stub CLI does: succeed; succeed after 1.5 s, any signal in that time killing it as it would
+ * Allure (`slow-ok`); succeed with a page nobody may read (`unreadable-page`: its
  * `awesome/index.html` mode 000); fail with exit 3 after printing more than an error keeps; hang; or
- * hang and, on SIGTERM, write into its output 300 ms later before exiting (`slow-stop`).
+ * hang and, on SIGTERM, write into its output 300 ms later before exiting (`slow-stop`); or hang and
+ * ignore SIGTERM, so only SIGKILL ends it (`ignore-term`). A hanging stub exits on its own after
+ * {@link STUB_HANG_MS}, so a spec that fails to stop one never leaves it running.
  */
 export type StubBehaviour =
-  "ok" | "unreadable-page" | "fail" | "hang" | "slow-stop";
+  | "ok"
+  | "slow-ok"
+  | "unreadable-page"
+  | "fail"
+  | "hang"
+  | "slow-stop"
+  | "ignore-term";
+
+/** How long a hanging stub runs before it exits on its own: far past any spec's deadline. */
+export const STUB_HANG_MS = 60_000;
+
+/** How long a spec waits for a stopped build or generation to end: seconds, never a spec's timeout. */
+export const STOP_DEADLINE_MS = 10_000;
+
+/**
+ * What a promise settles to, or a named failure once `ms` have passed: a stop that no longer ends a
+ * child fails its spec in seconds, saying what hung, instead of at the spec's timeout.
+ *
+ * @param promise - what should settle.
+ * @param what - what it is, for the failure: `the stopped build`.
+ * @param ms - the deadline; {@link STOP_DEADLINE_MS} by default.
+ * @returns its value.
+ * @throws {@link Error} `<what> did not end within <ms> ms` when it does not settle in time.
+ */
+export async function endsWithin<T>(
+  promise: Promise<T>,
+  what: string,
+  ms: number = STOP_DEADLINE_MS,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${what} did not end within ${String(ms)} ms`));
+    }, ms);
+  });
+  try {
+    return await Promise.race([promise, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** The first line the `fail` stub prints: far more than an error keeps comes after it. */
 export const STUB_OUTPUT_HEAD = "stub: first line";
@@ -150,8 +193,8 @@ export interface StubCall {
  * Writes a stub `allure` CLI. Like `allure generate`, it writes into `-o` (`index.html` holding
  * `--name`) and appends one line to `ALLURE_HISTORY`; `fail` also does both before exiting 3 after
  * printing {@link STUB_OUTPUT_HEAD}, 20 KiB of two-byte characters and a last line on stderr; `hang`
- * writes a partial output and never ends; `slow-stop` too, but answers SIGTERM by writing into its
- * output 300 ms later, then exiting.
+ * writes a partial output and ends only when killed (or after {@link STUB_HANG_MS}, exit 9);
+ * `slow-stop` too, but answers SIGTERM by writing into its output 300 ms later, then exiting.
  *
  * @param dir - where it goes; its calls are logged to `<dir>/calls.jsonl`.
  * @param behaviour - what it does.
@@ -186,7 +229,13 @@ if (behaviour === "slow-stop") {
     process.exit(0);
   }, 300));
 }
-if (behaviour === "hang" || behaviour === "slow-stop") { setInterval(() => {}, 1000); return; }
+if (behaviour === "ignore-term") process.on("SIGTERM", () => {});
+if (behaviour === "hang" || behaviour === "slow-stop" || behaviour === "ignore-term") {
+  setTimeout(() => process.exit(9), ${String(STUB_HANG_MS)});
+  return;
+}
+// Blocks without a handler: a signal now ends it as its default action would end Allure.
+if (behaviour === "slow-ok") Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
 fs.appendFileSync(process.env.ALLURE_HISTORY, JSON.stringify({ name }) + "\\n");
 if (behaviour === "fail") {
   // Written synchronously: a pipe is asynchronous on macOS, and the exit would cut it short.

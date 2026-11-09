@@ -30,6 +30,7 @@ import {
   streamOf,
 } from "./__fixtures__/results";
 import { RESULTS_FILE } from "../src/common/reporting/results-schema";
+import { reply, startSink } from "./__fixtures__/http-sink";
 import type { CheckedProduct } from "./config/check";
 import { loadProductList, type ProductList } from "./config/product-list";
 import { runIdentity } from "./runs/identity";
@@ -507,6 +508,52 @@ test.describe("start — --once", () => {
     expect(log).toContain("orchestrator  exiting 0");
     expect(r.proc.stdout.text).toContain("exiting 0");
     await expectCleanEnd(r.proc);
+  });
+
+  test("builds each run's download bundle itself, and Slack's Report line is its command", async () => {
+    const sink = await startSink(reply(200, "ok"));
+    try {
+      const config = await writeConfig({
+        tasks: [TASKS[0]],
+        notifications: {
+          slack: { webhookUrl: "https://hooks.slack.com/services/T0/B0/r3" },
+        },
+        reports: { sshHost: "auto-e2e" },
+      });
+      const r = rig((id) => runner(id, 1, "passed"), {
+        notifications: {
+          // Slack's request goes to the local sink, never to Slack.
+          fetch: (input, init) =>
+            fetch(
+              `${sink.url}${new URL(input instanceof Request ? input.url : String(input)).pathname}`,
+              init,
+            ),
+        },
+      });
+      expect(await start({ config, once: true, tasks: ["bpng"] }, r.deps)).toBe(
+        0,
+      );
+      const { reportDir, runId } = runIdentity({
+        taskId: "bpng",
+        product: "backwpup",
+        cell: "pro@nginx",
+        number: 1,
+        startedAt: T0,
+        stateDir,
+        checkout,
+      });
+      const archive = join(reportDir, "report.tar.gz");
+      expect(existsSync(archive)).toBe(true);
+      const name = `backwpup-pro@nginx-${runId}`;
+      const body = JSON.parse(sink.requests[0]?.body ?? "{}") as {
+        text?: string;
+      };
+      expect(body.text).toContain(
+        `Report: \`scp auto-e2e:${archive} ${name}.tar.gz &amp;&amp; tar -xzf ${name}.tar.gz &amp;&amp; rm ${name}.tar.gz\``,
+      );
+    } finally {
+      await sink.close();
+    }
   });
 
   test("exits 1 when one run failed", async () => {

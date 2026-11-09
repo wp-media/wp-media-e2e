@@ -1145,20 +1145,24 @@ test.describe("createLogger on a terminal's screen", () => {
     });
     logger.line("bpng", `token ${secret}\nnext`, { opensBlock: true });
     logger.line("orchestrator", "plain");
+    logger.line("bpng", "scp h:/a b", { verbatim: true });
     await logger.flush();
     expect(formatted).toEqual([
       { at: AT, scope: "bpng", text: "token *** next", opensBlock: true },
       { at: AT, scope: "orchestrator", text: "plain" },
+      { at: AT, scope: "bpng", text: "scp h:/a b", verbatim: true },
     ]);
     expect(printed).toEqual([
       ["<bpng|token *** next>", "  more"],
       ["<orchestrator|plain>", "  more"],
+      ["<bpng|scp h:/a b>", "  more"],
     ]);
     // The screen writes; the logger never writes the stream itself.
     expect(written).toEqual([]);
     expect(lines).toEqual([
       `${F} bpng  token *** next\n`,
       `${F} orchestrator  plain\n`,
+      `${F} bpng  scp h:/a b\n`,
     ]);
   });
 

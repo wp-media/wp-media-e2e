@@ -25,6 +25,8 @@ export interface LoggedLine {
   readonly text: string;
   /** It starts a run's end or a stop's escalation: an empty line comes first. */
   readonly opensBlock?: boolean;
+  /** Never wrapped: one line, for the terminal to soft-wrap (a command meant to be copied). */
+  readonly verbatim?: boolean;
 }
 
 /** How lines are styled for one terminal. */
@@ -52,7 +54,8 @@ export const MIN_MESSAGE_WIDTH = 20;
  * @param line - its parts, already safe.
  * @param style - the terminal's colours, width and task colours.
  * @returns its lines, without line ends: an empty one first when it opens a block, then the message
- *   — wrapped when wider than the terminal, its continuation lines aligned under the message.
+ *   — wrapped when wider than the terminal, its continuation lines aligned under the message, unless
+ *   it is verbatim.
  * @example
  * ```ts
  * styleLine({ at, scope: "bpng", text: "next run 11:14:41 (cooldown 5m)" }, style);
@@ -67,7 +70,9 @@ export function styleLine(line: LoggedLine, style: LineStyle): string[] {
   const indent = displayWidth(`${clock} ${line.scope}  `);
   const room = style.width - indent;
   const parts =
-    room < MIN_MESSAGE_WIDTH ? [line.text] : wrapWords(line.text, room);
+    line.verbatim === true || room < MIN_MESSAGE_WIDTH
+      ? [line.text]
+      : wrapWords(line.text, room);
   const lines = parts.map((part, i) =>
     i === 0
       ? `${style.palette.paint("dim", clock)} ${scope}  ${part}`

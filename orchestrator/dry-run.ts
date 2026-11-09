@@ -2,10 +2,11 @@ import { buildArtifactPlan } from "../src/common/artifacts/request";
 import { serverOf, tasksByServer, type CheckedTask } from "./config/check";
 import type { OrchestratorConfig } from "./config/schema";
 import { allSecretValues } from "./config/secrets";
+import { bundleSettings } from "./runs/bundle";
 import type { PreparedStart } from "./start";
 import { tasksText } from "./start-lines";
 import { showPath } from "./tasks/run-lines";
-import { failureLine, safeLine, safeSiteUrl } from "./text";
+import { failureLine, safeLine, safeSiteUrl, shellWord } from "./text";
 
 /**
  * `start --dry-run`'s report, pure: what a start with this config and `--task` would run — each task,
@@ -61,7 +62,11 @@ export function dryRunReport(
   /** A path as shown: from the checkout when it is known. */
   const show = (path: string): string =>
     checkout === undefined ? path : showPath(path, checkout);
-  const warnings = [...(options.stateWarnings ?? []), ...loaded.warnings];
+  const warnings = [
+    ...(options.stateWarnings ?? []),
+    ...loaded.warnings,
+    ...checkoutWarnings(checkout, config.reports?.sshHost),
+  ];
   const lines = [
     `dry run · nothing is run · config ${show(loaded.file)} · state ${show(loaded.stateDir)}/`,
     tasksText(selected.map(({ task }) => task.id)),
@@ -74,6 +79,7 @@ export function dryRunReport(
     ),
     serversLine(selected),
     runsLine(config),
+    reportsLine(config),
     notificationsLine(config),
     secretsLine(config),
     ...(warnings.length === 0
@@ -271,6 +277,45 @@ function runsLine(config: Pick<OrchestratorConfig, "runs">): string {
     `runs: retries ${retries === undefined ? "the suite's default" : String(retries)}`,
     `reports kept ${reportsKeep === undefined ? "the suite's default" : reportsKeep === 0 ? "without a cap" : String(reportsKeep)}`,
   ].join(" · ");
+}
+
+/**
+ * A warning when Slack's `scp` commands name paths in a checkout whose path a pasted `scp` may not
+ * survive: the commands quote it for the local shell, then `scp` hands it to SFTP's glob (a backslash is an
+ * escape there) or, with `scp -O`, to the remote shell, which reads it again (a space, a quote, `$`, a
+ * backtick). Only characters no shell treats specially are safe in both.
+ *
+ * @param checkout - the checkout; nothing to say when unknown.
+ * @param sshHost - `reports.sshHost`; without it no `scp` command is given.
+ * @returns the warning, or none.
+ */
+export function checkoutWarnings(
+  checkout: string | undefined,
+  sshHost: string | undefined,
+): string[] {
+  if (checkout === undefined || sshHost === undefined) return [];
+  if (shellWord(checkout) === checkout) return [];
+  return [
+    `the checkout ${JSON.stringify(checkout)} has characters besides letters, digits and _@%+=:,./- — a pasted scp command may fail; move it to such a path`,
+  ];
+}
+
+/**
+ * Each run's download bundle: `reports: bundle archive (default) · Allure traces strip (default)` —
+ * what `reports.bundle` chose, or the default in force.
+ *
+ * @param config - the config.
+ * @returns the line.
+ */
+function reportsLine(config: Pick<OrchestratorConfig, "reports">): string {
+  const chosen = config.reports?.bundle;
+  const { mode, traces } = bundleSettings(config.reports);
+  /** A setting, marked when it is the default's. */
+  const said = (value: string, set: boolean): string =>
+    set ? value : `${value} (default)`;
+  return mode === "none"
+    ? "reports: bundle none · no Allure report"
+    : `reports: bundle ${said(mode, chosen?.mode !== undefined)} · Allure traces ${said(traces, chosen?.traces !== undefined)}`;
 }
 
 /**

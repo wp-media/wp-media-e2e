@@ -14,6 +14,7 @@ import type { ProductList } from "./config/product-list";
 import { allSecretValues } from "./config/secrets";
 import {
   builtRef,
+  checkoutWarnings,
   dryRunReport,
   pluginText,
   type DryRunOptions,
@@ -202,6 +203,8 @@ async function report(
     folder?: string;
     stateWarnings?: readonly string[];
     absolute?: boolean;
+    /** The checkout paths are shown from, in place of this spec's folder. */
+    shownFrom?: string;
     /** Sites put in a selected cell's place after the check, which would refuse them. */
     pastCheck?: Readonly<Record<string, CheckedTask["cell"]["sites"]>>;
   } = {},
@@ -230,7 +233,9 @@ async function report(
     }),
   };
   const reportOptions: DryRunOptions = {
-    ...(options.absolute === true ? {} : { checkout }),
+    ...(options.absolute === true
+      ? {}
+      : { checkout: options.shownFrom ?? checkout }),
     ...(options.stateWarnings === undefined
       ? {}
       : { stateWarnings: options.stateWarnings }),
@@ -252,6 +257,7 @@ test.describe("dryRunReport", () => {
       "  site https://bwu4.qa.test · qa-apache",
       "servers: QA-LNMP (bpng), qa-apache (bfap)",
       "runs: retries 2 · reports kept 20",
+      "reports: bundle archive · Allure traces strip",
       'notifications: slack ("E2E Orchestrator", scp from auto-e2e) · datator',
       "secrets for the runs: GITHUB_TOKEN, BWP_S3_ACCESS_KEY_ID, BWP_S3_SECRET_ACCESS_KEY",
       "no warnings",
@@ -337,12 +343,40 @@ test.describe("dryRunReport", () => {
     expect(lines[3]).toBe(
       "  backwpup pro@nginx · develop (default) · version 9.99.99 (default) · every scenario · cooldown 5m",
     );
-    expect(lines.slice(-4)).toEqual([
+    expect(lines.slice(-5)).toEqual([
       "runs: retries the suite's default · reports kept the suite's default",
+      "reports: bundle archive (default) · Allure traces strip (default)",
       "notifications: none",
       "secrets for the runs: none",
       "no warnings",
     ]);
+  });
+
+  test("names the bundle each run gets: the mode and traces chosen, or none and no Allure", async () => {
+    const task = {
+      id: "bpng",
+      type: "loop",
+      product: "backwpup",
+      cell: "pro@nginx",
+    };
+    expect(
+      await report({
+        tasks: [task],
+        reports: { bundle: { mode: "both" } },
+      }),
+    ).toContain("reports: bundle both · Allure traces strip (default)");
+    expect(
+      await report({
+        tasks: [task],
+        reports: { bundle: { traces: "keep" } },
+      }),
+    ).toContain("reports: bundle archive (default) · Allure traces keep");
+    expect(
+      await report({
+        tasks: [task],
+        reports: { bundle: { mode: "none", traces: "keep" } },
+      }),
+    ).toContain("reports: bundle none · no Allure report");
   });
 
   test("a task's own cooldown and version on the default ref", async () => {
@@ -722,6 +756,50 @@ test.describe("dryRunReport", () => {
     expect(warning.startsWith("warning: two lines w")).toBe(true);
     expect(Array.from(warning)).toHaveLength(2_000);
     expect(warning.endsWith("…")).toBe(true);
+  });
+});
+
+test.describe("checkoutWarnings", () => {
+  const WARNED = "a pasted scp command may fail; move it to such a path";
+
+  test("a checkout no shell reads specially is said nothing of", () => {
+    expect(checkoutWarnings("/srv/wp-media-e2e_1.0@x", "auto-e2e")).toEqual([]);
+  });
+
+  test("a space, a quote, $, a backtick or a backslash in the checkout is warned of, naming it", () => {
+    for (const checkout of [
+      "/srv/my e2e",
+      "/srv/it's",
+      "/srv/$HOME",
+      "/srv/a`b`",
+      "/srv/a\\b",
+    ]) {
+      const [warning, ...more] = checkoutWarnings(checkout, "auto-e2e");
+      expect(more).toEqual([]);
+      expect(warning).toContain(JSON.stringify(checkout));
+      expect(warning).toContain(WARNED);
+    }
+  });
+
+  test("nothing without an scp host (no command is given) or a checkout", () => {
+    expect(checkoutWarnings("/srv/my e2e", undefined)).toEqual([]);
+    expect(checkoutWarnings(undefined, "auto-e2e")).toEqual([]);
+  });
+
+  test("the dry run lists it among its warnings", async () => {
+    const config = {
+      ...(example() as object),
+      reports: { sshHost: "auto-e2e" },
+    };
+    const lines = await report(config, { shownFrom: "/srv/my e2e" });
+    expect(
+      lines.filter((line) => line.startsWith("warning: the checkout ")),
+    ).toEqual([
+      `warning: the checkout "/srv/my e2e" has characters besides letters, digits and _@%+=:,./- — ${WARNED}`,
+    ]);
+    expect(await report(config)).not.toContainEqual(
+      expect.stringContaining("warning: the checkout"),
+    );
   });
 });
 

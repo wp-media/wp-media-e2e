@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { BUNDLE_MODES } from "../../src/common/reporting/report-bundle";
 import { MAX_REPORTS_KEEP } from "../../src/common/reporting/retention";
 
 /**
@@ -296,6 +297,13 @@ export const configSchema = z
           .regex(SSH_HOST_PATTERN, {
             error:
               "must be a host name or alias for scp, optionally user@host, without spaces",
+          })
+          .optional(),
+        // Each run's download bundle: `report.tar.gz`, `report/`, both or none; Allure's traces.
+        bundle: z
+          .strictObject({
+            mode: z.enum(BUNDLE_MODES).optional(),
+            traces: z.enum(["strip", "keep"]).optional(),
           })
           .optional(),
       })

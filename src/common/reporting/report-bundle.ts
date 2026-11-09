@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
   chmod,
@@ -27,6 +26,9 @@ import {
   generateAllureReport,
   isProcessAlive,
   keepTail,
+  releaseStaleWorkDirs as releaseStaleAllureWorkDirs,
+  sweepMayRelease,
+  type StaleWorkDirSweep,
   releaseWorkDir,
   staleWorkDirNames,
   WORK_ASIDE_DIR,
@@ -63,8 +65,14 @@ import {
   type EntryKind,
   type ReportFolder,
 } from "./bundle-manifest";
-import { errnoCode, readHead, treeBytes } from "./report-tree";
+import { KILL_GRACE_MS, runInOwnGroup } from "./child-group";
+import { errnoCode, readHead, treeBytesWithin } from "./report-tree";
 import { formatBytes } from "./retention";
+
+// What a caller needs to configure a bundle, from this one module.
+export { BUNDLE_MODES, type BundleMode } from "./bundle-manifest";
+export { type AllureTraces } from "./allure-results";
+export { KILL_GRACE_MS } from "./child-group";
 
 /**
  * A run's report bundle: what a person downloads to look at a run — a landing page, the Playwright
@@ -108,10 +116,14 @@ export interface ReportBundleOptions {
   /** Strip Playwright traces from the Allure report (one file per plugin) or keep them (a folder). */
   readonly traces: AllureTraces;
   /**
-   * Stops the build: Allure and `tar` are sent SIGTERM and waited for, nothing is put in place. Not
-   * checked once the bundle is being put in place (at most three renames).
+   * Stops the build: Allure's and `tar`'s process groups (each runs in its own, `child-group.ts`, so a
+   * signal to the caller's group never reaches them) are sent SIGTERM and waited for, nothing is put
+   * in place. Not checked once the bundle is being put in place (at most three renames). A child still running
+   * {@link ReportBundleOptions.killGraceMs} after SIGTERM is sent SIGKILL.
    */
   readonly signal?: AbortSignal;
+  /** How long Allure and `tar` have to end after a stop's SIGTERM; default {@link KILL_GRACE_MS}. */
+  readonly killGraceMs?: number;
   /** Gets one line per thing worth logging: the sizes, a missing report, Allure's failure. */
   readonly log?: (line: string) => void;
   /** The cell's Allure history; default `allure-history.jsonl` beside the run. */
@@ -194,7 +206,8 @@ export async function buildReportBundle(
     const stage = join(work, options.name);
     await mkdir(stage, { mode: 0o700 });
     const built = await stageBundle(runDir, stage, options);
-    const bytes = treeBytes(stage);
+    const bytes = await treeBytesWithin(stage, options.signal);
+    // Also what makes a size cut short by a stop never count.
     throwIfAborted(options.signal);
     let archive: string | undefined;
     if (outputs.archive) {
@@ -422,6 +435,9 @@ async function stageAllure(
         options.historyPath ?? join(dirname(runDir), "allure-history.jsonl"),
       traces: options.traces,
       signal: options.signal,
+      ...(options.killGraceMs === undefined
+        ? {}
+        : { killGraceMs: options.killGraceMs }),
       ...(options.allureBin === undefined
         ? {}
         : { allureBin: options.allureBin }),
@@ -536,29 +552,19 @@ async function packArchive(
   archive: string,
   options: ReportBundleOptions,
 ): Promise<void> {
-  const child = spawn(options.tarBin ?? "tar", tarArgs(archive, work, name), {
+  let output: Buffer = Buffer.alloc(0);
+  const ended = await runInOwnGroup({
+    bin: options.tarBin ?? "tar",
+    args: tarArgs(archive, work, name),
     cwd: work,
     env: tarEnv(process.env),
-    stdio: ["ignore", "ignore", "pipe"],
+    stdout: "ignore",
+    stderr: "pipe",
+    onOutput: (chunk) => {
+      output = keepTail(output, chunk);
+    },
     signal: options.signal,
-  });
-  let output: Buffer = Buffer.alloc(0);
-  child.stderr.on("data", (chunk: Buffer) => {
-    output = keepTail(output, chunk);
-  });
-  const ended = await new Promise<
-    | { kind: "spawn-error"; code: string }
-    | { kind: "closed"; code: number | null; signal: NodeJS.Signals | null }
-  >((settle) => {
-    child.once("error", (error) => {
-      // Only a child that never started ends here; a running one's `close` follows, waited for.
-      if (child.pid === undefined) {
-        settle({ kind: "spawn-error", code: errnoCode(error) ?? error.name });
-      }
-    });
-    child.once("close", (code, signal) => {
-      settle({ kind: "closed", code, signal });
-    });
+    killGraceMs: options.killGraceMs ?? KILL_GRACE_MS,
   });
   throwIfAborted(options.signal);
   if (ended.kind === "spawn-error") {
@@ -751,14 +757,36 @@ async function assertRunFolder(runDir: string): Promise<void> {
 }
 
 /**
+ * Releases what ended builds and Allure generations left in a run (both kinds of work folder,
+ * {@link releaseStaleWorkDirs}): for a caller sweeping runs it will not bundle again, since a
+ * SIGKILLed build's leftovers otherwise wait for the next build of that same run. Best-effort, never
+ * rejects; a folder of a live process, or this process's in use, is left alone — and, under the
+ * sweep's terms, one modified too recently, or any once its signal aborts.
+ *
+ * @param runDir - the run folder.
+ * @param sweep - the sweep's terms ({@link StaleWorkDirSweep}).
+ */
+export async function releaseLeftoverWorkDirs(
+  runDir: string,
+  sweep: StaleWorkDirSweep = {},
+): Promise<void> {
+  await releaseStaleWorkDirs(runDir, sweep).catch(() => undefined);
+  await releaseStaleAllureWorkDirs(runDir, sweep).catch(() => undefined);
+}
+
+/**
  * Releases the work folders no build uses any more: named for a pid no longer running, or for this
  * process's but not in use. An earlier `report/` a killed build left aside goes back first when its
  * place is empty, as the Allure generator's do ({@link releaseWorkDir}). Best-effort: one that cannot
  * be released goes with the run.
  *
  * @param runDir - the run folder.
+ * @param sweep - a sweep's further terms; none for a build's own run.
  */
-async function releaseStaleWorkDirs(runDir: string): Promise<void> {
+async function releaseStaleWorkDirs(
+  runDir: string,
+  sweep: StaleWorkDirSweep = {},
+): Promise<void> {
   let names: string[];
   try {
     names = await readdir(runDir);
@@ -775,9 +803,10 @@ async function releaseStaleWorkDirs(runDir: string): Promise<void> {
     WORK_NAME,
   );
   for (const name of stale) {
-    await releaseWorkDir(join(runDir, name), { putBack: true }).catch(
-      () => false,
-    );
+    if (sweep.signal?.aborted === true) return;
+    const work = join(runDir, name);
+    if (!(await sweepMayRelease(work, sweep))) continue;
+    await releaseWorkDir(work, { putBack: true }).catch(() => false);
   }
 }
 

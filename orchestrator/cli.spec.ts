@@ -383,6 +383,7 @@ test.describe("the command, in a child process", () => {
       "  site https://backwpup.free-apache.qa.test · 203.0.113.20",
       "servers: 203.0.113.21 (bpng), 203.0.113.20 (bfap)",
       "runs: retries 2 · reports kept 20",
+      "reports: bundle archive · Allure traces strip",
       'notifications: slack ("E2E Orchestrator", scp from auto-e2e) · datator',
       "secrets for the runs: GITHUB_TOKEN, BWP_S3_ACCESS_KEY_ID, BWP_S3_SECRET_ACCESS_KEY",
       "no warnings",

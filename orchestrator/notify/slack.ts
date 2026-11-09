@@ -3,6 +3,7 @@ import type {
   RunFinishedEvent,
 } from "../events/run-finished";
 import { webhookSecrets } from "../config/secrets";
+import { downloadCommand } from "../runs/bundle";
 import type { RunStatus } from "../runs/outcome";
 import { shellWord } from "../text";
 import { DEFAULT_POST_TIMEOUT_MS, postJson, type Delivery } from "./post";
@@ -25,7 +26,7 @@ import { DEFAULT_POST_TIMEOUT_MS, postJson, type Delivery } from "./post";
 export interface SlackMessageOptions {
   /** Prefixes the headline, `*[AutoE2E nginx]*` — which instance is speaking. */
   readonly instance?: string;
-  /** Turns report and log paths into `scp` commands from this host. */
+  /** Turns report and log paths into `scp` commands from this host; a bundle into its download. */
   readonly sshHost?: string;
 }
 
@@ -167,8 +168,54 @@ function whereIs(path: string, folder: boolean, sshHost?: string): string {
     sshHost === undefined
       ? path
       : `scp ${folder ? "-r " : ""}${sshHost}:${shellWord(path)} .`;
-  const shown = escapeCut(text, MAX_SHOWN);
+  return asCode(escapeCut(text, MAX_SHOWN));
+}
+
+/**
+ * Escaped text as code, which Slack shows as written — unless it holds a backtick, which would end
+ * the code early: then as it is.
+ *
+ * @param shown - text already escaped for Slack.
+ * @returns it, in backticks when it can be.
+ */
+function asCode(shown: string): string {
   return shown.includes("`") ? shown : `\`${shown}\``;
+}
+
+/**
+ * Whether a command is shown whole in Slack: its escaped form — `&&` is `&amp;&amp;` there — within
+ * {@link MAX_SHOWN}. The one rule for Slack and the terminal, so both show the command or neither does.
+ *
+ * @param command - the command, raw.
+ * @returns `true` when Slack shows it.
+ */
+export function fitsSlack(command: string): boolean {
+  return escapeSlack(command).length <= MAX_SHOWN;
+}
+
+/**
+ * The `Report:` line's text. A run with a bundle: with `sshHost`, the one command that downloads it
+ * and leaves `./<name>/` (`bundleCommand`), never cut — a command longer than {@link MAX_SHOWN} once
+ * escaped gives the bundle's path instead; without, the bundle's path. A run without one — the mode
+ * is `none`, or the bundle failed, ran out of time or was stopped — gets the raw report folder, as
+ * {@link whereIs} gives it. Slack's escaping writes `&&` as `&amp;&amp;`, which it shows as `&&`.
+ *
+ * @param dir - the run's report folder.
+ * @param bundle - the run's bundle, or `null`.
+ * @param sshHost - the `scp` host.
+ * @returns the text, escaped for Slack.
+ */
+function reportWhere(
+  dir: string,
+  bundle: RunFinishedEvent["report"]["bundle"],
+  sshHost?: string,
+): string {
+  if (bundle === null) return whereIs(dir, true, sshHost);
+  if (sshHost !== undefined) {
+    const command = downloadCommand(bundle, sshHost);
+    if (fitsSlack(command)) return asCode(escapeSlack(command));
+  }
+  return whereIs(bundle.path, false);
 }
 
 /**
@@ -207,7 +254,9 @@ export function slackMessage(
       : [`Log: ${whereIs(event.report.log, false, options.sshHost)}`]),
     ...(event.report.dir === null
       ? []
-      : [`Report: ${whereIs(event.report.dir, true, options.sshHost)}`]),
+      : [
+          `Report: ${reportWhere(event.report.dir, event.report.bundle, options.sshHost)}`,
+        ]),
   ].join("\n");
 }
 

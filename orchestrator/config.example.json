@@ -34,6 +34,9 @@
       "apiKey": "replace-me"
     }
   },
-  "reports": { "sshHost": "auto-e2e" },
+  "reports": {
+    "sshHost": "auto-e2e",
+    "bundle": { "mode": "archive", "traces": "strip" }
+  },
   "serverWarningThreshold": 5
 }

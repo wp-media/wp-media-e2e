@@ -116,6 +116,8 @@ export interface RunEndInput {
   readonly secrets: readonly string[];
   /** When the run ended. */
   readonly endedAt: Date;
+  /** The run's download bundle, when one was built. */
+  readonly bundle?: RunFinishedInput["bundle"];
 }
 
 /**
@@ -170,6 +172,7 @@ export async function endRun(input: RunEndInput): Promise<RunEnd> {
     ...(facts === undefined ? {} : { facts }),
     reportDir: identity.reportDir,
     log: identity.log,
+    ...(input.bundle === undefined ? {} : { bundle: input.bundle }),
     secrets,
   });
   return { outcome, event };

@@ -9,6 +9,7 @@ import {
   FENCE_BREAK,
   formatDuration,
   MAX_LISTED_SCENARIOS,
+  MAX_SHOWN,
   sendSlack,
   slackMessage,
 } from "./slack";
@@ -82,7 +83,7 @@ test.describe("slackMessage", () => {
         reason:
           "the run could not start: its cell's site locks are no longer this orchestrator's",
         durationMs: 0,
-        report: { dir: null, log: null },
+        report: { dir: null, log: null, bundle: null },
       }),
       { sshHost: "auto-e2e" },
     );
@@ -156,7 +157,9 @@ test.describe("slackMessage", () => {
       /\nReport: `\/home\/e2e\/reports\/backwpup\/pro@nginx\/2026-10-13T10-15-31-042Z-bpng-12`$/,
     );
     const text = slackMessage(
-      finishedEvent({ report: { dir: "/srv/my e2e/r", log: "/srv/x.log" } }),
+      finishedEvent({
+        report: { dir: "/srv/my e2e/r", log: "/srv/x.log", bundle: null },
+      }),
       { sshHost: "runner" },
     );
     expect(text).toMatch(/\nReport: `scp -r runner:'\/srv\/my e2e\/r' \.`$/);
@@ -259,7 +262,7 @@ test.describe("slackMessage", () => {
             error: huge,
           }),
         ),
-        report: { dir: huge, log: huge },
+        report: { dir: huge, log: huge, bundle: null },
       }),
       { instance: huge, sshHost: "h" },
     );
@@ -356,7 +359,9 @@ test.describe("slackMessage", () => {
 
   test("shows a path holding a backtick as plain text, since code would end early", () => {
     const text = slackMessage(
-      finishedEvent({ report: { dir: "/srv/a`b", log: "/srv/x.log" } }),
+      finishedEvent({
+        report: { dir: "/srv/a`b", log: "/srv/x.log", bundle: null },
+      }),
     );
     expect(text).toMatch(/\nReport: \/srv\/a`b$/);
   });
@@ -484,6 +489,111 @@ test.describe("sendSlack", () => {
       expect(
         await sendSlack("x", { webhookUrl: `${sink.url}/services/T0/B0/x` }),
       ).toEqual({ ok: false, status: 200, detail: "invalid_payload" });
+    } finally {
+      await sink.close();
+    }
+  });
+});
+
+test.describe("slackMessage — the Report line with a bundle", () => {
+  const DIR =
+    "/home/e2e/reports/backwpup/pro@nginx/2026-10-13T10-15-31-042Z-bpng-12";
+  const NAME = "backwpup-pro@nginx-2026-10-13T10-15-31-042Z-bpng-12";
+  const ARCHIVE = {
+    kind: "archive",
+    path: `${DIR}/report.tar.gz`,
+    name: NAME,
+  } as const;
+
+  /** The message's `Report:` line for a run with this report. */
+  function reportLine(
+    report: Partial<ReturnType<typeof finishedEvent>["report"]>,
+    sshHost?: string,
+  ): string | undefined {
+    const event = finishedEvent({
+      report: { dir: DIR, log: "/home/e2e/run.log", bundle: null, ...report },
+    });
+    return slackMessage(event, sshHost === undefined ? {} : { sshHost })
+      .split("\n")
+      .find((line) => line.startsWith("Report: "));
+  }
+
+  test("an archive is one command: download, unpack, then remove — its && escaped as Slack requires", () => {
+    expect(reportLine({ bundle: ARCHIVE }, "auto-e2e")).toBe(
+      `Report: \`scp auto-e2e:${DIR}/report.tar.gz ${NAME}.tar.gz &amp;&amp; tar -xzf ${NAME}.tar.gz &amp;&amp; rm ${NAME}.tar.gz\``,
+    );
+  });
+
+  test("a folder is one scp -r into a folder named after the run", () => {
+    expect(
+      reportLine(
+        { bundle: { kind: "folder", path: `${DIR}/report`, name: NAME } },
+        "auto-e2e",
+      ),
+    ).toBe(`Report: \`scp -r auto-e2e:${DIR}/report ${NAME}\``);
+  });
+
+  test("without sshHost: the bundle's path", () => {
+    expect(reportLine({ bundle: ARCHIVE })).toBe(
+      `Report: \`${DIR}/report.tar.gz\``,
+    );
+  });
+
+  test("no bundle — none built, or it failed — gives the raw report folder, as before", () => {
+    expect(reportLine({}, "auto-e2e")).toBe(
+      `Report: \`scp -r auto-e2e:${DIR} .\``,
+    );
+    expect(reportLine({})).toBe(`Report: \`${DIR}\``);
+  });
+
+  test("a path with a space or a quote is quoted for the shell, every word", () => {
+    const dir = "/srv/my e2e/it's/R";
+    expect(
+      reportLine(
+        {
+          dir,
+          bundle: { kind: "archive", path: `${dir}/report.tar.gz`, name: NAME },
+        },
+        "auto-e2e",
+      ),
+    ).toBe(
+      `Report: \`scp auto-e2e:'/srv/my e2e/it'\\''s/R/report.tar.gz' ${NAME}.tar.gz &amp;&amp; tar -xzf ${NAME}.tar.gz &amp;&amp; rm ${NAME}.tar.gz\``,
+    );
+  });
+
+  test("a command longer than Slack shows once escaped is never cut: the archive's path instead", () => {
+    // Fits raw, not escaped: the four `&` grow by 16 characters.
+    const fixed =
+      `scp h: ${NAME}.tar.gz && tar -xzf ${NAME}.tar.gz && rm ${NAME}.tar.gz`
+        .length;
+    const path = `/${"p".repeat(MAX_SHOWN - fixed - 5 - 15)}/report.tar.gz`;
+    const bundle = { kind: "archive", path, name: NAME } as const;
+    const raw = `scp h:${path} ${NAME}.tar.gz && tar -xzf ${NAME}.tar.gz && rm ${NAME}.tar.gz`;
+    expect(raw.length).toBe(MAX_SHOWN - 5);
+    expect(escapeSlack(raw).length).toBe(MAX_SHOWN + 11);
+    expect(reportLine({ bundle }, "h")).toBe(`Report: \`${path}\``);
+    // One that fits escaped is given whole.
+    const short = { ...bundle, path: "/r/report.tar.gz" };
+    expect(reportLine({ bundle: short }, "h")).toContain("&amp;&amp; rm");
+  });
+
+  test("Slack receives &amp;&amp; in the payload, which it shows as &&", async () => {
+    const sink = await startSink(reply(200, "ok"));
+    try {
+      const text = slackMessage(
+        finishedEvent({
+          report: { dir: DIR, log: "/home/e2e/run.log", bundle: ARCHIVE },
+        }),
+        { sshHost: "auto-e2e" },
+      );
+      await sendSlack(text, { webhookUrl: `${sink.url}/services/T0/B0/x` });
+      const body = JSON.parse(sink.requests[0]?.body ?? "") as {
+        text: string;
+      };
+      expect(body.text).toContain(
+        `tar -xzf ${NAME}.tar.gz &amp;&amp; rm ${NAME}.tar.gz\``,
+      );
+      expect(body.text).not.toMatch(/[^;]&&/);
     } finally {
       await sink.close();
     }

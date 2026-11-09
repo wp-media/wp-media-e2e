@@ -103,6 +103,7 @@ export function finishedEvent(
     report: {
       dir: "/home/e2e/reports/backwpup/pro@nginx/2026-10-13T10-15-31-042Z-bpng-12",
       log: "/home/e2e/.orchestrator/runs/bpng-12/run.log",
+      bundle: null,
     },
     ...given,
   };

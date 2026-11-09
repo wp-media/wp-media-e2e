@@ -240,7 +240,7 @@ config file's folder (§4.9), so `--config` is the one switch. The committed
     "slack": { "webhookUrl": "https://hooks.slack.com/services/T00000000/B00000000/replace-me" },
     "datator": { "url": "https://datator.wp-media.me/e2e_tests/results/", "apiKey": "replace-me" }
   },
-  "reports": { "sshHost": "auto-e2e" },
+  "reports": { "sshHost": "auto-e2e", "bundle": { "mode": "archive", "traces": "strip" } },
   "serverWarningThreshold": 5
 }
 ```
@@ -265,6 +265,7 @@ reaches the placeholder check, not "no cell".
 | `notifications.slack.webhookUrl` | `https://hooks.slack.com/services/<hook>` only: an incoming webhook, the payload §4.7 sends |
 | `notifications.datator.url`, `.apiKey` | HTTPS, its path ending with `/` (without it Datator answers `301`, and the redirect drops the POST body, V119); the key printable ASCII, as an HTTP header value is (V369) |
 | `reports.sshHost` | Optional host or `user@host`, ≤ 255, neither part starting with `-`, so it can never read as an `scp` option (V368); turns Slack's report path into an `scp` command |
+| `reports.bundle` | Optional `mode` (`archive` default, `folder`, `both`, `none`) and `traces` (`strip` default, `keep`): each run's download bundle ([report-delivery plan](orchestrator-report-delivery-plan.md) R3); the dry run names both |
 | `serverWarningThreshold` | 1–1000, default 5: up to four suites share a QA server well |
 
 - Both URLs must be written exactly as `URL` reads them back, with no user, password, port, query or
@@ -383,8 +384,10 @@ reaches the placeholder check, not "no cell".
   load `.env` and stamp the orchestrator's own `RUN_ID` (V84); runs never get `REPORT_ROOT`.
 - One run (`tasks/cycle.ts`), each step on its own (one failing never skips the next; each failure a
   masked line): the number → the identity → the run named in its site locks (§4.3) → `launchRun` →
-  the started line → the wait → `endRun` → `run-finished.json` → `datator.json` → the `ended` record
-  → the outcome line → `publish` → run-folder pruning (§4.9). A stop asked before the run has its
+  the started line → the wait → the download bundle (`runs/bundle.ts`, report-delivery R3: the cell's
+  sweep and `buildReportBundle`, ≤ 240 s, best-effort; after `endedAt` is read, so the duration
+  excludes it) → `endRun` → `run-finished.json` → `datator.json` → the `ended` record → the outcome
+  line and the bundle's `report:`/`fetch:` lines → `publish` → run-folder pruning (§4.9). A stop asked before the run has its
   number starts nothing; asked while the number is taken, the number is spent and nothing starts
   (`<id> not started: <why>`; no record, no `run.finished`); asked later but before `bddgen`'s
   starting record (while its site locks are named or during the launch), nothing is spawned and the
@@ -552,6 +555,11 @@ results. `bddgen` exiting changes nothing: its group's kill still keeps the runn
   drain the terminal and standard error together (on macOS a pipe is written asynchronously and
   `process.exit` drops what it holds, V538); 130. From the exit code on, the shutdown is disposed and
   the parent watch stopped: a signal during the exit says nothing. Stopped and killed runs are still announced (`run.finished`).
+- A run's download bundle (report-delivery R3): a drain lets it finish (Allure and `tar` run in their
+  own process groups, so the terminal's Ctrl-C never reaches them); an interrupt or a kill — asked of
+  the cycle, or taken by the launch — aborts it: their groups get SIGTERM, then SIGKILL after 5 s, and
+  nothing is put in place. So the budgets hold without growing: at worst it ends 5 s after the
+  interrupt. A filesystem call that stalls cannot be aborted; `KILL_SETTLE_MS` still bounds the wait.
 - A killed run leaves its site dirty until its cell's next run, whose `@plugin` Before path (0C's
   `stopRunningWork` first) recovers it (Phase 0's 0C live check L3; again in 5J, V491). The parent's
   cleanup chain after a kill comes later.
@@ -588,7 +596,7 @@ results. `bddgen` exiting changes nothing: its group's kill still keeps the runn
   | `startedAt`, `endedAt`, `durationMs` | |
   | `counts` | `total`, `passed`, `failed`, `flaky`, `skipped` (drained ones included), `didNotRun` (an interrupted one included) |
   | `scenarios` | each that finished, in first-ended order: `feature`, `name`, `path` (Rule and Outline titles, at most 8 deep), `status`, `attempts`, `durationMs`, `error` (the first, ANSI stripped, line feeds kept, ≤ 2,000 code points) |
-  | `report` | `dir`, `log`, absolute; both `null` for a run refused before its launch made a folder |
+  | `report` | `dir`, `log`, absolute; `bundle` (`kind` `archive`/`folder`, `path`, `name`) or `null` — added within `v: 1` (report-delivery R3); all three `null` for a run refused before its launch made a folder |
 
 - Built by a pure function (`buildRunFinished`) from the run, its outcome, results and facts, so
   every field is unit-testable. Its text is safe to send: masked (§4.10), terminal codes removed,
@@ -640,7 +648,10 @@ results. `bddgen` exiting changes nothing: its group's kill still keeps the runn
   backtick). With `reports.sshHost` they become `scp [-r] <host>:<path> .`, single-quoted when a
   shell would split them — quoting for the local shell only: scp's default SFTP mode globs `*`, `?`
   and `[` at the far end, and legacy `-O` hands the path to a remote shell unquoted (V390). The
-  paths are the checkout's and the state directory's.
+  paths are the checkout's and the state directory's. A run with a bundle (report-delivery R3):
+  `Report:` is `bundleCommand` — `scp <host>:<archive> <name>.tar.gz && tar -xzf <name>.tar.gz && rm
+  <name>.tar.gz` (`scp -r <host>:<run>/report <name>` for `folder`) —, never cut: over 600
+  characters escaped, or without `sshHost`, the bundle's path; no bundle, the raw folder as above.
 - **Next run in the message — the user's idea, 2026-10-22, not a decision.** Append, at the end of
   every Slack notification, when the next run starts — e.g. `Next Run in 60 minutes @ 19:53:23 UTC`
   for a 60-minute cooldown. The implementing agent must first assess whether this is the best
@@ -825,7 +836,7 @@ orchestrator/
                             table (plain layout), table-rows (its colours), view (capabilities),
                             watch (the shell: polls, sink); table.tmux.spec.ts (a real terminal)
   runs/                     identity, environment, commands, launch, process-group, stream-end, stop,
-                            shutdown, end, results, facts, outcome, record, leader
+                            shutdown, end, results, facts, outcome, record, leader, bundle
   events/                   bus, run-finished (types + builder)
   notify/                   post, slack, datator — pure formatters, thin senders; subscribe
   state/                    atomic, read, errors, lock, lock-owner, pid-space, leftovers, cell-lock,

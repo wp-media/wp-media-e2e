@@ -47,19 +47,21 @@ jobs:
       - uses: ./.github/actions/setup-chromium
         timeout-minutes: 5
       # tmux is not on the runner image; live.tmux.spec.ts, live-block.run.spec.ts and the
-      # orchestrator's table.tmux.spec.ts fail under CI without it. Waits for the dpkg lock (an
-      # image's own apt job may hold it) and retries once.
-      - name: Install tmux
+      # orchestrator's table.tmux.spec.ts fail under CI without it. zsh: the report bundle's
+      # paste specs (runs/bundle.spec.ts) run the fetch command in zsh too, and skip it when it is
+      # missing. Waits for the dpkg lock (an image's own apt job may hold it) and retries once.
+      - name: Install tmux and zsh
         timeout-minutes: 3
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          install_tmux() {
+          install_tools() {
             sudo -E apt-get -o DPkg::Lock::Timeout=60 update -qq &&
-              sudo -E apt-get -o DPkg::Lock::Timeout=60 install -y -qq --no-install-recommends tmux
+              sudo -E apt-get -o DPkg::Lock::Timeout=60 install -y -qq --no-install-recommends tmux zsh
           }
-          install_tmux || { sleep 10; install_tmux; }
+          install_tools || { sleep 10; install_tools; }
           tmux -V
+          zsh --version
       - run: npm run test:unit -- --shard=1/2
       - name: Upload report on failure
         if: ${{ failure() }}
@@ -80,19 +82,21 @@ jobs:
       - uses: ./.github/actions/setup-chromium
         timeout-minutes: 5
       # tmux is not on the runner image; live.tmux.spec.ts, live-block.run.spec.ts and the
-      # orchestrator's table.tmux.spec.ts fail under CI without it. Waits for the dpkg lock (an
-      # image's own apt job may hold it) and retries once.
-      - name: Install tmux
+      # orchestrator's table.tmux.spec.ts fail under CI without it. zsh: the report bundle's
+      # paste specs (runs/bundle.spec.ts) run the fetch command in zsh too, and skip it when it is
+      # missing. Waits for the dpkg lock (an image's own apt job may hold it) and retries once.
+      - name: Install tmux and zsh
         timeout-minutes: 3
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          install_tmux() {
+          install_tools() {
             sudo -E apt-get -o DPkg::Lock::Timeout=60 update -qq &&
-              sudo -E apt-get -o DPkg::Lock::Timeout=60 install -y -qq --no-install-recommends tmux
+              sudo -E apt-get -o DPkg::Lock::Timeout=60 install -y -qq --no-install-recommends tmux zsh
           }
-          install_tmux || { sleep 10; install_tmux; }
+          install_tools || { sleep 10; install_tools; }
           tmux -V
+          zsh --version
       - run: npm run test:unit -- --shard=2/2
       - name: Upload report on failure
         if: ${{ failure() }}
