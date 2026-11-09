@@ -212,6 +212,7 @@ test.describe("runAllureCommand", () => {
           outputDir: options.outputDir,
           historyPath: options.historyPath,
           layout: "single-file",
+          analytics: { cleaned: ["awesome/index.html"], left: [] },
         };
       },
       serve: (outputDir) => {
@@ -284,6 +285,60 @@ test.describe("runAllureCommand", () => {
     await runAllureCommand(parseRun([]), { ...io, signal: stop.signal });
 
     expect(generated[0]?.signal).toBe(stop.signal);
+  });
+
+  test("a page whose analytics loader was left is warned about, and the report still counts", async () => {
+    makeRun("wp-rocket", "apache", "r", 1);
+    const { io, errors } = recordingIo((options) =>
+      Promise.resolve({
+        results: 1,
+        strippedTraces: 0,
+        skipped: [],
+        outputDir: options.outputDir,
+        historyPath: options.historyPath,
+        layout: "single-file",
+        analytics: {
+          cleaned: [],
+          left: ["awesome/index.html", "dashboard/index.html"],
+        },
+      }),
+    );
+
+    expect(await runAllureCommand(parseRun([]), io)).toBe(EXIT.ok);
+    expect(errors).toEqual([
+      "Warning: Allure's analytics loader (Google Tag Manager) was not recognised in " +
+        "awesome/index.html, dashboard/index.html: left as Allure wrote it, so those pages load it " +
+        "when opened online.",
+    ]);
+  });
+
+  test("a single page whose analytics loader was left is warned about too", async () => {
+    makeRun("wp-rocket", "apache", "r", 1);
+    const { io, errors } = recordingIo((options) =>
+      Promise.resolve({
+        results: 1,
+        strippedTraces: 0,
+        skipped: [],
+        outputDir: options.outputDir,
+        historyPath: options.historyPath,
+        layout: "single-file",
+        analytics: { cleaned: [], left: ["awesome/index.html"] },
+      }),
+    );
+
+    expect(await runAllureCommand(parseRun([]), io)).toBe(EXIT.ok);
+    expect(errors).toEqual([
+      "Warning: Allure's analytics loader (Google Tag Manager) was not recognised in " +
+        "awesome/index.html: left as Allure wrote it, so those pages load it when opened online.",
+    ]);
+  });
+
+  test("a clean report prints no warning", async () => {
+    makeRun("wp-rocket", "apache", "r", 1);
+    const { io, errors } = recordingIo();
+
+    expect(await runAllureCommand(parseRun([]), io)).toBe(EXIT.ok);
+    expect(errors).toEqual([]);
   });
 
   test("a stopped generation is reported as stopped, and exits 1", async () => {
@@ -449,6 +504,9 @@ test.describe("npm run report:allure, through the real script and Allure", () =>
     expect(readdirSync(awesome).sort()).toEqual(["index.html", "summary.json"]);
     expect(readFileSync(join(awesome, "index.html"), "utf8")).toContain(
       "BackWPup · newest",
+    );
+    expect(readFileSync(join(awesome, "index.html"), "utf8")).not.toContain(
+      "googletagmanager",
     );
     const history = readFileSync(
       join(root, "backwpup", "pro@nginx", "allure-history.jsonl"),

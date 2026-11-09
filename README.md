@@ -200,12 +200,26 @@ npm run report:allure -- wp-rocket apache --open                         # gener
 It lands in `reports/<product>/<cell>/<RUN_ID>/allure/`, named by the run's facts line, one HTML file
 per plugin (traces included) that opens from disk. **Trends accumulate** via a per-cell
 `reports/<product>/<cell>/allure-history.jsonl`, so the trend chart fills from the second run; flaky
-tests are flagged per run from retries. Generation works on a copy in a hidden folder of the run and
+tests are flagged per run from retries. Each line is tagged with its run (`"e2eRun": "<RUN_ID>"`): a run
+reported again (a rebuilt bundle, a later `report:allure`) replaces its own line, keeping its place and
+time, so the trend has one point per run. Generation works on a copy in a hidden folder of the run and
 replaces the report and history only once Allure succeeded: a failure, or Ctrl-C (exit 130), leaves
 both as they were. Empty results and a malformed result are refused (Allure would report them as an
 empty or partial success). A run's end summary prints the command for that very run.
+Allure 3's plugins hard-code a Google Tag Manager loader; generation removes that exact block from
+every page (a page where it is not recognised is left as written, and the command warns).
 Content (categories, widgets, single-file output) is set in [`allurerc.mjs`](allurerc.mjs); the code
 is [`allure-report.ts`](src/common/reporting/allure-report.ts).
+
+A run's **download bundle** ([`report-bundle.ts`](src/common/reporting/report-bundle.ts),
+`buildReportBundle`; the orchestrator will call it at each run's end) puts only what a person opens —
+a landing `index.html`, `playwright/`, `cucumber/`, a fresh `allure/` and `run-facts.json`, never
+`allure-results/` or `results.jsonl` — in `<run>/report/` (0700) and/or `<run>/report.tar.gz` (0600),
+whose one top-level entry is `<product>-<cell>-<RUN_ID>/` (never starting with `-`, `.` or `@`, no
+`/` or `:`, which tar or scp would read otherwise). Inside the reports only folders and regular files
+are copied: links, FIFOs and sockets are left out and logged. The landing page opens from disk; where a
+report needs HTTP (Playwright's trace viewer, rich Cucumber, an Allure that keeps traces) it gives the
+command, run from the unpacked folder: `npx playwright show-report playwright`, `npx allure open allure`.
 
 ## Visual regression
 

@@ -30,14 +30,16 @@ export default defineConfig({
     awesome: {
       options: { singleFile, reportLanguage: "en" },
     },
-    // A configurable overview: status trend across runs + a results pie.
+    // A configurable overview: this run's results + their trend across runs. Chart types are Allure
+    // 3's (`currentStatus`, `statusDynamics`, …); an unknown one draws nothing, and a layout with no
+    // chart leaves the dashboard failing to load its data.
     dashboard: {
       options: {
         singleFile,
         reportLanguage: "en",
         layout: [
-          { type: "trend", dataType: "status", mode: "percent" },
-          { type: "pie", title: "Test Results" },
+          { type: "currentStatus", title: "Test results" },
+          { type: "statusDynamics", title: "Status trend" },
         ],
       },
     },

@@ -1,7 +1,7 @@
 # Orchestrator Report Delivery — prepared download bundles
 
-Status: R1 done (2026-11-03); R2–R4 planned; a Phase 1 slice; modernization Phase 7's renderer, which
-R3 needs, is done.
+Status: R1 and R2 done (2026-11-03); R3–R4 planned; a Phase 1 slice; modernization Phase 7's
+renderer, which R3 needs, is done.
 Parent: the [orchestrator plan](orchestrator-plan.md) (§2 Reports, §3 Planned). Phase 0.5 left
 Allure generation out; this plan adds the missing delivery piece: one prepared download per run.
 
@@ -94,10 +94,10 @@ scp auto-e2e:/path/to/wp-media-e2e/reports/backwpup/pro@nginx/2026-10-06T02-47-1
 - Bundle: a pure manifest chooses entries; copy with `fs.cp`; generate a no-JS landing page
   (escaped facts, links only, system light/dark, no external assets); pack with the system `tar`.
   The archive's single top-level entry is `<name>/`, so `tar -xzf` yields `<name>/index.html`.
-  Build it as `<run>/.bundle-tmp/<name>/` and pack with `tar -czf … -C <run>/.bundle-tmp <name>`;
-  never `--transform`/`-s` (GNU and BSD tar differ). `folder`/`both` then rename it to
-  `<run>/report/`; the temp folder is always removed. `report/` is 0700 and `report.tar.gz` is
-  0600.
+  Build it as `<run>/.bundle-work-<pid>-<hex>/<name>/` and pack with
+  `COPYFILE_DISABLE=1 tar --no-xattrs --no-acls -czf … -C <work> <name>`; never `--transform`/`-s`
+  (GNU and BSD tar differ). `folder`/`both` then rename it to `<run>/report/`; the work folder is
+  always removed. `report/` is 0700 and `report.tar.gz` is 0600.
 - Config:
 
   ```json
@@ -181,14 +181,93 @@ scp auto-e2e:/path/to/wp-media-e2e/reports/backwpup/pro@nginx/2026-10-06T02-47-1
   SIGKILLed generation leaves its work folder (a full results copy: 62 MB on the heavy run) until the
   next generation in that run (R3, with the stop budgets).
 
-**R2 — Build and archive the bundle.** Depends: none. Parallel: R1. Effort: 1–2 days; medium.
-Goal: `buildReportBundle({ runDir, name, mode, traces })` → `report/` and/or `report.tar.gz`.
+**R2 — Build and archive the bundle.** Done 2026-11-03.
 
-- Manifest, copy, landing page, tar, permissions, missing reports, size logging; no raw results.
-- Tests: manifest; the archive's single top-level entry is `<name>/`; rich Cucumber; missing
-  Playwright `data/`/`trace/`; HTML escaping; archive contents; no `allure-results`/
-  `results.jsonl`; `none`/`folder`/`both`; permissions; a failure leaves no partial output.
-- Done: a fixture run yields a bundle whose `index.html` links every present report.
+- As built: `src/common/reporting/report-bundle.ts` (`buildReportBundle({ runDir, name, mode, traces,
+  signal?, log? })` → `ReportBundle`: archive/folder paths and bytes, unpacked bytes, every report
+  present or missing with why, skipped entries, `analyticsLeft`, `allureError`), `bundle-manifest.ts`
+  (pure: modes, name rules, report entries, serve notes), `bundle-landing.ts` (pure page),
+  `bundle-errors.ts`, `allure-analytics.ts` (GTM removal, below); spec helper
+  `__fixtures__/tar-listing.ts` (reads raw headers: bsdtar hides its own `._*`/xattr entries when
+  listing). Node builtins only, no `.env`/`RUN_ID`: added to `suite-imports.json` in a scratch copy, the
+  boundary spec passed (and failed on a planted env write); R3 admits it.
+- Flow: refuse a bad name (empty, `.`/`..`, a separator, a control, a leading `-`, `.` or `@`, a `:`,
+  over 255 bytes; spaces and quotes are fine) or mode; `none` returns at once (no Allure either);
+  release `.bundle-work-*` of dead pids (or this process's unused) as R1 does (`releaseWorkDir`: the
+  work folder records `report/`'s place, so an earlier one a kill left aside goes back; one that cannot
+  go back keeps its work folder); in a new 0700 work folder copy
+  `run-facts.json` (read with `O_NOFOLLOW|O_NONBLOCK`, ≤256 KiB, only when it parses) and each of
+  `playwright/`, `cucumber/` that is a real folder with a non-empty `index.html`, via `fs.cp` whose
+  filter keeps only folders and regular files (links, FIFOs, sockets named in `skipped`; unfiltered,
+  `fs.cp` throws on a FIFO or socket — `ERR_FS_CP_FIFO_PIPE`/`ERR_FS_CP_SOCKET`, measured on Node
+  24.22 — and the bundle would fail; it never opens one); generate
+  Allure into `<name>/allure` (R1, named by the facts title, the cell's history; any failure but a stop
+  becomes the landing page's reason and the log's full message; a report already in place when only
+  its history failed is kept); write the landing page; tar; put the folder in place (an existing
+  `report/` moved aside), then the archive by rename; if the archive cannot go in, the folder is undone.
+  A stop kills `tar`/Allure (SIGTERM, waited for) and puts nothing in place.
+- Landing page: CSP `default-src 'none'; style-src 'unsafe-inline'`, no script or external asset,
+  `prefers-color-scheme` light/dark (GitHub-like palette, AA), status in words, facts whitelisted and
+  masked (`printableLine`), every report linked or "not in this bundle: <why>". Serve notes: Playwright
+  with `trace/` (`npx playwright show-report playwright`; the trace viewer needs a service worker,
+  refused on `file://`), Cucumber with any subfolder (rich: `npx playwright show-report cucumber`),
+  Allure `folder` layout (`npx allure open allure`). Verified: `show-report` serves any static folder;
+  `allure open <dir>` serves a generated report from a folder without config.
+- Tar, measured: bsdtar 3.5.3 (macOS) adds `LIBARCHIVE.xattr.com.apple.provenance` pax records (GNU tar
+  1.35 warns once per entry) and AppleDouble `._*` entries (a second top-level `._<name>` on GNU
+  unpack); `COPYFILE_DISABLE=1` + `--no-xattrs --no-acls` (both tars accept them) remove both. A bundle
+  built on macOS unpacks on Ubuntu 24.04 (GNU tar 1.35) with no warning, and one built on Ubuntu on
+  macOS; files and modes identical (Allure aside: regenerated per build).
+- Measured (macOS, real Allure 3.18): passing run `2026-10-22T10-04-03-625Z-26885` 11.3 MB unpacked,
+  archive 4.5 MB, 1.3 s with Allure; trace-heavy `2026-10-06T02-47-17-617Z-36442` (`strip`) 89.1 MB
+  unpacked, archive 75.2 MB (75.1 MB built on Linux), 2.7 s — its 53.8 MB of Playwright traces stay in
+  `playwright/`. Every linked page opened from `file://` in Chromium with no external request.
+- Found and fixed: `allurerc.mjs`'s dashboard layout used Allure 2 chart types (`trend`, `pie`): 3.18
+  drew nothing and the dashboard failed on a missing `widgets/charts.json`; now `currentStatus` +
+  `statusDynamics`.
+- Audit (two reviewers, every finding reproduced first), fixed:
+  - One history line per run (R1's code): every generation appended one, so a rebuilt bundle or a later
+    `report:allure` gave a run two trend points (reproduced: 2 lines, same name, two uuids).
+    `allure-history.ts` tags the line Allure appends with the run's folder (`"e2eRun": "<RUN_ID>"`) and
+    puts it in place of that run's earlier line, keeping its `timestamp` (Allure 3.18 orders points by
+    it); the key is never the report's name, which the orchestrator's `E2E_RUN_NAME` makes the same for
+    every run of a task. Other runs', untagged and unparsable lines are kept byte for byte (`latin1`);
+    a history that is not the given one plus exactly one object line is left as Allure wrote it. The
+    work copy is rewritten before the report goes in, so it is still one rename. Real CLI: Allure
+    reads the tagged history; two generations of a run and one of another leave 2 lines and a
+    2-point `statusDynamics`.
+  - A report in place whose history then failed reported `analyticsLeft: []`: now its placed pages are
+    scanned (`pagesNamingAnalytics`; an unreadable page counts as left).
+  - A build killed between moving `report/` aside and moving the new one in lost the earlier one at the
+    next build's sweep (`rm -r`): its work folder now records `report/`'s place and is released with
+    R1's `releaseWorkDir` (put back at the sweep; kept in `finally` while it holds the only copy).
+  - Names starting with `@` (bsdtar reads an archive to include) or holding `:` (GNU tar and scp read a
+    remote host; bsdtar strips `c:`) are refused.
+  - The comments said a FIFO would block `fs.cp`; it throws instead, and the filter (which runs first)
+    is what keeps the bundle from failing: verified with a FIFO and a socket, filtered and not. The
+    spec's FIFO watcher (useless) is gone; a socket is now in the spec.
+  - Spec gaps closed (each shown failing under its mutation): stop waits for `tar` (a stub writing into
+    the work folder 300 ms after SIGTERM); `placeFolder`'s rollback (rename seam); the dashboard's
+    Allure 3 chart types (real CLI: `dashboard/widgets/charts.json`, absent with Allure 2's); a dead
+    pid's `.allure-work-*` decoy; bytes equal to the files'; analytics values, blank-line and
+    non-`index.html` pages; cleanup before placing; a one-page warning; unlinked plugin pages; a run
+    folder that is a file; unreadable and linked report entries; history-failed layout; rounding;
+    `no-referrer`. bsdtar's `._*`/xattr guards only bite on macOS (CI is Linux); the cross-tar unpack
+    above is the manual check.
+- Tests: 98 new (`report-bundle` 47 incl. one on the real CLI, `bundle-manifest` 10, `bundle-landing`
+  11, `allure-analytics` 14, `allure-history` 10, `allure-command` +3, `allure-report` +3 incl. 2 on
+  the real CLI); R1's specs gained analytics assertions, and its two exact-history assertions the
+  run's tag. 185 reporting-Allure/bundle specs. Mutation audit (B's 43 + 15 on the fixes, fresh
+  copy): before the fixes 23 of the 43 survived; after, 6, the ones the audit judged without
+  observable effect — the abort branch when Allure fails (the next abort check throws the same
+  error), `errorOnExist`/`force` (the stage is always new), the facts' `trim`, the two `escapeHtml` on
+  fixed ASCII hrefs/commands, `Number.isFinite` (JSON has no NaN/Infinity); the 15 on the fixes all
+  caught (one after a case was added).
+- Left: rich Cucumber served by `show-report` is unverified on a real rich report (none exists
+  locally; only static serving was proved); the serve commands need Node and the network (`npx`) on the
+  viewer's machine; two builds of one run at once both succeed, the later rename wins; a SIGKILLed
+  build leaves its work folder until the next build of that run (R3, with R1's); in `keep` mode
+  Allure's awesome plugin links traces to `trace.playwright.dev` (user-initiated, not removed).
 
 **R3 — Wire into the run end.** Depends: R1, R2, modernization Phase 7's 7.1a–7.1b (the
 terminal renderer). Effort: 1 day; medium.
@@ -202,7 +281,10 @@ Slack, CLI, config, dry run and docs.
 - Stopping: pass the run's stop as `generateAllureReport`'s `signal` (Allure gets SIGTERM and is
   waited for); a SIGKILL — the stop budgets' last step, or of the orchestrator itself — leaves the
   work folder `<run>/.allure-work-*` (a full results copy) until the next generation in that run,
-  which may never come: remove it with the run, or sweep it at start-up.
+  which may never come: remove it with the run, or sweep it at start-up — and `.bundle-work-*` (a
+  whole bundle) likewise. Pass the stop and the 240 s budget as one `buildReportBundle` `signal`
+  (`AbortSignal.any`); admit `report-bundle.ts` in `suite-imports.json` (its closure passed the
+  boundary spec in R2).
 - Tests: integration with the fake suite; `bundleCommand` (exact string, quoting of a path with a
   space or `'`, over `MAX_SHOWN` → path, no `sshHost`, `folder` mode); executing the command
   against a local `scp` stub leaves `<name>/index.html` and no archive, and a failing stub or a
@@ -224,8 +306,9 @@ Goal: prove sizes and both trace policies on a real failed run; update the guide
 
 - Each completed run with a report folder has `report.tar.gz` (unless `none`) containing only the
   viewable reports and `run-facts.json`; no `allure-results`, `results.jsonl`, logs or temp files.
-- Slack's one pasted command leaves `./<name>/index.html` and no archive; it and every linked
-  report open offline (Cucumber rich mode notes the HTTP requirement).
+- Slack's one pasted command leaves `./<name>/index.html` and no archive; the landing page and every
+  single-file report open offline from disk; what needs HTTP (Playwright's trace viewer, rich
+  Cucumber, a `keep` Allure) is named on the landing page with the command that serves it.
 - Allure is generated per run with its name and per-cell history; default strips traces; keep uses
   folder mode.
 - A missing or failed Allure, a missing report or a failed tar never changes the run's status; the
@@ -243,11 +326,16 @@ not in this plan.
 
 ## Open questions
 
-- Allure 3.18's awesome and dashboard plugins hard-code `analyticsEnable: true`: every report loads
-  Google Tag Manager when opened online (`ALLURE_NO_ANALYTICS` affects only the allure2 plugin).
-  That breaks "no external assets" for the bundle's Allure: accept, or strip the tag in R2.
-- `keep` (folder mode) does not open from `file://`: like rich Cucumber, the landing page must note
-  the HTTP requirement (R2), or `keep` uses single file and accepts Allure's size limit.
+- Decided (R2): Allure's Google Tag Manager loader is removed. No switch exists: `analyticsEnable: true`
+  is hard-coded in the awesome and dashboard plugins through 3.22.1, the latest (`ALLURE_NO_ANALYTICS`
+  reaches only allure2), so no bump helps. `generateAllureReport` removes the exact template block
+  (both `G-` ids equal, every line matched, values constrained) from the report's `*.html` at its top
+  and one folder down, in the work folder before the report goes in, so `report:allure` reports are
+  clean too; a page with the block not exactly once, or still naming `googletagmanager.com` after, is
+  left byte for byte and named (`analytics.left`; the command warns, the bundle logs). Pages are
+  rewritten as latin1 (every byte kept), beside and renamed, mode kept.
+- Decided (R2): `keep` stays a folder report; the landing page says it needs HTTP and gives
+  `npx allure open allure`; `strip` stays single file.
 - `archive` removes `report/` after packing; `both` keeps it for the dashboard and debugging. Disk:
   a heavy failed run duplicates trace zips; measure on the runner before settling retention.
 - Include `results.jsonl` in the archive for tooling, or keep it raw-only? Recommended: raw-only;

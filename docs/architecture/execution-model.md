@@ -510,6 +510,13 @@ product folder swapped for a link after the listing cannot redirect a removal ou
 reported, never thrown: pruning cannot fail a run. A later prune removes an interrupted removal's leftovers after an hour. `npm run report`
 and `report:allure` skip hidden folders.
 
+**Bundles**: a run's download bundle (`report-bundle.ts`) lives inside its run folder — `report/`,
+`report.tar.gz` and, while one is built, a hidden `.bundle-work-<pid>-<hex>/` — so it is listed,
+measured and pruned with its run, which stays one complete run (`report/` is not among
+`REPORT_PARTS`, so it never makes a folder a run). A killed build's work folder is released by the
+next build of that run, an earlier `report/` it held aside put back first. The cell-level
+`allure-history.jsonl` (one line per run, tagged `e2eRun`) is outside every run and survives.
+
 ## Mental model, end to end
 
 ```text
