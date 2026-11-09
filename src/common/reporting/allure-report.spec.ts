@@ -154,6 +154,25 @@ function errno(code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(`${code}: refused`), { code });
 }
 
+/** The cell's history, one parsed line per entry. */
+function historyLines(): { e2eRun?: string; timestamp?: number }[] {
+  return readFileSync(join(cellDir, "allure-history.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { e2eRun?: string; timestamp?: number });
+}
+
+/** The charts a folder report's dashboard draws, in its layout's order. */
+function dashboardCharts(run: string): { type: string; data: unknown[] }[] {
+  const charts = JSON.parse(
+    readFileSync(
+      join(run, "allure", "dashboard", "widgets", "charts.json"),
+      "utf8",
+    ),
+  ) as { general: Record<string, { type: string; data: unknown[] }> };
+  return Object.values(charts.general);
+}
+
 /** Whether this process runs as root, which may signal any process. */
 const isRoot = process.getuid?.() === 0;
 
@@ -268,12 +287,15 @@ test.describe("generateAllureReport, with a stub CLI", () => {
       outputDir: join(runDir, "allure"),
       historyPath: join(cellDir, "allure-history.jsonl"),
       layout: "single-file",
+      // The stub's page has no analytics loader.
+      analytics: { cleaned: [], left: [] },
     });
     expect(
       readFileSync(join(runDir, "allure", "awesome", "index.html"), "utf8"),
     ).toBe("<title>BackWPup · pro@nginx · run 1</title>");
     expect(readFileSync(join(cellDir, "allure-history.jsonl"), "utf8")).toBe(
-      '{"name":"one"}\n{"name":"BackWPup · pro@nginx · run 1"}\n',
+      // Allure's line, tagged with the run it reports.
+      `{"name":"one"}\n{"name":"BackWPup · pro@nginx · run 1","e2eRun":"${basename(runDir)}"}\n`,
     );
     const [call] = stubCalls(stubDir);
     // Allure saw the copy, never the run's own results, nor the cell's own history.
@@ -319,7 +341,25 @@ test.describe("generateAllureReport, with a stub CLI", () => {
     await generateAllureReport(options(bin));
 
     expect(readFileSync(join(cellDir, "allure-history.jsonl"), "utf8")).toBe(
-      '{"name":"BackWPup · pro@nginx · run 1"}\n',
+      `{"name":"BackWPup · pro@nginx · run 1","e2eRun":"${basename(runDir)}"}\n`,
+    );
+  });
+
+  test("a run reported again keeps one history line: its own, in its place and time", async () => {
+    const bin = writeAllureStub(stubDir, "ok");
+    const run = basename(runDir);
+    const other = `{"name":"other","timestamp":9,"e2eRun":"other-run"}\n`;
+    writeFileSync(
+      join(cellDir, "allure-history.jsonl"),
+      `{"name":"untagged"}\n{"name":"first","timestamp":5,"e2eRun":"${run}"}\n${other}`,
+    );
+
+    await generateAllureReport(options(bin));
+    await generateAllureReport(options(bin));
+
+    expect(readFileSync(join(cellDir, "allure-history.jsonl"), "utf8")).toBe(
+      `{"name":"untagged"}\n` +
+        `{"name":"BackWPup · pro@nginx · run 1","e2eRun":"${run}","timestamp":5}\n${other}`,
     );
   });
 
@@ -654,6 +694,20 @@ test.describe("generateAllureReport, with a stub CLI", () => {
     expect(workDirs()).toEqual([]);
   });
 
+  test("the analytics cleanup runs before the report goes in: a page it cannot read leaves the previous report", async () => {
+    test.skip(isRoot, "root reads any file");
+    const previous = writePrevious();
+
+    await expect(
+      generateAllureReport(
+        options(writeAllureStub(stubDir, "unreadable-page")),
+      ),
+    ).rejects.toMatchObject({ code: "EACCES" });
+
+    expectPreviousUntouched(previous);
+    expect(workDirs()).toEqual([]);
+  });
+
   test("a report that cannot be put in place leaves the history as it was", async () => {
     const history = '{"name":"one"}\n';
     writeFileSync(join(cellDir, "allure-history.jsonl"), history);
@@ -886,6 +940,20 @@ test.describe("generateAllureReport, with the real Allure CLI", () => {
     ]);
     const html = readFileSync(join(output, "awesome", "index.html"), "utf8");
     expect(html).toContain("BackWPup · pro@nginx · run 1");
+    // Allure's analytics loader is gone from every page, and only it.
+    expect(report.analytics).toEqual({
+      cleaned: ["awesome/index.html", "dashboard/index.html"],
+      left: [],
+    });
+    for (const page of [
+      "index.html",
+      "awesome/index.html",
+      "dashboard/index.html",
+    ]) {
+      expect(readFileSync(join(output, page), "utf8")).not.toContain(
+        "googletagmanager",
+      );
+    }
     const history = readFileSync(join(cellDir, "allure-history.jsonl"), "utf8")
       .trim()
       .split("\n")
@@ -922,12 +990,61 @@ test.describe("generateAllureReport, with the real Allure CLI", () => {
     }
   });
 
-  test("keep: a folder report with its data files", async () => {
-    await generateAllureReport(options(undefined, { traces: "keep" }));
+  test("keep: a folder report with its data files, without the analytics loader", async () => {
+    const report = await generateAllureReport(
+      options(undefined, { traces: "keep" }),
+    );
 
     const awesome = readdirSync(join(runDir, "allure", "awesome"));
     expect(awesome).toContain("data");
     expect(awesome.some((name) => /^app-.*\.js$/.test(name))).toBe(true);
+    expect(report.analytics).toEqual({
+      cleaned: ["awesome/index.html", "dashboard/index.html"],
+      left: [],
+    });
+    for (const plugin of ["awesome", "dashboard"]) {
+      const page = readFileSync(
+        join(runDir, "allure", plugin, "index.html"),
+        "utf8",
+      );
+      expect(page).not.toContain("googletagmanager");
+      expect(page).toContain('<div id="app"></div>');
+    }
+    // allurerc.mjs's dashboard layout draws Allure 3's charts: with Allure 2's chart types (`trend`,
+    // `pie`) 3.18 writes no charts.json at all, and the dashboard fails to load.
+    expect(dashboardCharts(runDir).map((chart) => chart.type)).toEqual([
+      "currentStatus",
+      "statusDynamics",
+    ]);
+  });
+
+  test("a run generated again is one trend point: the dashboard's trend counts runs, not generations", async () => {
+    const otherRun = join(cellDir, "2026-10-22T11-00-00-000Z-26886");
+    writeAllureResults(join(otherRun, "allure-results"));
+    const keep = options(undefined, { traces: "keep" });
+
+    await generateAllureReport(keep);
+    const [first] = historyLines();
+    await generateAllureReport(keep);
+    await generateAllureReport({
+      ...keep,
+      runDir: otherRun,
+      resultsDir: join(otherRun, "allure-results"),
+      outputDir: join(otherRun, "allure"),
+    });
+
+    // Allure read the tagged history, and wrote one line per run; the first keeps its time.
+    const lines = historyLines();
+    expect(lines.map((line) => line.e2eRun)).toEqual([
+      basename(runDir),
+      basename(otherRun),
+    ]);
+    expect(lines[0]?.timestamp).toBe(first?.timestamp);
+    const trend = dashboardCharts(otherRun).find(
+      (chart) => chart.type === "statusDynamics",
+    );
+    // The earlier run once, and this one.
+    expect(trend?.data).toHaveLength(2);
   });
 
   test("two cells generate at once, each into its own report and history", async () => {

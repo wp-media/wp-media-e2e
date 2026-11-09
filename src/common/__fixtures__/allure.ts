@@ -125,10 +125,12 @@ export function writeAllureResults(dir: string): string {
 }
 
 /**
- * What a stub CLI does: succeed; fail with exit 3 after printing more than an error keeps; hang; or
+ * What a stub CLI does: succeed; succeed with a page nobody may read (`unreadable-page`: its
+ * `awesome/index.html` mode 000); fail with exit 3 after printing more than an error keeps; hang; or
  * hang and, on SIGTERM, write into its output 300 ms later before exiting (`slow-stop`).
  */
-export type StubBehaviour = "ok" | "fail" | "hang" | "slow-stop";
+export type StubBehaviour =
+  "ok" | "unreadable-page" | "fail" | "hang" | "slow-stop";
 
 /** The first line the `fail` stub prints: far more than an error keeps comes after it. */
 export const STUB_OUTPUT_HEAD = "stub: first line";
@@ -176,6 +178,7 @@ fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({
 fs.mkdirSync(path.join(out, "awesome"), { recursive: true });
 fs.writeFileSync(path.join(out, "awesome", "index.html"), "<title>" + name + "</title>");
 const behaviour = ${JSON.stringify(behaviour)};
+if (behaviour === "unreadable-page") fs.chmodSync(path.join(out, "awesome", "index.html"), 0o000);
 // A file without an extension, outside any package: CommonJS, so a top-level return ends the script.
 if (behaviour === "slow-stop") {
   process.on("SIGTERM", () => setTimeout(() => {

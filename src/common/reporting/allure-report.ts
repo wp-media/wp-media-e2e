@@ -14,6 +14,11 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  removeAllureAnalytics,
+  type AnalyticsCleanup,
+} from "./allure-analytics";
+import { keepOneLinePerRun, readHistoryText } from "./allure-history";
+import {
   AllureCliMissingError,
   AllureGenerationAbortedError,
   AllureGenerationFailedError,
@@ -30,7 +35,9 @@ import { errnoCode } from "./report-tree";
  * Generating one run's Allure report: `allure generate` over a copy of the run's results (traces
  * stripped or kept), named explicitly, with the cell's history for the trend chart. Everything is
  * built in a hidden work folder inside the run and put in place by rename only once Allure
- * succeeded, so a failure — or a kill — never leaves a partial report or history. A good report is
+ * succeeded, so a failure — or a kill — never leaves a partial report or history. Before it goes in,
+ * the plugins' analytics loader is removed from its pages (`allure-analytics.ts`), so the report does
+ * not phone home; a page it is not recognised in is left as written and named in the result. A good report is
  * replaced only by a new one: the old one waits in the work folder while the new one goes in, and
  * if that is cut short (a failure, a kill) it is moved back — at once, or by the next generation in
  * that run, which the work folder's `target` file tells where. Imports only Node and its sibling
@@ -60,11 +67,14 @@ const WORK_PREFIX = ".allure-work-";
 /** A work folder's name: the prefix, the owning process's pid, eight random hex digits. */
 const WORK_NAME = /^\.allure-work-(\d{1,10})-[0-9a-f]{8}$/;
 
-/** The work folder's file holding the report's place (`outputDir`), for {@link releaseWorkDir}. */
-const TARGET_FILE = "target";
+/**
+ * The work folder's file holding the report's place (`outputDir`), for {@link releaseWorkDir}. The
+ * report bundle's work folder records its own the same way.
+ */
+export const WORK_TARGET_FILE = "target";
 
-/** The work folder's entry an existing report waits in while the new one goes in. */
-const ASIDE_DIR = "previous";
+/** The work folder's entry an existing report waits in while the new one goes in (the bundle's too). */
+export const WORK_ASIDE_DIR = "previous";
 
 /** At most how many bytes of Allure's output an error keeps, when it is captured: the last ones. */
 export const OUTPUT_TAIL_BYTES = 16 * 1024;
@@ -82,7 +92,7 @@ export interface AllureReportOptions {
   readonly outputDir: string;
   /** The report's header (`--name`): the run's facts line. Must not be blank. */
   readonly name: string;
-  /** The cell's `allure-history.jsonl`: read for the trend, and this run appended on success. */
+  /** The cell's `allure-history.jsonl`: read for the trend; on success it holds this run's line, once. */
   readonly historyPath: string;
   /** Strip or keep Playwright traces. */
   readonly traces: AllureTraces;
@@ -109,17 +119,20 @@ export interface AllureReportOptions {
 export interface AllureReport extends CopiedResults {
   /** The report folder, absolute. */
   readonly outputDir: string;
-  /** The history file this run was appended to, absolute. */
+  /** The history file holding this run's line, absolute. */
   readonly historyPath: string;
   readonly layout: AllureLayout;
+  /** The pages the analytics loader was removed from, and those it could not be (left as written). */
+  readonly analytics: AnalyticsCleanup;
 }
 
 /**
  * Generates one run's Allure report. First releases the work folders an ended generation left in
  * the run ({@link releaseWorkDir}: a report left aside goes back); copies the results (validated,
  * traces stripped or kept); runs `allure generate` on the copy into the work folder, against a copy
- * of the history; then puts the report in place (an existing one is replaced whole) and the history
- * after it. On any failure the previous report and history are left as they were — or, when the old
+ * of the history; removes the analytics loader from its pages; keeps one history line per run
+ * (`allure-history.ts`: a run reported again replaces its own line); then puts the report in place
+ * (an existing one is replaced whole) and the history after it. On any failure the previous report and history are left as they were — or, when the old
  * report cannot be moved back, kept in the work folder for the next generation in that run (the
  * error says where) — and the work folder is otherwise removed.
  *
@@ -157,6 +170,7 @@ export async function generateAllureReport(
     );
     const workHistory = join(work, "history.jsonl");
     await copyIfPresent(historyPath, workHistory);
+    const historyBefore = await readHistoryText(workHistory);
     throwIfAborted(options.signal);
     await runAllureGenerate({
       bin: options.allureBin ?? DEFAULT_ALLURE_BIN,
@@ -171,9 +185,15 @@ export async function generateAllureReport(
       stdio: options.stdio ?? "pipe",
       signal: options.signal,
     });
-    await placeReport(join(work, "report"), outputDir, join(work, ASIDE_DIR));
+    const analytics = await removeAllureAnalytics(join(work, "report"));
+    await keepOneLinePerRun(workHistory, historyBefore, basename(runDir));
+    await placeReport(
+      join(work, "report"),
+      outputDir,
+      join(work, WORK_ASIDE_DIR),
+    );
     await placeHistory(workHistory, historyPath, outputDir);
-    return { ...copied, outputDir, historyPath, layout };
+    return { ...copied, outputDir, historyPath, layout, analytics };
   } finally {
     activeWorkDirs.delete(work);
     await releaseWorkDir(work, { putBack: false });
@@ -240,14 +260,17 @@ export interface WorkDirOwners {
  *
  * @param names - the run folder's entries.
  * @param owners - who runs.
+ * @param pattern - what a work folder's name looks like, the owning pid its first group; default
+ *   this module's (`.allure-work-<pid>-<hex>`). The report bundle passes its own.
  * @returns the names to release.
  */
 export function staleWorkDirNames(
   names: readonly string[],
   owners: WorkDirOwners,
+  pattern: RegExp = WORK_NAME,
 ): string[] {
   return names.filter((name) => {
-    const digits = WORK_NAME.exec(name)?.[1];
+    const digits = pattern.exec(name)?.[1];
     if (digits === undefined) return false;
     const pid = Number(digits);
     return pid === owners.ownPid
@@ -310,7 +333,7 @@ export async function releaseWorkDir(
   work: string,
   how: { readonly putBack: boolean },
 ): Promise<boolean> {
-  const aside = join(work, ASIDE_DIR);
+  const aside = join(work, WORK_ASIDE_DIR);
   const asidePresence = await presence(aside);
   if (asidePresence === "unknown") return false;
   if (asidePresence === "present") {
@@ -357,7 +380,7 @@ async function presence(
  */
 async function readTarget(work: string): Promise<string | undefined> {
   try {
-    const target = await readFile(join(work, TARGET_FILE), "utf8");
+    const target = await readFile(join(work, WORK_TARGET_FILE), "utf8");
     return isAbsolute(target) && !target.includes("\0") ? target : undefined;
   } catch {
     return undefined;
@@ -390,7 +413,7 @@ async function createWorkDir(
     );
   }
   try {
-    await writeFile(join(work, TARGET_FILE), outputDir);
+    await writeFile(join(work, WORK_TARGET_FILE), outputDir);
   } catch (error) {
     await rm(work, { recursive: true, force: true });
     throw new AllureReportError(

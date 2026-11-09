@@ -241,8 +241,9 @@ export async function runAllureCommand(
   io.print(`  results: ${target.resultsDir}`);
   io.print(`  output:  ${outputDir}`);
   io.print(`  history: ${historyPath}`);
+  let report: AllureReport;
   try {
-    await (io.generate ?? generateAllureReport)({
+    report = await (io.generate ?? generateAllureReport)({
       runDir: target.runDir,
       resultsDir: target.resultsDir,
       outputDir,
@@ -259,6 +260,8 @@ export async function runAllureCommand(
     io.printError(errorMessage(error));
     return EXIT.failed;
   }
+  const loaders = analyticsWarning(report);
+  if (loaders !== undefined) io.printError(loaders);
   if (!options.open) return EXIT.ok;
   return io.serve !== undefined
     ? io.serve(outputDir)
@@ -266,6 +269,20 @@ export async function runAllureCommand(
         printError: io.printError,
         signal: io.signal,
       });
+}
+
+/**
+ * The warning for a report whose analytics loader could not be removed from every page.
+ *
+ * @param report - the report made.
+ * @returns the line, or `undefined` when every page is clean.
+ */
+export function analyticsWarning(report: AllureReport): string | undefined {
+  const { left } = report.analytics;
+  return left.length === 0
+    ? undefined
+    : `Warning: Allure's analytics loader (Google Tag Manager) was not recognised in ${left.join(", ")}: ` +
+        "left as Allure wrote it, so those pages load it when opened online.";
 }
 
 /**
