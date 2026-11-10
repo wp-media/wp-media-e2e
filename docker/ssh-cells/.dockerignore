@@ -1,0 +1,5 @@
+# Only what the images copy; never the throw-away SSH key.
+*
+!pins.env
+!*.sh
+!conf/

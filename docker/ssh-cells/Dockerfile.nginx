@@ -1,0 +1,46 @@
+# syntax=docker/dockerfile:1
+# SSH twin of an nginx cell: Ubuntu 24.04, nginx + PHP-FPM 8.5 (ondrej/php PPA), MySQL, sshd, sudo.
+# Build from this folder: docker build -f Dockerfile.nginx -t wpme-ssh-nginx .
+FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+
+ENV TWIN_STACK=nginx TWIN_PHP=8.5 LANG=C.UTF-8
+
+# The PPA's signing key, pinned by fingerprint (Launchpad "Launchpad PPA for Ondřej Surý"): fetched
+# from the Ubuntu keyserver and refused unless it is that key, instead of trusting whatever
+# add-apt-repository is served. The PPA keeps only current builds, so packages are pinned by minor
+# (php8.5-*) only.
+ARG PPA_KEY_FPR=B8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6
+
+# --error-on=any: a mirror or the PPA failing to answer fails the build here, not as a missing package.
+RUN apt-get update --error-on=any \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl gpg \
+ && install -d -m 0755 /etc/apt/keyrings \
+ && { curl -fsSL --retry 3 "https://keyserver.ubuntu.com/pks/lookup?op=get&options=mr&search=0x${PPA_KEY_FPR}" \
+        | gpg --dearmor >/etc/apt/keyrings/ondrej-php.gpg \
+      || { echo "✗ Could not fetch the ondrej/php PPA key from keyserver.ubuntu.com" >&2; exit 1; }; } \
+ && { gpg --show-keys --with-colons /etc/apt/keyrings/ondrej-php.gpg | grep -qx "fpr:::::::::${PPA_KEY_FPR}:" \
+      || { echo "✗ The ondrej/php PPA key is not ${PPA_KEY_FPR}" >&2; exit 1; }; } \
+ && printf '%s\n' 'Types: deb' 'URIs: https://ppa.launchpadcontent.net/ondrej/php/ubuntu/' 'Suites: noble' \
+      'Components: main' 'Signed-By: /etc/apt/keyrings/ondrej-php.gpg' >/etc/apt/sources.list.d/ondrej-php.sources \
+ && { apt-get update --error-on=any \
+      || { echo "✗ apt-get update failed: is ppa.launchpadcontent.net reachable?" >&2; exit 1; }; } \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      nginx php8.5-fpm php8.5-mysql php8.5-curl php8.5-xml php8.5-mbstring php8.5-zip php8.5-gd \
+      php8.5-intl php8.5-cli mysql-server openssh-server sudo unzip less cron tini procps \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY pins.env fetch.sh /opt/twin/
+RUN bash /opt/twin/fetch.sh
+
+COPY lib.sh system.sh start.sh site.sh check.sh /opt/twin/
+COPY conf/ /opt/twin/conf/
+RUN bash /opt/twin/system.sh
+
+EXPOSE 22 80
+# A static file on both ports: loading WordPress here would run due WP-Cron events on apache every
+# few seconds, which the cells run only when something loads a page.
+HEALTHCHECK --interval=5s --timeout=5s --start-period=180s --retries=3 \
+  CMD test -f /run/twin/ready \
+   && curl -fsS -o /dev/null http://127.0.0.1/wp-includes/images/blank.gif \
+   && curl -fsS -o /dev/null "http://127.0.0.1:${TWIN_HTTP_PORT:-80}/wp-includes/images/blank.gif"
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/twin/start.sh"]

@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1
+# SSH twin of an apache cell: Ubuntu 24.04, Apache 2.4 + PHP-FPM 8.3, MariaDB, sshd, sudo.
+# Build from this folder: docker build -f Dockerfile.apache -t wpme-ssh-apache .
+FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+
+ENV TWIN_STACK=apache TWIN_PHP=8.3 LANG=C.UTF-8
+
+# --error-on=any: a mirror that fails to answer fails the build here, not as a missing package.
+RUN apt-get update --error-on=any \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      apache2 php8.3-fpm php8.3-mysql php8.3-curl php8.3-xml php8.3-mbstring php8.3-zip php8.3-gd \
+      php8.3-intl php8.3-cli mariadb-server openssh-server sudo curl ca-certificates unzip less \
+      cron tini procps \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY pins.env fetch.sh /opt/twin/
+RUN bash /opt/twin/fetch.sh
+
+COPY lib.sh system.sh start.sh site.sh check.sh /opt/twin/
+COPY conf/ /opt/twin/conf/
+RUN bash /opt/twin/system.sh
+
+EXPOSE 22 80
+# A static file on both ports: loading WordPress here would run due WP-Cron events on apache every
+# few seconds, which the cells run only when something loads a page.
+HEALTHCHECK --interval=5s --timeout=5s --start-period=180s --retries=3 \
+  CMD test -f /run/twin/ready \
+   && curl -fsS -o /dev/null http://127.0.0.1/wp-includes/images/blank.gif \
+   && curl -fsS -o /dev/null "http://127.0.0.1:${TWIN_HTTP_PORT:-80}/wp-includes/images/blank.gif"
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/twin/start.sh"]

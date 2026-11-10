@@ -1,6 +1,6 @@
 # Phase 12 — Run as the site: the web server's identity for every site command
 
-Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. Parent:
+Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a done 2026-11-10. Parent:
 [e2e-modernization-plan.md](e2e-modernization-plan.md) (§3 phase table). Reverses that plan's §8.2
 rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of WP Rocket's port
 ([phase-6 plan §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket)).
@@ -33,7 +33,7 @@ rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of 
   - Defaults to `false` until 12.11, then `"auto"`.
   - The orchestrator's runs read the same sites files; the operator drains a cell's task while
     switching it.
-- **New session?** Read §8 (working rules) and §9 (recipes) first: this file and the repository are
+- **New session?** Read §8 (working rules) and §9 (measurement checks) first: this file and the repository are
   all you need.
 - **Part A (12.0–12.11):** the identity layer. **Part B (12.12–12.16):** WP Rocket's lifecycle
   (install outputs, licence, settling request, deactivation recovery, in-place
@@ -60,8 +60,8 @@ Setup:
 - PHP-FPM was started by hand with `umask 022`, so the umask it reported is not evidence about real
   servers.
 
-The measurement scripts were throwaway; §9 holds the recipes to rebuild the setup and repeat every
-check on the twins (12.0). Re-measure when in doubt.
+The measurement scripts were throwaway; `docker/ssh-cells/` (12.0a) rebuilds the setup and §9 holds
+the checks to repeat on the twins. Re-measure when in doubt.
 
 | # | Fact |
 | --- | --- |
@@ -281,31 +281,49 @@ Code never cites this plan; docs may.
 | `site-775` | `www-data:www-data` 775/664 | in group | `(ALL)` + `!log_allowed` | `site` | green; the refused-delete scenario runs (not skipped) |
 | `no-sudo` | `www-data:www-data` 777 | in group | none | `fallback/no-sudo` | green as today; warns |
 | `owner-mismatch` | `sftp_twin:www-data` 775/664 | in group | `(ALL)` | `fallback/owner-not-web`, plus a `!log_allowed` warning | as today; warns |
-| `no-wp` | as `site`, `wp` only in `~ubuntu/bin` | outside group | `(ALL)` | `fallback/no-wp` | as `legacy` requirements; warns |
-| `wpconfig-root` | as `site`, `wp-config.php` `root:www-data 644` | outside group | `(ALL)` | `site` | WP Rocket scenario green via 12.14 |
+| `no-wp` | as `site`, `wp` only in `~ubuntu/bin` | outside group | `(ALL)` + `!log_allowed` | `fallback/no-wp` | as `legacy` requirements; warns |
+| `wpconfig-root` | as `site`, `wp-config.php` `root:www-data 644` | outside group | `(ALL)` + `!log_allowed` | `site` | WP Rocket scenario green via 12.14 |
 
-### 12.0a — Twin images and variants
+### 12.0a — Twin images and variants (done 2026-11-10)
 
-- `docker/ssh-cells/`:
-  - `Dockerfile.apache` and `Dockerfile.nginx` (§3);
-  - `system.sh`:
-    - users: `ubuntu` with a login shell; `www-data`; `sftp_twin` in group `www-data`;
-    - sshd with key-only login; the vhost; the DB;
-    - PHP-FPM started with `umask 022`;
-    - upload limits 64M (`upload_max_filesize`, `post_max_size`, nginx `client_max_body_size`);
-    - the hostname in `/etc/hosts`;
-  - `site.sh <variant>`: resets the site to one of the variants in the table, the DB included.
-- Mirror what scenarios depend on: `DISABLE_WP_CRON` and a system cron as on `pro@nginx`
-  (phase-6 plan V44). PHP limits as on the cells:
-  - the CLI's `memory_limit = -1` on the nginx twin (phase-6 plan V41, V82);
-  - `define('WP_MAX_MEMORY_LIMIT', '512M')` in both twins' `wp-config.php`. Without it every
-    foreground `wp backwpup run` dies (V298).
+`docker/ssh-cells/`; its scripts' headers say what each does. Build from that folder:
+`docker build -f Dockerfile.<apache|nginx> -t wpme-ssh-<stack> .`. Reset: `docker exec <c>
+/opt/twin/site.sh <variant>` (it ends with `check.sh <variant>`, which proves owners, modes,
+membership, sudo's rule and logging, `wp`'s location, cron, PHP limits, no stray process, and an HTTP
+login). Every variant passed on both stacks; both images also build and pass on amd64 (emulated).
 
-  Full recipe: §9.
-- Pins: WP-CLI phar by version and SHA-512; WordPress by version.
-- Edge cases: arm64 hosts; a PPA outage fails the build clearly.
-- Done: both images build; `site.sh` produces each variant (a script asserts owners, modes,
-  membership and sudoers).
+What 12.0b must know:
+- **Container env:** `TWIN_AUTHORIZED_KEY` (required for SSH), `TWIN_HTTP_PORT` (publish it as
+  `<port>:<port>`: the site listens on 80 and that port, so `http://localhost:<port>` works from the
+  host and for WordPress's loopback and the system cron), optional `TWIN_SITE_URL`,
+  `TWIN_ADMIN_USER`/`TWIN_ADMIN_PASSWORD` (default `admin` / `twin-admin-password`; safe characters
+  only), `TWIN_VARIANT` (first boot, default `legacy-777`). Healthy = verified site + a static file on
+  both ports.
+- **Restarts:** a boot keeps a verified site as runs left it; a reset cut short is redone on the next
+  boot. `docker stop` takes ~2 s; set `stop_grace_period: 30s` anyway.
+- **The sudo log** (`/var/log/sudo-twin.log`, emptied per reset) holds refused calls even under
+  `!log_allowed`: check.sh logs one as its control, so assert "no allowed `COMMAND=` line", not "no
+  line". `sudo -n -l` on the twins lists `logfile=…`, absent on the cells: 12.9's parser must ignore it.
+
+Decisions:
+- `!log_allowed` on every sudo variant but `owner-mismatch`, so each variant isolates one condition.
+- WordPress 7.1.4 (current stable; the cells run 7.2-beta1 and 6.8.3). Apache's CLI `memory_limit`
+  256M, as on `pro@apache`.
+- The ondrej/php key is pinned by fingerprint (`B8DC7E53…4AD4CAB6`), not taken from
+  `add-apt-repository`; PPA packages are pinned by minor only (it keeps current builds only).
+- `no-wp`: ubuntu's `.bashrc` puts `~/bin` on `PATH` for non-interactive SSH too, modelling a
+  per-user install that works over SSH but is off sudo's `secure_path`.
+- A reset kills every process outside the twin's own (sudo's root children and orphans included),
+  stops sshd and cron for its whole length, and clears crontabs, extra sudoers files and databases,
+  `/tmp`, `/var/tmp`, PHP sessions, `/var/www` (but `html`) and ubuntu's home (but its dotfiles and
+  `.ssh`). Root runs the site's PHP only on the pristine copy; checks run WP-CLI as `www-data`.
+
+Facts found (2026-11-10, both twins):
+- nginx sets its own umask to `0000` when it daemonizes; only PHP-FPM's (`0022`) matters for files.
+- The PPA's PHP 8.5 `php-fpm.conf` names no pid file: start it with `--pid`.
+- With `!log_allowed`, sudo still logs a refused call (`-g` a group outside the rule).
+- A `'` in `wp core install --admin_password` makes that login fail over the web;
+  `wp user update --user_pass` with the same value logs in. Hence the twins' password charset.
 
 ### 12.0b — Compose, scripts, overlays, docs
 
@@ -784,68 +802,11 @@ scratch files.
   fixing, then the four gates, then merge. Record facts and decisions here, not in code comments
   (code never cites this plan).
 
-## 9. Reference recipes (from the 2026-11-10 measurements)
+## 9. Reference checks (from the 2026-11-10 measurements)
 
-### 9.1 Twin images
+The twins themselves are `docker/ssh-cells/` (12.0a); its scripts replaced the build recipes.
 
-- **apache:** `ubuntu:24.04`, `DEBIAN_FRONTEND=noninteractive`. Packages: `apache2 php8.3-fpm
-  php8.3-mysql php8.3-curl php8.3-xml php8.3-mbstring php8.3-zip php8.3-gd php8.3-intl php8.3-cli
-  mariadb-server openssh-server sudo curl ca-certificates unzip less`. Then
-  `a2enmod proxy_fcgi setenvif rewrite headers expires deflate && a2enconf php8.3-fpm`.
-- **nginx:** `ubuntu:24.04`. First `software-properties-common gpg-agent ca-certificates curl`, then
-  `add-apt-repository -y ppa:ondrej/php`. Packages: `nginx php8.5-fpm php8.5-mysql php8.5-curl
-  php8.5-xml php8.5-mbstring php8.5-zip php8.5-gd php8.5-intl php8.5-cli mysql-server
-  openssh-server sudo unzip less`.
-
-### 9.2 `system.sh` (once per container)
-
-1. Install the WP-CLI phar as `/usr/local/bin/wp` (mode 755).
-2. Users: `useradd -m -s /bin/bash ubuntu` (if missing);
-   `groupadd -g 1002 sftp_twin && useradd -u 1002 -g 1002 -G www-data -s /usr/sbin/nologin -d /nonexistent -M sftp_twin`.
-3. `ubuntu`:
-   - `~/.ssh/authorized_keys` from the twin key, directory 700, file 600;
-   - `passwd -d ubuntu && usermod -p '*' ubuntu` (key-only).
-4. `session optional pam_umask.so` in `/etc/pam.d/common-session` (the cells' default);
-   `127.0.0.1 <hostname>` in `/etc/hosts`.
-5. sshd:
-   - `mkdir -p /run/sshd && ssh-keygen -A`;
-   - start `/usr/sbin/sshd`.
-6. The vhost: docroot `/var/www/site/public`.
-   - apache: `AllowOverride All`, `Require all granted`;
-   - nginx: `try_files $uri $uri/ /index.php?$args`, and `location ~ \.php$` with
-     `snippets/fastcgi-php.conf` and `fastcgi_pass unix:/run/php/php8.5-fpm.sock`;
-   - nginx also `client_max_body_size 64m`.
-7. PHP:
-   - `upload_max_filesize` and `post_max_size` 64M in the FPM `php.ini`;
-   - start FPM with `umask 022` first (`umask 022; php-fpmX.Y -D`), which systemd does on real
-     hosts;
-   - the nginx twin's CLI `memory_limit = -1` (V41).
-8. DB:
-   - start it (`mysqld_safe`, or `mysqld --user=mysql` for MySQL), wait for `mysqladmin ping`;
-   - create database `wp`, user `wp`/`wp` with all privileges on it;
-   - start apache (`apachectl start`) or nginx.
-
-### 9.3 `site.sh <variant>` (each reset)
-
-1. Drop and recreate the `wp` database; remove `/var/www/site`.
-2. Copy a cached `wp core download --version=<pinned>`, then
-   `wp config create --dbname=wp --dbuser=wp --dbpass=wp --dbhost=localhost --skip-check`.
-3. Settings: `WP_DEBUG` true, `WP_DEBUG_LOG` true, `WP_DEBUG_DISPLAY` false (all `--raw`);
-   `WP_MAX_MEMORY_LIMIT` `512M`; `DISABLE_WP_CRON` true on nginx, plus a per-minute cron curling
-   `wp-cron.php`.
-4. `wp core install --url=http://<hostname> --title=twin --admin_user=admin --admin_password=<twin password> --admin_email=qa@example.test --skip-email`.
-   The same login goes into the overlays (12.0b).
-5. Pretty permalinks: `wp rewrite structure '/%postname%/' --hard`. On apache, pass a WP-CLI config
-   with `apache_modules: [mod_rewrite]` so it writes `.htaccess`; on nginx delete any `.htaccess`.
-6. Ownership and modes per the variant table (12.0a), with `find … -exec chmod` for 755/644 and
-   775/664.
-7. Group membership: `usermod -aG www-data ubuntu`, or `gpasswd -d ubuntu www-data`. Then kill
-   `ubuntu`'s sshd sessions so the change takes effect.
-8. sudoers in `/etc/sudoers.d/90-ubuntu` (mode 440, checked with `visudo -c`), per the variant,
-   with `Defaults:ubuntu !log_allowed`.
-9. All commands of this script run as root with `--allow-root`; the suite's never do.
-
-### 9.4 Checks used in the measurements
+### 9.1 Checks used in the measurements
 
 - **Log in and load wp-admin without a browser:**
   1. `curl -c jar -b 'wordpress_test_cookie=WP%20Cookie%20check' -d 'log=admin&pwd=<pw>&testcookie=1' <url>/wp-login.php`;

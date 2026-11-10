@@ -69,6 +69,7 @@ orchestrator/               # runs cells in loops. Layout and design: docs/plans
 │                           # tasks/ (cycle: one run; loop: cycle + cooldown, --once; activity: what they tell `onActivity`) · status/ (the status table: results.jsonl tail, progress, task board, plain table, its colours; drawn on a TTY by screen.ts) · notify/ (bounded POST, Slack, Datator) · __fixtures__/ (fake suite, fake start, HTTP sink)
 │                           # soak.spec.ts (hundreds of runs over the fake suite; ORCHESTRATOR_SOAK=1, npm run orchestrator:soak)
 docker/                     # local WordPress for the `docker` transport
+docker/ssh-cells/           # SSH twins of the cells (Ubuntu 24.04, apache/nginx, sudo): Dockerfile.<stack>, site.sh <variant> resets, check.sh proves (Phase 12)
 docs/                       # architecture & guides (linked below)
 playwright*.config.ts       # entry configs (default, per-product, unit)
 ```
