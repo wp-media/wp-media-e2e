@@ -587,11 +587,13 @@ existing TypeScript on Node 24, `node-ssh` as already used, the repo's Playwrigh
   `apache` above supplies only its host; a profile may also be complete. Unknown keys, wrong types,
   empty strings, ports outside 1–65535, arrays/null and bad profile names are load errors naming
   the file and path, never quoting a value. A profile cannot carry `rootDir`, `stagingDir`,
-  `elevate` or `fileOwner`.
+  `elevate`, `fileOwner`, `runAs` or `umask` (the last two: a site's identity, Phase 12.2), nor
+  `wpUser` (resolved from the site's `username`).
 - Site selector: `transport.profile` is an optional safe single token
   (`[a-z][a-z0-9_-]{0,31}`, 1–32 characters); omitted selects `default` when present. A named
   profile that is not defined is a hard error, never a silent fallback to `default`. Site fields
-  win over the profile, so a one-off host or key stays possible.
+  win over the profile, so a one-off host or key stays possible. Add `profile` to `sites.ts`'s
+  per-mode transport allow-list (unknown keys are refused since 12.2).
 - Precedence, field by field: site value → selected profile, merged over `default` → `default` →
   env → error (`port` falls back to 22). Blank env is unset; a malformed env value is an error only
   when that field is needed. A blank site field is refused, never treated as absent.
@@ -629,7 +631,8 @@ existing TypeScript on Node 24, `node-ssh` as already used, the repo's Playwrigh
   - `ssh-servers.spec.ts`: missing/empty/malformed file; default; inheritance; complete profile;
     unknown profile; unknown key; wrong types; blank strings; port bounds; profile-name bounds; no
     quoted values; precedence for every field; env fallback, blank and malformed env; site
-    override; `rootDir`/`stagingDir`/`elevate`/`fileOwner` refused in a profile.
+    override; `rootDir`/`stagingDir`/`elevate`/`fileOwner`/`runAs`/`umask`/`wpUser` refused in a
+    profile.
   - `sites.spec.ts`: `{ mode, rootDir }` resolves; full transports unchanged (plus the default port
     once 11.2 lands); `profile` dropped; a missing field names the site and env var; a sibling
     `ssh.servers.json` in the temp config dir is read; overlays and the example fallback unaffected.

@@ -11,7 +11,11 @@ A [`Transport`](../../src/common/config/types.ts), discriminated on `mode`:
 | -------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------- |
 | `local`  | `rootDir`, `stagingDir?`, `elevate?`, `fileOwner?`                                       | `execa`, run in `rootDir`.                      |
 | `docker` | `container`, `rootDir?`, `stagingDir?`, `elevate?`, `fileOwner?`                         | `docker exec <container> …` (see `dockerArgv`). |
-| `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir`, `stagingDir?`, `elevate?`, `fileOwner?` | `node-ssh` `execCommand`, one line we build (below). |
+| `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir`, `stagingDir?`, `elevate?`, `fileOwner?`, `runAs?`, `umask?` | `node-ssh` `execCommand`, one line we build (below). |
+
+Every loaded transport also carries `wpUser`, resolved-only (the site's `username`; a sites file may
+not set it); `runAs`/`umask` and `wpUser` are read by no command yet
+([configuration.md](../guides/configuration.md#transport-modes-transport), Phase 12).
 
 - A command is a **file + args array**, never a shell string: no interpolation, no injection.
 - `exec(transport, file, args, opts?)` returns [`ExecResult`](../../src/common/wp/exec.ts)

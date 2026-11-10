@@ -57,23 +57,28 @@ path segment (it names folders) and a Playwright project (whose `--project` filt
 | Field       | Required | Notes                                                                                      |
 | ----------- | -------- | ------------------------------------------------------------------------------------------ |
 | `baseURL`   | yes      | The site's URL; each pooled worker navigates relative to its own.                          |
-| `username`  | yes      | WordPress admin login.                                                                     |
+| `username`  | yes      | WordPress admin login; no surrounding whitespace (WP-CLI's `--user` matches it exactly).   |
 | `password`  | yes      | WordPress admin password.                                                                  |
 | `transport` | yes      | How WP-CLI reaches the site (below).                                                       |
 | `overrides` | no       | Per-site service-credential overrides. Validated only: not merged or read yet (phase-6 6H). |
 
-The resolved [`SiteConfig`](../../src/common/config/types.ts) adds a computed `storageState` path (the
-worker's saved login).
+Any other key, on a site or a transport, fails the load naming it and the fields allowed there (a
+misspelt `"runas": false` must not leave the default on). The resolved
+[`SiteConfig`](../../src/common/config/types.ts) adds a computed `storageState` path (the worker's
+saved login).
 
 ### Transport modes ([`Transport`](../../src/common/config/types.ts))
 
 Discriminated on `mode`; dispatch in [wordpress-automation.md](../architecture/wordpress-automation.md).
 
-| `mode`   | Required fields                                 | Optional fields                                 |
-| -------- | ----------------------------------------------- | ----------------------------------------------- |
-| `local`  | `rootDir`                                       | `stagingDir`, `elevate`, `fileOwner`            |
-| `docker` | `container`                                     | `rootDir`, `stagingDir`, `elevate`, `fileOwner` |
-| `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir` | `stagingDir`, `elevate`, `fileOwner`            |
+| `mode`   | Required fields                                 | Optional fields                                                   |
+| -------- | ----------------------------------------------- | ----------------------------------------------------------------- |
+| `local`  | `rootDir`                                       | `stagingDir`, `elevate`, `fileOwner`                              |
+| `docker` | `container`                                     | `rootDir`, `stagingDir`, `elevate`, `fileOwner`                   |
+| `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir` | `stagingDir`, `elevate`, `fileOwner`, `runAs`, `umask`            |
+
+The loader adds `wpUser` to every transport, copied from the site's `username` (the WordPress login
+WP-CLI will act as, `--user`); a sites file that sets it is refused.
 
 `ssh` needs, on the site: a **POSIX login shell** for `username` (sh/dash/bash/zsh — never csh/tcsh,
 which read `!` inside quotes), and `wp` as an **executable on that login's `PATH`** (a shell function or
@@ -101,8 +106,8 @@ alias is never run) ([the ssh command line](../architecture/wordpress-automation
   from `wp-content`. That detection is right wherever a site is consistently owned (a deployment
   account as owner included), so this exists only for one that is not.
   - **Both halves are required**, checked **at load** like every site field: `"www-data"` (no group),
-    `"a:b:c"` or a value with spaces fail quoting the value; a non-string (`5`, `true`) fails naming
-    the field and rule (a value with no readable spelling is not quoted). The group is never guessed: where the docroot owner is not the web server, the
+    `"a:b:c"` or a value with spaces fail naming the field, the rule and the value's length, never
+    the value (the file holds credentials); a non-string (`5`, `true`) by its kind. The group is never guessed: where the docroot owner is not the web server, the
     shared group is the web server's only write access. Checked at load because normalisation never fails a run, so
     a bad value checked later would be warned about once and then ignored on exactly the site being
     fixed. The same rule is enforced again before any privileged command, so the two never
@@ -114,6 +119,16 @@ alias is never run) ([the ssh command line](../architecture/wordpress-automation
   - Normalisation needs privileges (`chown` always does): with `elevate: false` or no passwordless
     `sudo`, the site reports it cannot and carries on
     ([file ownership](../architecture/wordpress-automation.md#file-ownership-wpownershipts)).
+- **`runAs`** (`ssh` only; **no effect yet**: read once [Phase 12](../plans/phase-12-site-identity-plan.md)
+  lands; absent = `false` until its rollout, then `"auto"`) — who site commands run as: `"auto"` (the
+  docroot's owner, once verified to be the web server's identity), `"user:group"` (the `fileOwner`
+  rule, trimmed; root by name or id `0`, or an id above 4294967294, refused as user **and** group: the
+  web server never runs with group 0) or `false` (the transport's user, as today).
+- **`umask`** (`ssh` only; **no effect yet**; default `0022`) — the umask of commands run as the site's
+  identity: a text of 3–4 octal digits (`"022"`, `"0022"`), stored as four. Its owner digit must be
+  `0` (`"0177"` would make new directories `0600`, unusable by their owner); a JSON number is refused
+  (`22` would read as decimal).
+- `runAs`/`umask` on `docker`/`local` fail the load: their commands have no second identity.
 
 ## Editions (Free / Pro)
 

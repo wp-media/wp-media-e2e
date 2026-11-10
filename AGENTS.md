@@ -32,7 +32,7 @@ End-to-end (E2E) tests for WP Media plugins: WP Rocket (performance), BackWPup (
 ```text
 src/
 ├── common/                 # product-agnostic, shared by every product
-│   ├── config/             # env, sites loading, run-context, run-id.ts (RUN_ID, a run's report folder), run-env.ts (run-setting variable names), cell pin, drain, metadata, devices, file-owner rule, config factory, output.ts (palettes and printers for setup lines and scripts: `E2E_OUTPUT`-aware; a worker's never coloured)
+│   ├── config/             # env, sites loading (+ run-as.ts: an ssh site's runAs/umask parsing and defaults), run-context, run-id.ts (RUN_ID, a run's report folder), run-env.ts (run-setting variable names), cell pin, drain, metadata, devices, file-owner rule, config factory, output.ts (palettes and printers for setup lines and scripts: `E2E_OUTPUT`-aware; a worker's never coloured)
 │   ├── reporting/          # the suite's reporters (cell notice, results stream, terminal + its sink/lines/worker-output/mode/live-block/live-session/failure-block, run facts, summary), their pure parts, report retention (retention, report-tree, run-pruning, prune-command), page-loads.ts (a failed scenario's lost requests), one run's Allure report (allure-report: temp output + rename, traces strip/keep, analytics loader removed by allure-analytics, one history line per run by allure-history; allure-results, allure-errors, allure-command for `report:allure`), one run's download bundle (report-bundle: `report/` and/or `report.tar.gz`, one `<name>/` inside; bundle-manifest, bundle-landing, bundle-errors), child-group.ts (Allure and `tar` in a process group of their own: only the caller's abort stops them — SIGTERM, then SIGKILL after 5 s —, never a Ctrl-C or SIGHUP to its group)
 │   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ends a saved login)
 │   ├── setup/              # the auth setup's preflight (+ cell-plugin.ts: a broken copy of the cell's plugin), elevation/ownership banner, site info, check-lines.ts (one ✓/✗/→ check list for preflight, artifacts and healthcheck), healthcheck-lines.ts (the healthcheck's output, pure)
@@ -185,6 +185,12 @@ Schema: **[configuration.md](docs/guides/configuration.md)**.
   plus `sites.<name>.json` overlays, merged alphabetically, each owning disjoint cells. With none, the
   committed `sites.example.json` (placeholders) is used, so a fresh checkout passes the `@noauth`
   smoke. Credentials live only there and never enter reports.
+- **Site identity fields** ([`run-as.ts`](src/common/config/run-as.ts)), no effect until Phase 12's
+  rollout: `transport.runAs` (`ssh` only; `"auto"`, `"user:group"` never root, or `false`, the default
+  `DEFAULT_SSH_RUN_AS`) and `transport.umask` (`ssh` only; 3–4 octal digits keeping the owner's bits,
+  stored as four, default `0022`), both refused on `docker`/`local`; `transport.wpUser` is
+  resolved-only, copied from the site's `username` (a sites file setting it is refused). Unknown site
+  or transport keys fail the load.
 - **`.env`** (from `.env.example`, loaded by [`load-env.ts`](src/common/config/load-env.ts)):
   runtime flags and BackWPup storage credentials. Real env vars win; `E2E_LOAD_DOTENV=false` in the
   environment skips the file. Read env only through the typed accessors in
