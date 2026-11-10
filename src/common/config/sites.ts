@@ -2,11 +2,14 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, posix } from "node:path";
 
 import { OWNER_SPEC_RULE, parseOwnerSpec } from "./file-owner";
+import { RUN_AS_RULE, UMASK_RULE, parseRunAs, parseUmask } from "./run-as";
 import { isNonEmptyString, isObject } from "../guards";
 import type {
   CellConfig,
   CellMap,
   Edition,
+  RunAs,
+  ServerMode,
   FtpServiceConfig,
   S3ServiceConfig,
   ServiceOverrides,
@@ -183,6 +186,26 @@ export function describeValue(value: unknown): string {
   return typeof value === "boolean" ? String(value) : `a ${typeof value}`;
 }
 
+/**
+ * Validates a site's WordPress login: a non-empty string without surrounding whitespace. It becomes
+ * WP-CLI's `--user`, which looks the login up exactly, so `"admin "` would name nobody.
+ *
+ * @param value - the value read from the file.
+ * @param path - where it sits, for the message (the value is never quoted, like every login field).
+ * @returns the login.
+ * @throws Error naming `path`.
+ */
+function requireLogin(value: unknown, path: string): string {
+  const login = requireString(value, path);
+  if (login !== login.trim()) {
+    throw new Error(
+      `[sites] ${path} must not start or end with whitespace: WP-CLI looks the login up exactly. ` +
+        "Remove the spaces.",
+    );
+  }
+  return login;
+}
+
 /** Returns `value` when it is a non-empty string; otherwise throws an error naming `path`. */
 function requireString(value: unknown, path: string): string {
   if (!isNonEmptyString(value)) {
@@ -229,9 +252,116 @@ function requireRootDir(value: unknown, path: string): string {
   return rootDir;
 }
 
-/** Validates a site's `transport` block into a typed {@link Transport} (discriminated on `mode`). */
+/** The fields every transport takes, whatever its mode. */
+const COMMON_TRANSPORT_FIELDS = [
+  "mode",
+  "stagingDir",
+  "elevate",
+  "fileOwner",
+] as const;
+
+/**
+ * The fields each mode takes: any other key is refused ({@link refuseUnknownFields}), so a misspelt
+ * opt-out (`"runas": false`) fails the load instead of being dropped while the default applies.
+ */
+const TRANSPORT_FIELDS: Readonly<Record<ServerMode, readonly string[]>> = {
+  ssh: [
+    ...COMMON_TRANSPORT_FIELDS,
+    "host",
+    "username",
+    "privateKeyPath",
+    "rootDir",
+    "runAs",
+    "umask",
+  ],
+  docker: [...COMMON_TRANSPORT_FIELDS, "container", "rootDir"],
+  local: [...COMMON_TRANSPORT_FIELDS, "rootDir"],
+};
+
+/** The fields a site takes; `transport` and `overrides` are checked by their own validators. */
+const SITE_FIELDS = [
+  "baseURL",
+  "username",
+  "password",
+  "transport",
+  "overrides",
+] as const;
+
+/** The most unknown keys a message names; the rest are counted. */
+const UNKNOWN_KEYS_SHOWN = 5;
+
+/** The most code points of a key a message quotes; longer ones are cut, marked `…`. */
+const QUOTED_KEY_MAX = 64;
+
+/**
+ * A key as a message quotes it: JSON-quoted with every character outside printable ASCII escaped
+ * (`\uXXXX`, so a control or bidi character cannot rewrite the line), cut to {@link QUOTED_KEY_MAX}
+ * code points. A key names a field, never a credential, and the operator must find it in the file.
+ *
+ * @param key - the key, as read from the file.
+ * @returns e.g. `"runas"`, or `"\u202e…"`.
+ */
+export function quoteKey(key: string): string {
+  const points = Array.from(key);
+  const cut = points.slice(0, QUOTED_KEY_MAX).join("");
+  const quoted = JSON.stringify(cut).replace(
+    /[^\x20-\x7e]/g,
+    (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+  return points.length > QUOTED_KEY_MAX ? `${quoted}…` : quoted;
+}
+
+/**
+ * Refuses keys outside `allowed`, so a misspelt field fails the load instead of being dropped.
+ *
+ * @param value - the object read from the file.
+ * @param allowed - the keys it may hold.
+ * @param path - where it sits, for the message.
+ * @param what - what it is, e.g. `a "ssh" transport`, for the message.
+ * @throws Error naming `path`, the unknown keys ({@link quoteKey}, at most {@link UNKNOWN_KEYS_SHOWN})
+ * and every allowed key.
+ */
+function refuseUnknownFields(
+  value: Readonly<Record<string, unknown>>,
+  allowed: readonly string[],
+  path: string,
+  what: string,
+): void {
+  const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unknown.length === 0) return;
+  const shown = unknown.slice(0, UNKNOWN_KEYS_SHOWN).map(quoteKey).join(", ");
+  const more =
+    unknown.length > UNKNOWN_KEYS_SHOWN
+      ? ` and ${String(unknown.length - UNKNOWN_KEYS_SHOWN)} more`
+      : "";
+  throw new Error(
+    `[sites] ${path} has unknown field${unknown.length > 1 ? "s" : ""} ${shown}${more}: ` +
+      `${what} takes only ${allowed.join(", ")}. Fix the spelling or remove ` +
+      `${unknown.length > 1 ? "them" : "it"}.`,
+  );
+}
+
+/**
+ * Validates a site's `transport` block into a typed {@link Transport} (discriminated on `mode`). The
+ * specific refusals (`wpUser`, an ssh-only field off ssh) come before the unknown-key one, which names
+ * only what each mode takes.
+ */
 function validateTransport(value: unknown, path: string): Transport {
   if (!isObject(value)) throw new Error(`[sites] ${path} must be an object.`);
+  refuseWpUser(value.wpUser, `${path}.wpUser`);
+  const mode = value.mode;
+  if (mode !== "ssh" && mode !== "docker" && mode !== "local") {
+    throw new Error(
+      `[sites] ${path}.mode must be "ssh" | "docker" | "local" (got ${describeValue(mode)}).`,
+    );
+  }
+  if (mode !== "ssh") refuseSshOnly(value, path, mode);
+  refuseUnknownFields(
+    value,
+    TRANSPORT_FIELDS[mode],
+    path,
+    `a "${mode}" transport`,
+  );
   // Shared across all three modes; omitted from the result when absent so the optional
   // property is genuinely missing rather than present-and-undefined.
   const stagingDir = optionalString(value.stagingDir, `${path}.stagingDir`);
@@ -242,8 +372,10 @@ function validateTransport(value: unknown, path: string): Transport {
     ...(elevate !== undefined ? { elevate } : {}),
     ...(fileOwner !== undefined ? { fileOwner } : {}),
   };
-  switch (value.mode) {
-    case "ssh":
+  switch (mode) {
+    case "ssh": {
+      const runAs = optionalRunAs(value.runAs, `${path}.runAs`);
+      const umask = optionalUmask(value.umask, `${path}.umask`);
       return {
         ...base,
         mode: "ssh",
@@ -254,7 +386,10 @@ function validateTransport(value: unknown, path: string): Transport {
           `${path}.privateKeyPath`,
         ),
         rootDir: requireRootDir(value.rootDir, `${path}.rootDir`),
+        ...(runAs !== undefined ? { runAs } : {}),
+        ...(umask !== undefined ? { umask } : {}),
       };
+    }
     case "docker": {
       // Optional for docker: the container's WORKDIR is the WP root in the images we use.
       const rootDir =
@@ -274,10 +409,6 @@ function validateTransport(value: unknown, path: string): Transport {
         mode: "local",
         rootDir: requireRootDir(value.rootDir, `${path}.rootDir`),
       };
-    default:
-      throw new Error(
-        `[sites] ${path}.mode must be "ssh" | "docker" | "local" (got ${describeValue(value.mode)}).`,
-      );
   }
 }
 
@@ -333,6 +464,88 @@ function optionalFileOwner(
   // Throws with the same rule the ownership layer enforces, so the two can never disagree.
   parseOwnerSpec(value, `[sites] ${path}`);
   return value;
+}
+
+/**
+ * Validates an optional `runAs` (ssh only): `"auto"`, `"user:group"` or `false`, through
+ * {@link parseRunAs}.
+ *
+ * @param value - the value read from the file.
+ * @param path - where it sits, for the message.
+ * @returns the parsed value, or `undefined` when absent.
+ * @throws Error naming `path` and the rule, describing a non-text by its kind.
+ */
+function optionalRunAs(value: unknown, path: string): RunAs | undefined {
+  if (value === undefined || value === false) return value;
+  if (typeof value !== "string") {
+    throw new Error(
+      `[sites] ${path} must be ${RUN_AS_RULE} — got ${describeValue(value)}.`,
+    );
+  }
+  return parseRunAs(value, path);
+}
+
+/**
+ * Validates an optional `umask` (ssh only) through {@link parseUmask}.
+ *
+ * @param value - the value read from the file.
+ * @param path - where it sits, for the message.
+ * @returns the umask as four digits, or `undefined` when absent.
+ * @throws Error naming `path` and the rule, describing a non-text by its kind.
+ */
+function optionalUmask(value: unknown, path: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") {
+    throw new Error(
+      `[sites] ${path} must be ${UMASK_RULE} — got ${describeValue(value)}.`,
+    );
+  }
+  return parseUmask(value, path);
+}
+
+/** The transport fields only `ssh` takes: the others have no second identity to run commands as. */
+const SSH_ONLY_FIELDS = ["runAs", "umask"] as const;
+
+/**
+ * Refuses an `ssh`-only field on a `docker` or `local` transport rather than dropping it, so an
+ * operator never believes a site runs as an identity it does not.
+ *
+ * @param transport - the transport object read from the file.
+ * @param path - the transport's path, for the message.
+ * @param mode - its mode, named in the message.
+ * @throws Error naming the field and the mode.
+ */
+function refuseSshOnly(
+  transport: Readonly<Record<string, unknown>>,
+  path: string,
+  mode: "docker" | "local",
+): void {
+  for (const field of SSH_ONLY_FIELDS) {
+    if (transport[field] !== undefined) {
+      throw new Error(
+        `[sites] ${path}.${field} applies to "ssh" transports only, and this one is "${mode}": ` +
+          `its commands run as ${mode === "docker" ? "the container's user" : "the runner's user"}. ` +
+          "Remove the field.",
+      );
+    }
+  }
+}
+
+/**
+ * Refuses `wpUser` in a sites file: it is filled from the site's `username` at load, so a declared one
+ * could only disagree with the login the suite uses.
+ *
+ * @param value - the value read from the file.
+ * @param path - where it sits, for the message.
+ * @throws Error naming `path` when the field is present, whatever its value.
+ */
+function refuseWpUser(value: unknown, path: string): void {
+  if (value !== undefined) {
+    throw new Error(
+      `[sites] ${path} is not a sites-file field: it is filled from the site's "username". ` +
+        "Remove it.",
+    );
+  }
 }
 
 /** Validates a partial FTP override (every field optional; absent keys are omitted, not set to undefined). */
@@ -399,14 +612,24 @@ function validateOverrides(value: unknown, path: string): ServiceOverrides {
   };
 }
 
-/** Validates one entry into a {@link SiteInput}: its required fields plus an optional `overrides` block. */
+/**
+ * Validates one entry into a {@link SiteInput}: its required fields plus an optional `overrides` block;
+ * any other key is refused. The transport gets `wpUser` from `username`, the WordPress login WP-CLI
+ * acts as.
+ */
 function validateSite(value: unknown, path: string): SiteInput {
   if (!isObject(value)) throw new Error(`[sites] ${path} must be an object.`);
+  refuseUnknownFields(value, SITE_FIELDS, path, "a site");
+  const baseURL = requireString(value.baseURL, `${path}.baseURL`);
+  const username = requireLogin(value.username, `${path}.username`);
   const base = {
-    baseURL: requireString(value.baseURL, `${path}.baseURL`),
-    username: requireString(value.username, `${path}.username`),
+    baseURL,
+    username,
     password: requireString(value.password, `${path}.password`),
-    transport: validateTransport(value.transport, `${path}.transport`),
+    transport: {
+      ...validateTransport(value.transport, `${path}.transport`),
+      wpUser: username,
+    },
   };
   if (value.overrides === undefined) return base;
   return {

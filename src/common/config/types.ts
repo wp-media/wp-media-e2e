@@ -74,7 +74,24 @@ interface TransportBase {
    * privileged cleanup.
    */
   readonly fileOwner?: string | false;
+
+  /**
+   * The site's WordPress login, for WP-CLI's `--user`. **Resolved-only**: the loader copies it from
+   * the site's `username` and refuses a sites file that sets it, so the two cannot disagree. Absent
+   * on a transport built by hand (unit specs): read it as "no `--user`". No command reads it yet.
+   */
+  readonly wpUser?: string;
 }
+
+/**
+ * Who an `ssh` site's commands run as (`transport.runAs`):
+ * - `"auto"`: the docroot's owner and group, once verified to be the web server's identity;
+ * - `"user:group"`: that identity, as the operator declares it (normalised; never `root` or id 0);
+ * - `false`: the transport's own user, as before this field existed.
+ *
+ * Absent means `DEFAULT_SSH_RUN_AS` (`run-as.ts`).
+ */
+export type RunAs = "auto" | `${string}:${string}` | false;
 
 export interface SshTransport extends TransportBase {
   readonly mode: "ssh";
@@ -82,6 +99,14 @@ export interface SshTransport extends TransportBase {
   readonly username: string;
   readonly privateKeyPath: string;
   readonly rootDir: string;
+  /** Who site commands run as; see {@link RunAs}. No command reads it yet. */
+  readonly runAs?: RunAs;
+  /**
+   * The umask site commands get when they run as the site's identity: four octal digits keeping the
+   * owner's read, write and search bits (e.g. `"0022"`). Absent means `DEFAULT_UMASK` (`run-as.ts`).
+   * No command reads it yet.
+   */
+  readonly umask?: string;
 }
 
 export interface DockerTransport extends TransportBase {

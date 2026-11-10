@@ -1,6 +1,6 @@
 # Phase 12 — Run as the site: the web server's identity for every site command
 
-Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a and 12.1 done 2026-11-10. Parent:
+Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.1 and 12.2 done 2026-11-10. Parent:
 [e2e-modernization-plan.md](e2e-modernization-plan.md) (§3 phase table). Reverses that plan's §8.2
 rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of WP Rocket's port
 ([phase-6 plan §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket)).
@@ -119,7 +119,7 @@ the checks to repeat on the twins. Re-measure when in doubt.
 | State | When | Commands run as | Reported |
 | --- | --- | --- | --- |
 | `site` | `ssh`; `runAs` is `"auto"` (owner verified as the web identity) or `"user:group"`; the run probe passes | identity, via sudo + wrapper | ✓ "runs as `<user>:<group>`, umask `<m>`" |
-| `same-user` | the transport user already is the identity, or mode `docker`/`local` | itself (no sudo); umask as today | ✓ |
+| `same-user` | mode `docker`/`local` (checked first: `effectiveRunAs` is `undefined` there), or the transport user already is the identity | itself (no sudo); umask as today | ✓ |
 | `fallback` | `runAs` asks for it but there is a reason (below) | transport user + today's hand-over | ⚠ the reason and its fix |
 | `disabled` | `runAs: false` (default until 12.11), or a transport from `asTransportUser` | transport user + today's hand-over | note (silent for `asTransportUser`) |
 
@@ -169,7 +169,7 @@ Fallback reasons, each with its fix:
 | --- | --- | --- |
 | Site (`site` state) | every `exec`/`wpCli`/`evalPhp`, reads included | unchanged signatures |
 | Transport user | probes (§2.1); SFTP into the inbox and its removal (12.5); the pre-flight's "SSH user can reach the root" check | `execAsTransport` (exported for `wp/`, `setup/`) |
-| As today | a scenario whose premise is two users (12.10), or any single call that must be | `asTransportUser(transport)` → a copy with `runAs: false` and no `wpUser` |
+| As today | a scenario whose premise is two users (12.10), or any single call that must be | `asTransportUser(transport)` → a copy with no `wpUser`, and `runAs: false` on `ssh` (docker/local have no `runAs`) |
 | Root (unchanged) | `execElevated`: housekeeping fallbacks, BackWPup's content copy, fallback `chown` | unchanged |
 
 - The wrapper does the `cd` (TL;DR), so the SSH user never needs access to the root. `execAsTransport`
@@ -256,7 +256,7 @@ Code never cites this plan; docs may.
 | 12.0a | Twin images, `system.sh`, `site.sh` variants | — | 12.1, 12.2 | M / M |
 | 12.0b | Compose, npm scripts, sites overlays, docs; optional CI | 12.0a | 12.3 | S / S |
 | 12.1 | ssh command line: our quoting, `cd … &&`; an executing ssh test server (done 2026-11-10) | — | 12.0a, 12.2 | S / M |
-| 12.2 | Config: `runAs`, `umask`, `wpUser` | — | 12.0a, 12.1 | S / S |
+| 12.2 | Config: `runAs`, `umask`, `wpUser` (done 2026-11-10) | — | 12.0a, 12.1 | S / S |
 | 12.3 | `wp/site-identity.ts`: states, probes, web probe and verdict file, `asTransportUser` | 12.2 | 12.0b | M / H |
 | 12.4 | Exec wiring: wrapper, `execAsTransport`, probe callers moved, stderr noise | 12.1, 12.3 | — | M / H |
 | 12.5 | Staging through an inbox; staging owned by another identity | 12.4 | 12.6, 12.7 | S / M |
@@ -385,22 +385,37 @@ Found (measured 2026-11-10 with the seam): node-ssh's `execCommand` decodes each
 output: collect the `onStdout`/`onStderr` buffers and decode once (or a `StringDecoder`), ignoring
 node-ssh's strings; spec through the seam.
 
-### 12.2 — Config
+### 12.2 — Config (done 2026-11-10)
 
-- `SshTransport` only:
-  - `runAs?: "auto" | string | false`, where a string is `"user:group"` through `parseOwnerSpec`.
-    Refused: uid `0` or the name `root`.
-  - `umask?: string` matching `/^0?[0-7]{3}$/` with the owner bits `rw` kept (`(n & 0o600) === 0`),
-    normalised to four digits.
-- `docker`/`local` with `runAs` or `umask` → a load error naming the site and the field.
-- `wpUser?: string` on every transport: resolved-only, filled by `validateSite` from `username`; a
-  sites file that sets it is refused.
-- Default: `runAs` absent means `false`. 12.11 changes it to `"auto"` for `ssh` only — one constant
-  with its spec.
-- Phase 11: add `runAs` and `umask` to the fields a profile may not carry.
-- Tests (`sites.spec.ts`): every valid and invalid form, root, umask bounds, the docker/local
-  refusals, `wpUser` filled and refused from the file.
-- Docs: configuration.md transport table; AGENTS.md configuration mechanism.
+`config/run-as.ts` (`parseRunAs`, `parseUmask`, `namesRoot`, `idOutOfRange`, `runAsIdentity`,
+`effectiveRunAs`, `effectiveUmask`, `DEFAULT_SSH_RUN_AS = false`, `DEFAULT_UMASK = "0022"`), wired in
+`sites.ts`; `RunAs` type and the
+fields in `types.ts`. No command reads them yet: 12.3 reads `effectiveRunAs`/`effectiveUmask`, 12.6
+`wpUser`; 12.11 flips `DEFAULT_SSH_RUN_AS` to `"auto"` (its spec, `run-as.spec.ts`, pins it).
+
+- `runAs` (`ssh`): `"auto"`, `false`, or `"user:group"` through `parseOwnerSpec`, stored trimmed as
+  `user:group`. Root refused as user **and group**: by name `root` or an all-zero id (`0`, `00`); a
+  non-root name mapped to uid 0 is left to 12.3's probe. A group of 0 is refused because the web
+  server never runs with it and every file written would grant root's group access. A numeric id
+  above 4294967294 (`(uid_t) -1` and up) is refused too.
+- `effectiveRunAs`: `undefined` off `ssh` (never `false`, the opt-out); `effectiveUmask` likewise.
+- `umask` (`ssh`): a text matching `/^0?[0-7]{3}$/`, stored as four digits; **owner digit 0**
+  (`& 0o700`, stricter than the first draft's `& 0o600`): `0177` makes new directories `0600`, which
+  their owner cannot enter. A JSON number is refused.
+- `docker`/`local`: `runAs` or `umask` present, any value (`false` too), fails the load.
+- Unknown keys refused, on a transport (allow-list per mode) and on a site, quoting the key escaped
+  to printable ASCII (≤ 64 code points, first five keys) and listing the allowed ones. Phase 11 must
+  add `profile` to the transport lists. Still dropped silently (follow-up): unknown keys of a cell
+  object (`{ edition, sites }`) and of `overrides` and its `storage.ftp`/`storage.s3`.
+- `username` with surrounding whitespace refused (never quoted): `--user` matches exactly.
+- `wpUser`: every transport, copied verbatim from `username`; any declared value refused. Every site
+  requires `username` (placeholders included), so every loaded transport has one; hand-built (unit)
+  transports have none.
+- Messages: `[sites] <file> → <cell>.sites[<i>].transport.<field> …` (`<cell>[<i>]…` for a cell
+  written as a bare site array) with the rule; a refused text is
+  described by its length, never quoted, except a umask of the octal shape.
+- Nothing serialises a transport (project metadata carries only routing; the orchestrator reads
+  `host`), so reports and run facts gain nothing.
 
 ### 12.3 — `wp/site-identity.ts`
 
@@ -422,8 +437,8 @@ node-ssh's strings; spec through the seam.
 - **Verdict file:** `site-identity.json` in the run's folder, written by the auth setup, read by
   workers (the `resolution.json` pattern). Keyed by `installKey`, never holding credentials.
 - **`resolveSiteIdentity(transport)`**:
-  1. `runAs: false` → `disabled`;
-  2. `docker`/`local` → `same-user`;
+  1. `docker`/`local` → `same-user` (mode first: `effectiveRunAs` is `undefined` there, never `false`);
+  2. `effectiveRunAs(transport) === false` → `disabled`;
   3. probes as the transport user: owner (`detectSiteOwnership`), transport identity (`id`);
   4. equal → `same-user`;
   5. `auto`: the verdict must say the web identity equals the owner, else
@@ -431,7 +446,9 @@ node-ssh's strings; spec through the seam.
   6. the run probe (§2.1).
   - Memoised per `installKey`; a throw propagates and is not cached.
   - `resetSiteIdentityCaches()` for specs.
-- `asTransportUser(transport)`: a frozen copy, `runAs: false`, no `wpUser`. Idempotent.
+- `asTransportUser(transport)`: a frozen copy without `wpUser`; on `ssh` also `runAs: false`. On
+  `docker`/`local` (no `runAs` field in their type) it only drops `wpUser`: they stay `same-user`, and
+  `--user` is all that changes. Idempotent.
 - Edge cases: the docroot owned by root; BusyBox `UNKNOWN` names → numeric `#uid`/`#gid`; F8 noise
   (read the ids from stdout); a probe printing other ids.
 - Tests:
@@ -446,6 +463,8 @@ node-ssh's strings; spec through the seam.
 
 ### 12.4 — Exec wiring
 
+- The identity's halves come from `runAsIdentity(runAs, context)` (12.2: re-checks the load rule — no
+  root, no id above 4294967294 — and returns `{ user, group }`), numeric ones then prefixed `#`.
 - `runAsArgv(identity, umask, cwd, file, args)` (pure) returns
   `["sudo", "-n", "-u", u, "-g", g, "--", "/bin/sh", "-c", 'umask "$0" && cd -- "$1" && shift && exec "$@"', umask, cwd, file, ...args]`.
   - The script is a constant; values only travel as positional arguments.
@@ -503,9 +522,11 @@ In the `site` state, `copyIntoTarget` (ssh) does:
 
 - Per §2.3: injection in `wpCli`, the check, the drop-and-retry-once on the exact error. The
   "drop" cache is keyed per §2.1.
+- `wpUser` is the site's `username`, which may be an email (the login form and `wp --user` accept
+  one): the mismatch check compares `user_email` as well as `user_login` (found in 12.2).
 - Tests:
   - argv with and without `wpUser`;
-  - missing / non-admin / not-booting (not cached) / numeric login;
+  - missing / non-admin / not-booting (not cached) / numeric login / email login;
   - the retry on the exact error, once;
   - no `--user` on the check or under `asTransportUser`;
   - the login never appears in a message.
@@ -553,7 +574,9 @@ In the `site` state, `copyIntoTarget` (ssh) does:
   - F8 noise → the `/etc/hosts` fix;
   - **`!log_allowed` missing** from `sudo -n -l` for the SSH user → warn (F19), in every state that
     uses sudo;
-  - an existing `~/.wp-cli/config.yml` of the SSH user → "no longer applies in `site`".
+  - an existing `~/.wp-cli/config.yml` of the SSH user → "no longer applies in `site`";
+  - an effective umask leaving "other" write (`0000`, `0001`, `0004`…, `umask & 0o002 === 0`) → warn:
+    every file the identity creates is world-writable (the load accepts it on purpose).
 - `wp --info` gate (`preflight.ts:446`): its hint names the identity it ran as.
 - Probe that the SSH user's login shell is POSIX (`getent passwd` field 7 is not csh/tcsh/fish, or a
   `printf '%s' 'a!b'` round-trip): sshd hands the command line to it, and csh/tcsh read `!` inside
@@ -756,7 +779,7 @@ In the `site` state, `copyIntoTarget` (ssh) does:
 | The probe file served publicly | 128-bit random name, constant content (ids, umask, SAPI), deleted in `finally`, swept after 1 h. |
 | Empty-argument and `cd ;` defects (F5) | Fixed by 12.1 (done). |
 | WP Rocket's file edits not reversible byte for byte | 12.15 replays WP Rocket's own transforms on the record; anything else is warned and left. |
-| Phase 11 profiles carrying identity fields | 12.2 adds `runAs`/`umask` to Phase 11's refused list. |
+| Phase 11 profiles carrying identity fields | Phase 11's refused list names `runAs`/`umask`/`wpUser` (modernization plan, 12.2). |
 
 ## 6. Out of scope
 
