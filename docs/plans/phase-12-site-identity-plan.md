@@ -33,6 +33,8 @@ rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of 
   - Defaults to `false` until 12.11, then `"auto"`.
   - The orchestrator's runs read the same sites files; the operator drains a cell's task while
     switching it.
+- **New session?** Read §8 (working rules) and §9 (recipes) first: this file and the repository are
+  all you need.
 - **Part A (12.0–12.11):** the identity layer. **Part B (12.12–12.16):** WP Rocket's lifecycle
   (install outputs, licence, settling request, deactivation recovery, in-place
   `.htaccess`/`wp-config.php` cleanup, one lifecycle scenario).
@@ -58,8 +60,8 @@ Setup:
 - PHP-FPM was started by hand with `umask 022`, so the umask it reported is not evidence about real
   servers.
 
-Scripts and logs were in the session scratchpad, not kept: re-measure on the twins (12.0) when in
-doubt.
+The measurement scripts were throwaway; §9 holds the recipes to rebuild the setup and repeat every
+check on the twins (12.0). Re-measure when in doubt.
 
 | # | Fact |
 | --- | --- |
@@ -294,7 +296,12 @@ Code never cites this plan; docs may.
     - the hostname in `/etc/hosts`;
   - `site.sh <variant>`: resets the site to one of the variants in the table, the DB included.
 - Mirror what scenarios depend on: `DISABLE_WP_CRON` and a system cron as on `pro@nginx`
-  (phase-6 plan V44); PHP memory limits.
+  (phase-6 plan V44). PHP limits as on the cells:
+  - the CLI's `memory_limit = -1` on the nginx twin (phase-6 plan V41, V82);
+  - `define('WP_MAX_MEMORY_LIMIT', '512M')` in both twins' `wp-config.php`. Without it every
+    foreground `wp backwpup run` dies (V298).
+
+  Full recipe: §9.
 - Pins: WP-CLI phar by version and SHA-512; WordPress by version.
 - Edge cases: arm64 hosts; a PPA outage fails the build clearly.
 - Done: both images build; `site.sh` produces each variant (a script asserts owners, modes,
@@ -567,11 +574,13 @@ In the `site` state, `copyIntoTarget` (ssh) does:
   - the PHP-FPM pool user = the docroot owner.
 - Modernization plan §8.2 records the reversal; §8.4's `runWpAs` obligation closed.
 - **Live, per cell:**
-  1. drain or stop the cell's orchestrator task (orchestrator guide);
+  1. stop the orchestrator that runs the cell's task: one Ctrl-C, its drain
+     ([orchestrator guide](../guides/orchestrator.md), "stop: the drain"). Its runs end as
+     `stopped`; it has no per-task stop, so every task of that orchestrator pauses;
   2. the operator chowns the docroot and adds the sudoers lines;
   3. set `runAs: "auto"` in its sites file;
   4. healthcheck, then one full suite run;
-  5. restart the task.
+  5. start the orchestrator again (`npm run orchestrator -- start`).
   - Start with `pro@nginx`; the twins first, every variant.
 - Then the default becomes `"auto"` (`ssh` only).
 - Done: green on the twins and `pro@nginx`; the banner states what it should; docs merged.
@@ -745,3 +754,116 @@ Applied:
 
 Rejected: making `DATA_DIR_MODE` depend on the state (§2.5). The two unverified suspicions are checks
 in 12.10: `wp backwpup kill`, and WordPress booting for the SSH user.
+
+## 8. Working rules for whoever implements this
+
+Everything a session needs is in this repository; nothing relies on a previous session's notes or
+scratch files.
+
+- **Live cells are shared.**
+  - The cells (modernization plan §8.1) are cycled by the orchestrator v0.5.
+  - Never run anything on them without the operator, and only per 12.11's procedure. Up to about
+    four parallel suites per server are acceptable once agreed (phase-6 plan, 6I); name the sites
+    first.
+  - Build and verify on the twins (12.0).
+- **Docker:**
+  - local Docker (OrbStack on the operator's Mac);
+  - if it is down, ask the operator — never start Docker Desktop yourself;
+  - touch only the containers and images this plan creates (`wpme-ssh-*`, `own*`-style throwaways
+    you remove);
+  - never other projects' containers.
+- **Plugin zips:** the suite resolves them itself (`pluginArtifact`, APVM, AGENTS.md "Plugin
+  artifacts"); BackWPup needs `GITHUB_TOKEN` or `gh auth login`. For a manual measurement, build
+  with APVM's CLI in a shell.
+- **WP Rocket licence:** a dummy key licenses (S1). The operator offered a real one if a remote
+  feature ever needs it: ask; never commit it.
+- **Long runs:** keep the runner awake (`caffeinate -i` on macOS, AGENTS.md).
+- **Measure, never assume:** re-measure any fact in §1 that a change leans on, on the twins, and add
+  what you find to §1 with its date.
+- **Each sub-phase:** implement, then an adversarial review whose findings are verified before
+  fixing, then the four gates, then merge. Record facts and decisions here, not in code comments
+  (code never cites this plan).
+
+## 9. Reference recipes (from the 2026-11-10 measurements)
+
+### 9.1 Twin images
+
+- **apache:** `ubuntu:24.04`, `DEBIAN_FRONTEND=noninteractive`. Packages: `apache2 php8.3-fpm
+  php8.3-mysql php8.3-curl php8.3-xml php8.3-mbstring php8.3-zip php8.3-gd php8.3-intl php8.3-cli
+  mariadb-server openssh-server sudo curl ca-certificates unzip less`. Then
+  `a2enmod proxy_fcgi setenvif rewrite headers expires deflate && a2enconf php8.3-fpm`.
+- **nginx:** `ubuntu:24.04`. First `software-properties-common gpg-agent ca-certificates curl`, then
+  `add-apt-repository -y ppa:ondrej/php`. Packages: `nginx php8.5-fpm php8.5-mysql php8.5-curl
+  php8.5-xml php8.5-mbstring php8.5-zip php8.5-gd php8.5-intl php8.5-cli mysql-server
+  openssh-server sudo unzip less`.
+
+### 9.2 `system.sh` (once per container)
+
+1. Install the WP-CLI phar as `/usr/local/bin/wp` (mode 755).
+2. Users: `useradd -m -s /bin/bash ubuntu` (if missing);
+   `groupadd -g 1002 sftp_twin && useradd -u 1002 -g 1002 -G www-data -s /usr/sbin/nologin -d /nonexistent -M sftp_twin`.
+3. `ubuntu`:
+   - `~/.ssh/authorized_keys` from the twin key, directory 700, file 600;
+   - `passwd -d ubuntu && usermod -p '*' ubuntu` (key-only).
+4. `session optional pam_umask.so` in `/etc/pam.d/common-session` (the cells' default);
+   `127.0.0.1 <hostname>` in `/etc/hosts`.
+5. sshd:
+   - `mkdir -p /run/sshd && ssh-keygen -A`;
+   - start `/usr/sbin/sshd`.
+6. The vhost: docroot `/var/www/site/public`.
+   - apache: `AllowOverride All`, `Require all granted`;
+   - nginx: `try_files $uri $uri/ /index.php?$args`, and `location ~ \.php$` with
+     `snippets/fastcgi-php.conf` and `fastcgi_pass unix:/run/php/php8.5-fpm.sock`;
+   - nginx also `client_max_body_size 64m`.
+7. PHP:
+   - `upload_max_filesize` and `post_max_size` 64M in the FPM `php.ini`;
+   - start FPM with `umask 022` first (`umask 022; php-fpmX.Y -D`), which systemd does on real
+     hosts;
+   - the nginx twin's CLI `memory_limit = -1` (V41).
+8. DB:
+   - start it (`mysqld_safe`, or `mysqld --user=mysql` for MySQL), wait for `mysqladmin ping`;
+   - create database `wp`, user `wp`/`wp` with all privileges on it;
+   - start apache (`apachectl start`) or nginx.
+
+### 9.3 `site.sh <variant>` (each reset)
+
+1. Drop and recreate the `wp` database; remove `/var/www/site`.
+2. Copy a cached `wp core download --version=<pinned>`, then
+   `wp config create --dbname=wp --dbuser=wp --dbpass=wp --dbhost=localhost --skip-check`.
+3. Settings: `WP_DEBUG` true, `WP_DEBUG_LOG` true, `WP_DEBUG_DISPLAY` false (all `--raw`);
+   `WP_MAX_MEMORY_LIMIT` `512M`; `DISABLE_WP_CRON` true on nginx, plus a per-minute cron curling
+   `wp-cron.php`.
+4. `wp core install --url=http://<hostname> --title=twin --admin_user=admin --admin_password=<twin password> --admin_email=qa@example.test --skip-email`.
+   The same login goes into the overlays (12.0b).
+5. Pretty permalinks: `wp rewrite structure '/%postname%/' --hard`. On apache, pass a WP-CLI config
+   with `apache_modules: [mod_rewrite]` so it writes `.htaccess`; on nginx delete any `.htaccess`.
+6. Ownership and modes per the variant table (12.0a), with `find … -exec chmod` for 755/644 and
+   775/664.
+7. Group membership: `usermod -aG www-data ubuntu`, or `gpasswd -d ubuntu www-data`. Then kill
+   `ubuntu`'s sshd sessions so the change takes effect.
+8. sudoers in `/etc/sudoers.d/90-ubuntu` (mode 440, checked with `visudo -c`), per the variant,
+   with `Defaults:ubuntu !log_allowed`.
+9. All commands of this script run as root with `--allow-root`; the suite's never do.
+
+### 9.4 Checks used in the measurements
+
+- **Log in and load wp-admin without a browser:**
+  1. `curl -c jar -b 'wordpress_test_cookie=WP%20Cookie%20check' -d 'log=admin&pwd=<pw>&testcookie=1' <url>/wp-login.php`;
+  2. `curl -b jar <url>/wp-admin/`.
+- **WP Rocket served from cache:** the page ends with `<!-- This website is like a Rocket, isn't
+  it? Performance optimized by WP Rocket.` and a second request of the same URL carries the cached
+  marker. Hit the URL twice.
+- **Owners and modes:** `find <root> -path ./wp-admin -prune -o -path ./wp-includes -prune -o -printf '%u:%g %m %p
+'`,
+  before and after; also `sha256sum` and `stat -c %i` (inode) of `wp-config.php` and `.htaccess`.
+- **sudo's umask:** `su ubuntu -c "umask 0077; sudo -n -u www-data -g www-data -- sh -c umask"` →
+  `0002`; through the wrapper → the umask passed (F3).
+- **sudo's log:** add `Defaults logfile=/tmp/sudo.log`, run a command with a fake `--key=` argument,
+  read the file; with `!log_allowed` it stays absent (F19).
+- **Group rule:** `sudo -n -u <user> -g <group> -- id` for each pair in F1, under each sudoers line.
+- **WP Rocket's file transforms:** run its regexes from S3/S4 with `php -r` (or `php:8.3-cli` in
+  Docker) on sample `wp-config.php` texts and dump with `od -c`. This is how the `
+` loss was
+  found.
+- **WP Rocket's source:** unzip the resolved zip (`test-results/…/artifacts`, or APVM's cache) into
+  a scratch folder; the files cited in §1.2 are paths inside it.
