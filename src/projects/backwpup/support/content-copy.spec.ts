@@ -249,7 +249,8 @@ test.describe("leftoverMessage", () => {
   });
 });
 
-// Measured: node-ssh drops an empty argument, which shifted the script's positionals live.
+// Measured: node-ssh's own escaping dropped an empty argument, which shifted the script's
+// positionals live; the transport no longer uses it, and the script still never depends on it.
 test("in-copy arguments are never empty, with or without a token", () => {
   for (const options of [
     {},

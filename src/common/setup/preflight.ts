@@ -2,6 +2,7 @@ import { existsSync, statSync } from "node:fs";
 
 import { execa } from "execa";
 
+import { CommandKilledError } from "../wp/errors";
 import { elevationSupport, exec } from "../wp/exec";
 import type { ElevationSupport, ExecResult } from "../wp/exec";
 import { planOwnership } from "../wp/ownership";
@@ -283,7 +284,10 @@ const ENGLISH_LOCALES = new Set([
   "en_ZA",
 ]);
 
-/** {@link checkAdminLocale}'s check, and — when its `wp eval` ran and failed — the line it died on. */
+/**
+ * {@link checkAdminLocale}'s check, and — when its `wp eval` failed or was killed by a signal — the
+ * line it died on, or the signal's message.
+ */
 type LocaleCheck = CheckResult & { readonly bootError?: string };
 
 /**
@@ -325,7 +329,8 @@ function readAdminLocale(
  * The PHP is a fixed, read-only literal; the only interpolated value is the username, passed as a
  * separate argument that the exec layer escapes.
  *
- * @returns the check, with the line WordPress died on when the command ran and failed.
+ * @returns the check, with the line WordPress died on when the command failed, or the signal
+ * message when it was killed — either way a boot failure the cell's plugin may cause.
  */
 async function checkAdminLocale(
   transport: Transport,
@@ -362,14 +367,46 @@ async function checkAdminLocale(
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return {
-      name,
-      ok: false,
-      detail: `Could not read the admin locale: ${msg}`,
-      hint: "Verify the transport reaches the target and `wp` is available there.",
-    };
+    // Killed by a signal, WordPress crashed booting (segfault, OOM kill): a boot failure like a
+    // fatal's, so the cell's own plugin may still be what crashes it — its message names no argument.
+    return err instanceof CommandKilledError
+      ? {
+          name,
+          ok: false,
+          detail: `Could not read the admin locale: ${msg}`,
+          hint: WP_KILLED_HINT,
+          bootError: msg,
+        }
+      : {
+          name,
+          ok: false,
+          detail: `Could not read the admin locale: ${msg}`,
+          hint: WP_UNREACHABLE_HINT,
+        };
   }
 }
+
+/**
+ * The hint for a `wp` a signal killed ({@link CommandKilledError}): PHP crashed while WordPress
+ * booted, which is neither a transport fault nor a missing `wp`.
+ */
+const WP_KILLED_HINT = [
+  "PHP was killed while WordPress booted — a segfault, or the kernel's out-of-memory kill. Run the",
+  "command there directly, and look in PHP's and the kernel's logs (`dmesg`) for the cause.",
+].join("\n");
+
+/**
+ * The hint for a `wp --info` a signal killed: it boots no WordPress, so PHP or WP-CLI itself crashed.
+ */
+const WP_CLI_KILLED_HINT = [
+  "PHP was killed running WP-CLI itself (`wp --info` loads no WordPress) — a broken PHP build or",
+  "extension, or the kernel's out-of-memory kill. Run `wp --info` there directly, and look in PHP's",
+  "and the kernel's logs (`dmesg`) for the cause.",
+].join("\n");
+
+/** The hint for a `wp` command that could not be run at all. */
+const WP_UNREACHABLE_HINT =
+  "Verify the transport reaches the target and `wp` is available there.";
 
 /**
  * Confirms a real, installed WordPress answers through the transport via `wp core is-installed`.
@@ -388,18 +425,34 @@ async function checkWordPress(transport: Transport): Promise<CheckResult> {
   } catch (err) {
     // Could not run the command at all (transport dropped, `wp` vanished): an environment fault,
     // not a WordPress verdict — mirrors the exec layer's "couldn't run ⇒ throw" contract.
+    // Killed by a signal, it ran: WordPress crashed under PHP, which is a boot failure to name as one.
     const msg = err instanceof Error ? err.message : String(err);
-    return {
-      name,
-      ok: false,
-      detail: `Could not run \`wp core is-installed\`: ${msg}`,
-      hint: "Verify the transport reaches the target and `wp` is available there.",
-    };
+    return err instanceof CommandKilledError
+      ? {
+          name,
+          ok: false,
+          detail: `WordPress could not be evaluated: ${msg}`,
+          hint: WP_KILLED_HINT,
+        }
+      : {
+          name,
+          ok: false,
+          detail: `Could not run \`wp core is-installed\`: ${msg}`,
+          hint: WP_UNREACHABLE_HINT,
+        };
   }
 }
 
 // ── SSH checks ────────────────────────────────────────────────────────────────
 
+/**
+ * The ssh pre-flight: (1) the connection and `wp --info`, (2) the root can be entered, (3) WordPress
+ * answers `core is-installed` — the third only once both others passed, so neither failure is
+ * reported twice. Checks 1 and 2 run from `/`, so a missing root fails check 2 alone.
+ *
+ * @param transport - the site's ssh transport.
+ * @returns the checks in that order; only check 1, named "SSH connection", when no connection opened.
+ */
 async function verifySsh(transport: SshTransport): Promise<CheckResult[]> {
   const checks: CheckResult[] = [];
   let wpCliOk = false;
@@ -407,8 +460,10 @@ async function verifySsh(transport: SshTransport): Promise<CheckResult[]> {
   // Check 1: SSH connectivity + WP-CLI in PATH.
   // A single `wp --info` call validates both: it requires an SSH connection AND
   // that `wp` is executable. If the connection itself fails, exec() throws.
+  // Run from `/`, not the root: a missing or unenterable root would fail its `cd` here,
+  // and be reported as WP-CLI's fault rather than by check 2, which exists to name it.
   try {
-    const result = await exec(transport, "wp", ["--info"]);
+    const result = await exec(transport, "wp", ["--info"], { cwd: "/" });
     if (result.exitCode === 0) {
       wpCliOk = true;
       checks.push({
@@ -423,38 +478,55 @@ async function verifySsh(transport: SshTransport): Promise<CheckResult[]> {
         detail:
           `WP-CLI exited ${String(result.exitCode)}` +
           (result.stderr.trim() ? `: ${result.stderr.trim()}` : "."),
-        hint: `Ensure 'wp' is in PATH on ${transport.host} for user '${transport.username}'.`,
+        hint:
+          `Ensure 'wp' is in PATH on ${transport.host} for user '${transport.username}', as an ` +
+          "executable file: a shell function or alias named `wp` is never run.",
       });
       // We connected (the command ran), so we still check rootDir below.
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    checks.push({
-      name: "SSH connection",
-      ok: false,
-      detail: msg,
-      hint: [
-        `Verify host "${transport.host}" is reachable on port 22.`,
-        `Test locally: ssh -i "${transport.privateKeyPath}" ${transport.username}@${transport.host} "echo ok"`,
-      ].join("\n"),
-    });
-    // Cannot connect → rootDir check is moot.
-    return checks;
+    if (err instanceof CommandKilledError) {
+      // `wp` started and crashed: the connection works, so the root is still worth checking.
+      checks.push({
+        name: "SSH + WP-CLI",
+        ok: false,
+        detail: msg,
+        hint: WP_CLI_KILLED_HINT,
+      });
+    } else {
+      checks.push({
+        name: "SSH connection",
+        ok: false,
+        detail: msg,
+        hint: [
+          `Verify host "${transport.host}" is reachable on port 22.`,
+          `Test locally: ssh -i "${transport.privateKeyPath}" ${transport.username}@${transport.host} "echo ok"`,
+        ].join("\n"),
+      });
+      // Cannot connect → rootDir check is moot.
+      return checks;
+    }
   }
 
   // Check 2: rootDir exists, is a directory, and the SSH user can traverse INTO it —
-  // which is what WP-CLI needs, since the exec layer runs `wp` with cwd = rootDir. The
-  // trailing `/.` forces `ls` to resolve into the directory, so this requires execute
-  // (search) permission on rootDir itself and fails on a non-directory. Plain
+  // which every command needs, since the exec layer changes into rootDir before running
+  // one. The trailing `/.` forces `ls` to resolve into the directory, so this requires
+  // execute (search) permission on rootDir itself and fails on a non-directory. Plain
   // `ls -d <path>` only stats the entry via its parent, so it would pass even for a
   // regular file or a directory the user cannot enter — neither of which is usable here.
   // (It does NOT require read/list permission on the directory, which WP-CLI never needs.)
+  // Run from `/`, so the answer is `ls`'s own rather than the failed `cd` into rootDir.
+  let rootDirOk = false;
   try {
-    const result = await exec(transport, "ls", [
-      "-d",
-      `${transport.rootDir}/.`,
-    ]);
-    if (result.exitCode === 0) {
+    const result = await exec(
+      transport,
+      "ls",
+      ["-d", `${transport.rootDir}/.`],
+      { cwd: "/" },
+    );
+    rootDirOk = result.exitCode === 0;
+    if (rootDirOk) {
       checks.push({
         name: "rootDir accessible",
         ok: true,
@@ -485,8 +557,9 @@ async function verifySsh(transport: SshTransport): Promise<CheckResult[]> {
     });
   }
 
-  // Check 3: a real, installed WordPress answers (only worth running once `wp` works).
-  if (wpCliOk) {
+  // Check 3: a real, installed WordPress answers — only worth running once `wp` works and
+  // the root it runs in can be entered; otherwise it would only repeat the failure above.
+  if (wpCliOk && rootDirOk) {
     checks.push(await checkWordPress(transport));
   }
 
@@ -917,6 +990,7 @@ async function checkBootAndLocale(
         (await readAdminLocale(transport, username, candidate)).exitCode === 0
       );
     } catch {
+      // Unreachable, or killed even with that slug skipped: not this plugin's doing.
       return false;
     }
   });

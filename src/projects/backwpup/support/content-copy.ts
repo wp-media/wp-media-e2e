@@ -105,8 +105,8 @@ export const BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id";
 export const RECOVERING_PREFIX = `${CONTENT_COPY_DIR}.recovering-`;
 
 /**
- * {@link IN_COPY_SCRIPT}'s token when none is asked. Never empty: node-ssh drops an empty argument
- * (measured), which would shift every one after it.
+ * {@link IN_COPY_SCRIPT}'s token when none is asked. Never empty: a transport dropping an empty
+ * argument (node-ssh's own escaping did, measured live) would shift every one after it.
  */
 export const NO_TOKEN = "-";
 
@@ -551,7 +551,8 @@ export interface InCopyOptions {
 }
 
 /**
- * `sh`'s arguments for {@link inCopy}: never an empty one, which node-ssh drops.
+ * `sh`'s arguments for {@link inCopy}: never an empty one, which a transport could drop (node-ssh's
+ * own escaping did).
  *
  * @param dir - the copy's directory, absolute.
  * @param argv - the command.

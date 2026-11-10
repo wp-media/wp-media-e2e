@@ -24,6 +24,7 @@ import {
   whyItDidNotExit,
   wpRootDir,
 } from "./exec";
+import { CommandKilledError } from "./errors";
 import type {
   DockerTransport,
   LocalTransport,
@@ -195,6 +196,27 @@ test.describe("exec — a failure never quotes the command's arguments", () => {
     );
   });
 
+  // Typed, so a caller with another way to its answer (the debug log's direct read) can tell it from
+  // a transport that failed.
+  test("a command killed by a signal is a CommandKilledError carrying the signal", async () => {
+    const error: unknown = await exec(local, "sh", [
+      "-c",
+      "kill -KILL $$",
+    ]).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(CommandKilledError);
+    expect((error as CommandKilledError).signal).toBe("SIGKILL");
+  });
+
+  test("a program that is not there is not a CommandKilledError", async () => {
+    const error: unknown = await exec(local, "no-such-program-e2e", []).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(CommandKilledError);
+  });
+
   // The capped output is the reason, even though the process ended at an exit code of its own.
   test("output over the capture cap, from a command that then exits", async () => {
     expect(
@@ -241,6 +263,40 @@ test.describe("exec — a failure never quotes the command's arguments", () => {
     ).toBe(
       '[wp/exec] refusing to run "sh": argument 3 holds a NUL byte, which no program can be handed.',
     );
+  });
+
+  // No UTF-8 form exists for a lone surrogate: sent, it would arrive as U+FFFD, a different argument.
+  test("an argument holding a lone surrogate is refused by position, before any transport", async () => {
+    expect(
+      await failureOf(exec(local, "sh", ["-c", "true", `${ARG}\ud800`])),
+    ).toBe(
+      '[wp/exec] refusing to run "sh": argument 3 is not well-formed text (a lone surrogate), ' +
+        "which no program can be handed.",
+    );
+  });
+
+  // Docker's binary is never reached: the refusal comes first, whatever the transport.
+  test("a lone surrogate is refused on the docker transport too, with no docker started", async () => {
+    const docker: DockerTransport = { mode: "docker", container: "c-e2e" };
+    expect(await failureOf(exec(docker, "wp", [ARG, "\udc00x"]))).toBe(
+      '[wp/exec] refusing to run "wp": argument 2 is not well-formed text (a lone surrogate), ' +
+        "which no program can be handed.",
+    );
+  });
+
+  test("a program whose name holds a lone surrogate or a NUL byte is refused without naming it", async () => {
+    expect(await failureOf(exec(local, "sh\ud83d", [ARG]))).toBe(
+      "[wp/exec] refusing to run a program whose name is not well-formed text (a lone surrogate).",
+    );
+    expect(await failureOf(exec(local, "sh\0", [ARG]))).toBe(
+      "[wp/exec] refusing to run a program whose name holds a NUL byte.",
+    );
+  });
+
+  // A whole surrogate pair is ordinary text, not refused.
+  test("an argument holding a whole surrogate pair runs", async () => {
+    const result = await exec(local, "printf", ["%s", "a😀b"]);
+    expect(result.stdout).toBe("a😀b");
   });
 
   // The one execa call no argument check stands in front of: its own refusal is replaced, not quoted.

@@ -1,6 +1,6 @@
 # Phase 12 — Run as the site: the web server's identity for every site command
 
-Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a done 2026-11-10. Parent:
+Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a and 12.1 done 2026-11-10. Parent:
 [e2e-modernization-plan.md](e2e-modernization-plan.md) (§3 phase table). Reverses that plan's §8.2
 rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of WP Rocket's port
 ([phase-6 plan §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket)).
@@ -101,8 +101,8 @@ the checks to repeat on the twins. Re-measure when in doubt.
 | Fact | Where |
 | --- | --- |
 | Over `ssh`, every command runs as `transport.username`; root is `sudo -n --`; uploads are SFTP `putFile` as that user. | `src/common/wp/exec.ts` (`runSsh`, `sudoArgv`, `copyIntoTarget`) |
-| Probes go through `exec`: `detectSiteOwnership` (`stat`), `probeIdentity` (`id`), declared-owner lookups (`id -u`, `getent`), `elevationSupport` (`sudo -n true`), docker `pwd`, `resolveOnTarget` (`readlink -f`). | `ownership.ts:297, 309, 509-510`; `exec.ts:637, 860, 718` |
-| The pre-flight calls `exec(transport, "wp", …)` directly (not `wpCli`): `wp --info` (gate, hint names `transport.username`), the locale check with its own `--user`, `core is-installed`. | `setup/preflight.ts:158, 301-305, 386, 411` |
+| Probes go through `exec`: `detectSiteOwnership` (`stat`), `probeIdentity` (`id`), declared-owner lookups (`id -u`, `getent`), `elevationSupport` (`sudo -n true`), docker `pwd`, `resolveOnTarget` (`readlink -f`). | `ownership.ts:297, 309, 509-510`; `exec.ts:743, 966, 828` |
+| The pre-flight calls `exec(transport, "wp", …)` directly (not `wpCli`): `wp --info` (gate, hint names `transport.username`), the locale check with its own `--user`, `core is-installed`. | `setup/preflight.ts:159, 302-306, 403, 446` |
 | Every `wp/*` function takes only a `Transport`; the WordPress login is `SiteInput.username`. | `config/types.ts:147` |
 | One install path for Before and part-way reinstalls: `installFresh`, used by `installPluginUnderTest` and `replacePluginUnderTest`. `ensurePluginDeactivated(transport, slug)` re-asserts the state; it is also reached from `ensurePluginAbsent`, the pre-flight's heal and `capture-backwpup-fixtures.ts`. | `hooks/plugin-lifecycle.ts:262, 334, 373`; `wp/plugin.ts:79-88` |
 | Data directories are opened `0777` (`DATA_DIR_MODE`) because two users share them. | `wp/residue.ts:409-429` |
@@ -238,7 +238,7 @@ Fallback reasons, each with its fix:
 | Part | Version |
 | --- | --- |
 | Runtime and language | Node ≥ 24.16, TypeScript 6.0.x strict |
-| Libraries | `node-ssh` ^13.2.1 (its `shell-escape` 0.2.0 bypassed by 12.1); execa ^10; `@playwright/test` ^1.62 (`request.newContext` for the probe; `BrowserContext.request` for the settling request, which shares the context's cookies); no new dependency |
+| Libraries | `node-ssh` ^13.2.1 (`execCommand` only since 12.1: its `exec`'s `shell-escape` 0.2.0 bypassed); execa ^10; `@playwright/test` ^1.62 (`request.newContext` for the probe; `BrowserContext.request` for the settling request, which shares the context's cookies); no new dependency |
 | Target hosts | Ubuntu 24.04, sudo ≥ 1.9, `/bin/sh` = dash, GNU coreutils |
 | Twins | `ubuntu:24.04`; apache2 + php8.3-fpm; nginx + php8.5-fpm (`ondrej/php` PPA, minor pinned); MariaDB (apache) / MySQL (nginx); openssh-server; sudo; WP-CLI 2.12.0 phar (SHA-512 pinned) |
 
@@ -255,7 +255,7 @@ Code never cites this plan; docs may.
 | --- | --- | --- | --- | --- |
 | 12.0a | Twin images, `system.sh`, `site.sh` variants | — | 12.1, 12.2 | M / M |
 | 12.0b | Compose, npm scripts, sites overlays, docs; optional CI | 12.0a | 12.3 | S / S |
-| 12.1 | ssh command line: our quoting, `cd … &&`; an executing ssh test server | — | 12.0a, 12.2 | S / M |
+| 12.1 | ssh command line: our quoting, `cd … &&`; an executing ssh test server (done 2026-11-10) | — | 12.0a, 12.2 | S / M |
 | 12.2 | Config: `runAs`, `umask`, `wpUser` | — | 12.0a, 12.1 | S / S |
 | 12.3 | `wp/site-identity.ts`: states, probes, web probe and verdict file, `asTransportUser` | 12.2 | 12.0b | M / H |
 | 12.4 | Exec wiring: wrapper, `execAsTransport`, probe callers moved, stderr noise | 12.1, 12.3 | — | M / H |
@@ -342,24 +342,48 @@ Facts found (2026-11-10, both twins):
 - Done: `npm run healthcheck` passes on both twins in `legacy-777` with today's code; the CI
   workflow runs green once.
 
-### 12.1 — ssh command line (pre-existing defects, F5)
+### 12.1 — ssh command line (done 2026-11-10)
 
-- `exec.ts`: a pure, exported `shellQuote(arg)`. Every argument is single-quoted, `'` becomes
-  `'\''`, and `""` becomes `''`.
-- `runSsh` builds `cd -- <quoted cwd> && exec <quoted file> <quoted args…>` and calls
-  `ssh.execCommand` with no `cwd`.
-  - Keep `noTrim: true`.
-  - Map `{ code, signal }` exactly as `runSsh` does today.
-- **Test seam:** extend `exec.ssh.spec.ts`'s ssh2 in-process server to **execute** the command with
-  `sh -c` in a temp directory, with a fake `sudo` script on its `PATH`. 12.4 and 12.5 reuse it, so
-  the main CI covers the wrapper and the inbox.
-- Pre-flight: run `wp --info` (check 1) with cwd `/`, so a missing `rootDir` is reported by the root
-  check, not as "wp not in PATH".
-- Tests:
-  - a `shellQuote` table: empty, `'`, newline, CR, tab, `$`, backtick, `-x`, `--`, unicode, 64 KiB;
-  - round-trips of `""` and F4's set through the executing server;
-  - a missing `cwd` runs nothing;
-  - mutants (no `''` case; `;` instead of `&&`) fail.
+`exec.ts`: `shellQuote`, `sshCommandLine` (`cd -- <cwd> && exec <file> <args…>`, every word quoted,
+the program too), sent with `execCommand` and no node-ssh `cwd`. The ssh pre-flight runs `wp --info`
+and the root check from `/`, and `core is-installed` only once both passed.
+
+Audit fixes (2026-11-10, two audits; mutants re-run):
+- `sshCommandLine` refuses a non-absolute `cwd` (`cd -- ''` is a no-op) and a program starting with
+  `-` (dash's `exec` takes no `--`, measured in `ubuntu:24.04`); `sites.ts` refuses a non-absolute
+  `rootDir` on every transport.
+- Every transport refuses a lone surrogate like a NUL (sent as `U+FFFD` otherwise).
+- A signal kill throws `CommandKilledError` on every transport (over ssh `exec` left no shell to
+  return `128 + n`, as dash or bash < 5.1 did with the old `cd …; wp` line); `readDebugLog`/
+  `clearDebugLog` fall back on it, the pre-flight names it a crash (check 1 stays WP-CLI's failure,
+  its own hint, and still checks the root). Neither status nor signal (connection disposed) is a
+  plain `Error`.
+- A crash reading the admin locale is a boot failure: the cell-plugin recovery and `pluginBreaksBoot`
+  blame the plugin only when WordPress boots with its slug skipped (a crash there too is not its).
+- `sites.ts` quotes a relative `rootDir` (JSON, ≤ 200 code points): a path is no secret.
+- Documented: `wp` must be an executable on the login's `PATH`; the login shell must be POSIX
+  (probe deferred to 12.9).
+
+**Test seam for 12.4/12.5** (`src/common/__fixtures__/ssh-server.ts`): `startSshServer()` runs each
+command line with `/bin/sh -c` as the runner's user, from a temp `home`, with `bin/` first on `PATH`.
+- `bin/sudo` (fake) logs its argv (`sudoCalls()`), refuses as F2 while `denySudo(true)`, else skips
+  `-n`, `-u X`, `-g X` up to `--` and `exec`s the rest; `addProgram`/`removeProgram` manage more;
+  `e2e-print-argv` + `decodeArgv` prove an argv byte for byte.
+- SFTP OPEN/WRITE/CLOSE write real files (others: `OP_UNSUPPORTED`); `commands` records each line.
+- `transport()` is rooted at `root` (a path with a space); `steerNodeSsh` points node-ssh at the port.
+- Bounded: each command's process group is killed on channel close (the channel is drained, or it
+  never emits `close`), after 20 s, and at `close()`, which first ends every client connection. A
+  failed start removes its temp folder; keys are regenerated until ssh2 parses them (ssh2 1.17
+  writes an unparsable ed25519 key ~1 in 360); `processGone` counts a zombie as dead (containers
+  without init). Spec hooks undo only what `beforeAll` set up.
+- ssh2's server refuses packets over 35,000 bytes, so a line over ~34 KB fails as `Unable to exec`
+  there (OpenSSH took 64 KiB, F4); the 64 KiB case is a `shellQuote` table row.
+
+Found (measured 2026-11-10 with the seam): node-ssh's `execCommand` decodes each output chunk alone
+(`chunk.toString()`), so a multi-byte UTF-8 character split between chunks becomes `U+FFFD`
+(200,000 × `é` came back with one). Pre-existing; fixed in 12.4, which already edits `runSsh`'s
+output: collect the `onStdout`/`onStderr` buffers and decode once (or a `StringDecoder`), ignoring
+node-ssh's strings; spec through the seam.
 
 ### 12.2 — Config
 
@@ -432,6 +456,7 @@ Facts found (2026-11-10, both twins):
   - `execElevated` stays root.
 - Move every probe in §1.3's row to `execAsTransport`. `planOwnership` reads the run identity from
   the resolved state (§2.1).
+- `runSsh` decodes stdout/stderr from whole buffers, not node-ssh's per-chunk strings (found in 12.1).
 - Under the wrapper, `runSsh` removes lines `^sudo: unable to resolve host .*$` from stderr (F8):
   `parseCliNotices`, `describeExit` and `evalPhp` errors read stderr.
 - Error labels name the program, never `sudo`.
@@ -439,7 +464,9 @@ Facts found (2026-11-10, both twins):
   is `site`; the root rules are unchanged; `execElevated`'s notice text updated.
 - Tests:
   - argv per state;
-  - the executing ssh test server (12.1) runs the wrapper with a fake `sudo`;
+  - the executing ssh test server (12.1) runs the wrapper with a fake `sudo`; its `denySudo` refuses
+    every call — extend it to a per-argv policy (e.g. refuse `-u www-data` but run `-n true`) if a
+    state's spec needs a partial refusal;
   - shared fake-`sudo` stubs learn `-u`/`-g`: `exec.spec.ts`, `residue.spec.ts`, `log.spec.ts`,
     `staging.spec.ts`, `plugin-dir.spec.ts`, `support/__fixtures__/copy-host.ts`;
   - `content-copy-leftover.spec.ts`'s `^sudo -n -- mv -T` stays;
@@ -467,6 +494,10 @@ In the `site` state, `copyIntoTarget` (ssh) does:
 - Update `staging.ts`'s header.
 - Tests: unit (sequence; cleanup after each failing step; the heal path); executing ssh server;
   twin `site` variant (zip into a 755 docroot, `ubuntu` outside the group).
+  - The executing server runs as the runner's user with the runner's `/tmp`: make the inbox root a
+    parameter (default `/tmp`) and point it into the server's temp folder (`base`), so `close()`
+    removes it. Its SFTP OPEN ignores flags (every open truncates; no `O_EXCL`) and refuses every
+    other request (`OP_UNSUPPORTED`): extend it if the inbox relies on either.
 
 ### 12.6 — `--user=<login>`
 
@@ -523,7 +554,10 @@ In the `site` state, `copyIntoTarget` (ssh) does:
   - **`!log_allowed` missing** from `sudo -n -l` for the SSH user → warn (F19), in every state that
     uses sudo;
   - an existing `~/.wp-cli/config.yml` of the SSH user → "no longer applies in `site`".
-- `wp --info` gate (`preflight.ts:411`): its hint names the identity it ran as.
+- `wp --info` gate (`preflight.ts:446`): its hint names the identity it ran as.
+- Probe that the SSH user's login shell is POSIX (`getent passwd` field 7 is not csh/tcsh/fish, or a
+  `printf '%s' 'a!b'` round-trip): sshd hands the command line to it, and csh/tcsh read `!` inside
+  single quotes (found in 12.1; documented as a requirement until then). A failure is a gate on that site.
 - Banner: one pure renderer (`setup/elevation-report.ts`) for both callers; fields on
   `SitePreflightResult` and the healthcheck's `SiteResult`. Silent when every site is
   `site`/`same-user`, verified, and `!log_allowed` is set.
@@ -720,7 +754,7 @@ In the `site` state, `copyIntoTarget` (ssh) does:
 | A BackWPup scenario silently depends on two users | 12.10's baseline-versus-new comparison; a new skip or failure blocks the phase. |
 | A killed runner leaves web-user processes (F10) | Unchanged from today; anything that stops one uses the same identity. |
 | The probe file served publicly | 128-bit random name, constant content (ids, umask, SAPI), deleted in `finally`, swept after 1 h. |
-| Empty-argument and `cd ;` defects (F5) | 12.1 lands first, independently. |
+| Empty-argument and `cd ;` defects (F5) | Fixed by 12.1 (done). |
 | WP Rocket's file edits not reversible byte for byte | 12.15 replays WP Rocket's own transforms on the record; anything else is warned and left. |
 | Phase 11 profiles carrying identity fields | 12.2 adds `runAs`/`umask` to Phase 11's refused list. |
 

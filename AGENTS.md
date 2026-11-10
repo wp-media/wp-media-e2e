@@ -46,7 +46,7 @@ src/
 │   ├── pages/              # cross-product page objects (plugins, site-health) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm + warm-lines.ts its output, pin)
-│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/), raw Allure results, a stub Allure CLI and a stop at a chosen check (allure.ts), a FIFO's blocked reader released, or fed chunk by chunk, within a deadline (fifo.ts), a `.tar.gz` listed from its raw headers (tar-listing.ts)
+│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/), raw Allure results, a stub Allure CLI and a stop at a chosen check (allure.ts), a FIFO's blocked reader released, or fed chunk by chunk, within a deadline (fifo.ts), a `.tar.gz` listed from its raw headers (tar-listing.ts), an in-process SSH server that runs what it is sent, with a recording fake `sudo` (ssh-server.ts)
 │   └── wp/                 # WordPress over WP-CLI (exec, php, staging, plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
@@ -438,6 +438,9 @@ automatically, and that verification **must not** be skipped. Mirrored as a comm
 `src/common/wp/` drives a site over WP-CLI on any transport (local / docker / ssh). Reference:
 **[wordpress-automation.md](docs/architecture/wordpress-automation.md)**. The rules:
 
+- Over `ssh` a command is `cd -- <cwd> && exec <program> <args…>`, every word quoted: `rootDir` must
+  be absolute (refused at load), the program an executable on the login's `PATH` (never a shell
+  function), the login shell POSIX. A signal kill throws `CommandKilledError` on every transport.
 - Commands are file + args arrays, never shell strings. **An exec error names the program and the
   reason, never the arguments** (they carry `--key=` values and snippet values): never pass on execa's
   `message`/`shortMessage`/`command` or attach its error as a `cause`.

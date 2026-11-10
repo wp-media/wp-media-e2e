@@ -1,3 +1,4 @@
+import { CommandKilledError } from "./errors";
 import { elevationSupport, exec, execElevated, wpCli } from "./exec";
 import type { ExecResult } from "./exec";
 import type { Transport } from "../config/types";
@@ -7,7 +8,8 @@ import type { Transport } from "../config/types";
  *
  * Reads/clears via WP-CLI `wp eval` (PHP run inside WordPress), which resolves `WP_CONTENT_DIR`
  * itself — even when customised. But `wp eval` needs WordPress to BOOT, and the log matters most
- * precisely when a fatal has broken that boot. So when `wp eval` exits non-zero we log and fall
+ * precisely when a fatal has broken that boot. So when `wp eval` exits non-zero — or PHP crashed
+ * under it, killed by a signal ({@link CommandKilledError}) — we log and fall
  * back to a direct file read/removal that does NOT load WordPress, targeting the conventional
  * `wp-content/debug.log` relative to the WP root — the same working directory the exec layer
  * already runs `wp` in (the container WORKDIR for `docker`, `rootDir` for `ssh`/`local`). A
@@ -87,14 +89,53 @@ const NOTICE_PATTERNS: readonly RegExp[] = [
   /PHP Strict Standards/i,
 ];
 
-/** Notes that the WP-CLI path failed and the direct file fallback is being used. */
+/**
+ * How a `wp eval` that could not do the job ended: its run, or the signal that killed it.
+ */
+type EvalOutcome = ExecResult | CommandKilledError;
+
+/**
+ * Runs one of this module's snippets through a bare WordPress ({@link BOOT_BARE}).
+ *
+ * A `wp` killed by a signal — PHP segfaulting, the kernel's OOM kill — is returned rather than
+ * thrown: a crashed WordPress is a reason to reach the log directly, exactly as a fatal is. Any other
+ * throw means the transport itself failed, which the direct route could not survive either, so it
+ * stays a throw.
+ *
+ * @param transport - the site.
+ * @param snippet - the PHP to evaluate.
+ * @returns the run, or the {@link CommandKilledError} that ended it.
+ */
+async function evalBare(
+  transport: Transport,
+  snippet: string,
+): Promise<EvalOutcome> {
+  try {
+    return await wpCli(transport, [...BOOT_BARE, snippet]);
+  } catch (error) {
+    if (error instanceof CommandKilledError) return error;
+    throw error;
+  }
+}
+
+/**
+ * Notes that the WP-CLI path failed and the direct file fallback is being used.
+ *
+ * @param action - what `wp eval` could not do.
+ * @param outcome - how it ended: its exit code and what it said, or the signal that killed it.
+ * @param said - the stream to quote from a run that exited.
+ */
 function warnFallback(
   action: "read" | "clear",
-  exitCode: number,
-  stderr: string,
+  outcome: EvalOutcome,
+  said: string,
 ): void {
+  const why =
+    outcome instanceof CommandKilledError
+      ? `killed by ${outcome.signal}`
+      : `exit ${String(outcome.exitCode)}: ${said.trim() || "no stderr"}`;
   console.warn(
-    `[wp/log] \`wp eval\` could not ${action} debug.log (exit ${String(exitCode)}: ${stderr.trim() || "no stderr"}); ` +
+    `[wp/log] \`wp eval\` could not ${action} debug.log (${why}); ` +
       `falling back to a direct file ${action === "read" ? "read" : "removal"}.`,
   );
 }
@@ -141,11 +182,15 @@ async function debugLogExists(
  * than returned as silence.
  */
 export async function readDebugLog(transport: Transport): Promise<string> {
-  const viaCli = await wpCli(transport, [...BOOT_BARE, READ_DEBUG_LOG]);
-  if (viaCli.exitCode === 0) {
+  const viaCli = await evalBare(transport, READ_DEBUG_LOG);
+  if (!(viaCli instanceof CommandKilledError) && viaCli.exitCode === 0) {
     return viaCli.stdout;
   }
-  warnFallback("read", viaCli.exitCode, viaCli.stderr);
+  warnFallback(
+    "read",
+    viaCli,
+    viaCli instanceof CommandKilledError ? "" : viaCli.stderr,
+  );
   // Direct read — no WordPress bootstrap.
   const direct = await execEscalating(transport, "cat", [DEBUG_LOG_PATH]);
   if (direct.exitCode === 0) return direct.stdout;
@@ -173,11 +218,19 @@ export async function readDebugLog(transport: Transport): Promise<string> {
  * @throws {@link Error} if the log is still there after both attempts.
  */
 export async function clearDebugLog(transport: Transport): Promise<void> {
-  const viaCli = await wpCli(transport, [...BOOT_BARE, CLEAR_DEBUG_LOG]);
-  if (viaCli.exitCode === 0 && viaCli.stdout.trim().endsWith(CLEARED)) {
+  const viaCli = await evalBare(transport, CLEAR_DEBUG_LOG);
+  if (
+    !(viaCli instanceof CommandKilledError) &&
+    viaCli.exitCode === 0 &&
+    viaCli.stdout.trim().endsWith(CLEARED)
+  ) {
     return;
   }
-  warnFallback("clear", viaCli.exitCode, viaCli.stderr || viaCli.stdout);
+  warnFallback(
+    "clear",
+    viaCli,
+    viaCli instanceof CommandKilledError ? "" : viaCli.stderr || viaCli.stdout,
+  );
   // Direct removal — no WordPress bootstrap; WordPress recreates the log on its next write.
   // `rm -f` is a no-op when the file is already absent and is portable (Linux, macOS, BusyBox).
   await exec(transport, "rm", ["-f", DEBUG_LOG_PATH]);

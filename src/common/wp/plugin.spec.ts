@@ -46,6 +46,8 @@ import type { LocalTransport } from "../config/types";
  * takes; `WP_STUB_BROKEN` — the copy cannot boot: without `--skip-plugins`, `is-active` dies on its
  * fatal at exit 1, `deactivate` at exit 255 and `eval` at exit 1, as measured on a cell (any
  * `--skip-plugins…` form skips it); `WP_STUB_DOWN` — every `eval` fails, as with no database;
+ * `WP_STUB_KILLED` — PHP is killed by a signal (a segfault, an OOM kill) in `eval`: `loaded` only with
+ * plugins loaded, `always` with the plugin skipped too;
  * `WP_STUB_IS_ACTIVE_EXIT` — what
  * `--skip-plugins plugin is-active` exits with instead; `WP_STUB_CACHE_FAIL` — `cache flush` refuses;
  * `WP_STUB_REINSTALLED` — a copy lands at the path right after the first inspection; `WP_STUB_EVAL_BROKEN`
@@ -62,6 +64,7 @@ P="$WP_STUB_PLUGINS"
 A="$WP_STUB_ACTIVE"
 FATAL="Fatal error: Uncaught Error: Class BerlinDB not found"
 if [ "$1" = "eval" ]; then
+  if [ "$WP_STUB_KILLED" = always ] || { [ "$WP_STUB_KILLED" = loaded ] && [ -z "$SKIP" ]; }; then kill -KILL $$; fi
   if [ -n "$WP_STUB_DOWN" ]; then echo "Error: Error establishing a database connection." >&2; exit 1; fi
   if [ -n "$WP_STUB_BROKEN" ] && [ -z "$SKIP" ]; then echo "$FATAL" >&2; exit 1; fi
   if [ -n "$WP_STUB_EVAL_BROKEN" ]; then echo "PHP Warning:  x"; exit 0; fi
@@ -167,6 +170,7 @@ test.afterEach(() => {
     "WP_STUB_DEST_VANISHES",
     "WP_STUB_UNCREATED",
     "WP_STUB_DOWN",
+    "WP_STUB_KILLED",
   ]) {
     Reflect.deleteProperty(process.env, key);
   }
@@ -731,6 +735,21 @@ test.describe("pluginBreaksBoot", () => {
 
   test("blames nothing, and loads no plugin, when WordPress does not boot even without it", async () => {
     process.env.WP_STUB_DOWN = "1";
+    expect(await pluginBreaksBoot(local, "x")).toBeUndefined();
+    expect(calls()).toEqual(["--skip-plugins=x eval echo 1;"]);
+  });
+
+  // A crash (no exit code, so a CommandKilledError) is a boot failure like a fatal, never a throw.
+  test("names the signal when WordPress crashes only with the plugin loaded", async () => {
+    process.env.WP_STUB_KILLED = "loaded";
+    const boot = await pluginBreaksBoot(local, "x");
+    expect(boot).toMatch(/^\[wp\/exec\] "wp" was killed by SIGKILL\b/);
+    expect(boot).not.toContain("echo 1");
+    expect(calls()).toEqual(["--skip-plugins=x eval echo 1;", "eval echo 1;"]);
+  });
+
+  test("blames nothing, and loads no plugin, when WordPress crashes even without it", async () => {
+    process.env.WP_STUB_KILLED = "always";
     expect(await pluginBreaksBoot(local, "x")).toBeUndefined();
     expect(calls()).toEqual(["--skip-plugins=x eval echo 1;"]);
   });

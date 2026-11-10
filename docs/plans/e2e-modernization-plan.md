@@ -832,7 +832,8 @@ Transports' file access (2026-07-16):
   4000 random arguments (quotes, `$()`, backticks, newlines, `;`, `|`, `&`) through `/bin/sh`: no
   argv mismatch, except that an empty-string argument disappears — unreachable today, since every
   value is a literal or refused when empty. Only the arguments are escaped, never the command, so no
-  dynamic value may sit in the program position.
+  dynamic value may sit in the program position. (Superseded 2026-11-10: the transport quotes every word itself —
+  [phase-12 plan](phase-12-site-identity-plan.md) 12.1.)
 
 ### 7.2 Decisions and rejected alternatives
 
