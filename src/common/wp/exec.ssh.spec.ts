@@ -1,8 +1,6 @@
 import { test, expect } from "@playwright/test";
-import { createRequire } from "node:module";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import net from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { NodeSSH } from "node-ssh";
@@ -12,85 +10,35 @@ import {
   copyIntoTarget,
   disposeConnections,
   exec,
+  execElevated,
+  resetElevationCaches,
+  shellQuote,
+  sshCommandLine,
 } from "./exec";
-import type { SshTransport } from "../config/types";
+import { CommandKilledError } from "./errors";
+import {
+  PRINT_ARGV_PROGRAM,
+  decodeArgv,
+  startSshServer,
+  steerNodeSsh,
+  type SshTestServer,
+} from "../__fixtures__/ssh-server";
 
 /**
- * The ssh transport when the connection breaks — under a running command, or between two.
+ * The ssh transport: the command line it sends, and what happens when the connection breaks — under
+ * a running command, or between two.
  *
- * Against ssh2's own in-process server, reached through a local proxy the test can cut or hold
- * half-open, so nothing leaves the machine and the client side is exactly the code the cells use.
- * What is pinned is the difference between a command failing and the **worker dying** — node-ssh
- * stops listening for connection errors once a channel is open, and an unhandled `error` event is an
- * uncaught exception — and between a dead connection costing a scenario and costing a reconnect.
+ * Against an in-process ssh2 server that **runs** each command line with `sh -c`, reached through a
+ * local proxy the test can cut or hold half-open, so nothing leaves the machine and the client side
+ * is exactly the code the cells use. What is pinned is that every argument reaches the program as it
+ * was given, that a working directory that cannot be entered runs nothing, and the difference between
+ * a command failing and the **worker dying** — node-ssh stops listening for connection errors once a
+ * channel is open, and an unhandled `error` event is an uncaught exception — and between a dead
+ * connection costing a scenario and costing a reconnect.
  */
 
-// The few parts of ssh2's server API used here — the package ships no type declarations.
-interface ExecStream {
-  write(data: string): void;
-  /** A number is an exit status; a string, the signal the command was killed by. */
-  exit(statusOrSignal: number | string): void;
-  end(): void;
-}
-interface SftpSession {
-  on(event: "OPEN", listener: (reqid: number, filename: string) => void): this;
-  on(
-    event: "WRITE",
-    listener: (
-      reqid: number,
-      handle: Buffer,
-      offset: number,
-      data: Buffer,
-    ) => void,
-  ): this;
-  on(event: "CLOSE", listener: (reqid: number, handle: Buffer) => void): this;
-  handle(reqid: number, handle: Buffer): void;
-  status(reqid: number, code: number): void;
-}
-interface ServerSession {
-  on(
-    event: "exec",
-    listener: (
-      accept: () => ExecStream,
-      reject: () => void,
-      info: { command: string },
-    ) => void,
-  ): this;
-  on(event: "sftp", listener: (accept: () => SftpSession) => void): this;
-}
-interface AuthContext {
-  method: string;
-  accept(): void;
-  reject(methods: string[]): void;
-}
-interface ServerConnection {
-  on(event: "error", listener: (error: Error) => void): this;
-  on(event: "authentication", listener: (context: AuthContext) => void): this;
-  on(event: "session", listener: (accept: () => ServerSession) => void): this;
-  /** Sends the client a disconnect, then half-closes the socket. */
-  end(): void;
-}
-interface Ssh2Server {
-  listen(port: number, host: string, callback: () => void): void;
-  address(): net.AddressInfo;
-  close(): void;
-}
-interface Ssh2 {
-  Server: new (
-    config: { hostKeys: string[] },
-    listener: (connection: ServerConnection) => void,
-  ) => Ssh2Server;
-  utils: {
-    generateKeyPairSync(type: "ed25519"): { private: string; public: string };
-    sftp: { STATUS_CODE: { OK: number } };
-  };
-}
-
-const ssh2 = createRequire(import.meta.url)("ssh2") as Ssh2;
-
-let server: Ssh2Server;
+let server: SshTestServer;
 let proxy: net.Server;
-let keyDir: string;
 /** Where node-ssh is steered to connect: the proxy, unless a test points it at a dead port. */
 let connectPort: number;
 /** The proxy's own port. */
@@ -101,10 +49,6 @@ let holdFin = false;
 const links: net.Socket[] = [];
 /** The proxy's server-facing sockets, closed with the links after each test. */
 const upstreams: net.Socket[] = [];
-/** Every connection the server accepted, newest last — what a test disconnects. */
-const serverConnections: ServerConnection[] = [];
-/** What each upload wrote, by the path it was written to. */
-const uploads = new Map<string, Buffer>();
 /** Every config node-ssh was asked to connect with, newest last. */
 const configs: Record<string, unknown>[] = [];
 /** Resolves the moment the client has a command's channel open — see {@link runningCommand}. */
@@ -112,93 +56,32 @@ let channelOpened: (() => void) | undefined;
 /** While set, the probing the client is steered to use instead of the transport's own. */
 let keepaliveOverride:
   { readonly intervalMs: number; readonly countMax: number } | undefined;
-
 /**
- * Answers the three requests an upload makes — open, write, close — keeping what was written in
- * {@link uploads}. The handle is the path itself, since nothing here opens two files at once.
+ * What `afterAll` undoes, newest first; each step is pushed only once what it undoes exists, so a
+ * failed `beforeAll` (which still runs `afterAll`) is not hidden behind a second error.
  */
-function serveUploads(sftp: SftpSession): void {
-  const written = new Map<string, { offset: number; data: Buffer }[]>();
-  const ok = ssh2.utils.sftp.STATUS_CODE.OK;
-  sftp.on("OPEN", (reqid, filename) => {
-    written.set(filename, []);
-    sftp.handle(reqid, Buffer.from(filename));
-  });
-  sftp.on("WRITE", (reqid, handle, offset, data) => {
-    written.get(handle.toString())?.push({ offset, data: Buffer.from(data) });
-    sftp.status(reqid, ok);
-  });
-  sftp.on("CLOSE", (reqid, handle) => {
-    const path = handle.toString();
-    const chunks = (written.get(path) ?? []).sort(
-      (a, b) => a.offset - b.offset,
-    );
-    uploads.set(path, Buffer.concat(chunks.map((chunk) => chunk.data)));
-    sftp.status(reqid, ok);
-  });
-}
+const teardown: (() => void | Promise<void>)[] = [];
 
-/**
- * node-ssh's `connect` and `exec`, as far as this file calls them — typed here because the ssh2
- * types they are declared with do not resolve.
- */
-interface Steerable {
-  connect: (this: NodeSSH, config: Record<string, unknown>) => Promise<NodeSSH>;
-  exec: (
+/** node-ssh's `execCommand`, typed here because the ssh2 types it is declared with do not resolve. */
+interface Observable {
+  execCommand: (
     this: NodeSSH,
     command: string,
-    parameters: string[],
     options?: Record<string, unknown>,
   ) => Promise<unknown>;
 }
-const prototype = NodeSSH.prototype as unknown as Steerable;
-const originalConnect = prototype.connect;
-const originalExec = prototype.exec;
+const prototype = NodeSSH.prototype as unknown as Observable;
+const originalExecCommand = prototype.execCommand;
 
 test.beforeAll(async () => {
-  const hostKey = ssh2.utils.generateKeyPairSync("ed25519");
-  const clientKey = ssh2.utils.generateKeyPairSync("ed25519");
-  keyDir = mkdtempSync(join(tmpdir(), "exec-ssh-"));
-  writeFileSync(join(keyDir, "id"), clientKey.private, { mode: 0o600 });
-
-  server = new ssh2.Server({ hostKeys: [hostKey.private] }, (connection) => {
-    serverConnections.push(connection);
-    // Cutting the link is the point of these tests; the server side has nothing to report.
-    connection.on("error", () => undefined);
-    connection.on("authentication", (context) => {
-      if (context.method === "publickey") context.accept();
-      else context.reject(["publickey"]);
-    });
-    connection.on("session", (accept) => {
-      accept()
-        .on("exec", (acceptExec, _reject, info) => {
-          const stream = acceptExec();
-          // A command that never answers, standing in for a long backup: the test breaks the
-          // connection underneath it.
-          if (info.command.includes("sleep")) return;
-          // A command killed by a signal before it could exit.
-          if (info.command.includes("kill-me")) {
-            stream.exit("TERM");
-            stream.end();
-            return;
-          }
-          stream.write("answered\n");
-          stream.exit(0);
-          stream.end();
-        })
-        .on("sftp", (acceptSftp) => {
-          serveUploads(acceptSftp());
-        });
-    });
-  });
-  await new Promise<void>((resolve) => {
-    server.listen(0, "127.0.0.1", resolve);
-  });
+  const started = await startSshServer();
+  server = started;
+  teardown.push(() => started.close());
 
   // Half-open on both sides, and ends passed on by hand, so a test can hold one back.
   proxy = net.createServer({ allowHalfOpen: true }, (client) => {
     const upstream = net.connect({
-      port: server.address().port,
+      port: started.port,
       host: "127.0.0.1",
       allowHalfOpen: true,
     });
@@ -219,18 +102,18 @@ test.beforeAll(async () => {
     links.push(client);
     upstreams.push(upstream);
   });
-  await new Promise<void>((resolve) => {
-    proxy.listen(0, "127.0.0.1", resolve);
+  const listening = proxy;
+  teardown.push(() => {
+    listening.close();
   });
-  proxyPort = (proxy.address() as net.AddressInfo).port;
+  await new Promise<void>((resolve) => {
+    listening.listen(0, "127.0.0.1", resolve);
+  });
+  proxyPort = (listening.address() as net.AddressInfo).port;
   connectPort = proxyPort;
 
-  // The transport has no port of its own, so the connection is steered here.
-  prototype.connect = function (config) {
-    configs.push(config);
-    return originalConnect.call(this, {
-      ...config,
-      host: "127.0.0.1",
+  const unsteer = steerNodeSsh(
+    () => ({
       port: connectPort,
       ...(keepaliveOverride === undefined
         ? {}
@@ -238,12 +121,14 @@ test.beforeAll(async () => {
             keepaliveInterval: keepaliveOverride.intervalMs,
             keepaliveCountMax: keepaliveOverride.countMax,
           }),
-    });
-  };
+    }),
+    (config) => configs.push(config),
+  );
+  teardown.push(unsteer);
   // node-ssh calls `onChannel` right after it stops listening for connection errors itself, which
   // is the moment an error has nobody but the transport to catch it.
-  prototype.exec = function (command, parameters, options = {}) {
-    return originalExec.call(this, command, parameters, {
+  prototype.execCommand = function (command, options = {}) {
+    return originalExecCommand.call(this, command, {
       ...options,
       onChannel: () => {
         channelOpened?.();
@@ -262,22 +147,14 @@ test.afterEach(() => {
   }
 });
 
-test.afterAll(() => {
-  prototype.connect = originalConnect;
-  prototype.exec = originalExec;
-  proxy.close();
-  server.close();
-  rmSync(keyDir, { recursive: true, force: true });
+test.afterAll(async () => {
+  prototype.execCommand = originalExecCommand;
+  for (const undo of teardown.splice(0).reverse()) await undo();
 });
 
-/** A site on the ssh transport; its host is never resolved, since every connection is steered. */
-const transport = (): SshTransport => ({
-  mode: "ssh",
-  host: "site.test",
-  username: "tester",
-  privateKeyPath: join(keyDir, "id"),
-  rootDir: "/var/www/site",
-});
+/** A site on the ssh transport, rooted in the server's folder; its host is never resolved. */
+const transport = (): ReturnType<SshTestServer["transport"]> =>
+  server.transport();
 
 /**
  * Starts a command that never answers, and resolves once its channel is open on the client.
@@ -306,7 +183,7 @@ async function halfClose(): Promise<void> {
   holdFin = true;
   const link = links.at(-1);
   const closed = new Promise<void>((resolve) => link?.once("end", resolve));
-  serverConnections.at(-1)?.end();
+  server.connections.at(-1)?.end();
   await closed;
 }
 
@@ -354,7 +231,7 @@ test("the next command opens a fresh connection instead of reusing the lost one"
   const opened = configs.length;
   const result = await exec(transport(), "echo", ["again"]);
 
-  expect(result.stdout).toBe("answered");
+  expect(result.stdout).toBe("again");
   expect(configs.length).toBe(opened + 1);
 });
 
@@ -367,20 +244,21 @@ test("a command on a connection ssh2 has half-closed runs on a new one instead o
 
   const result = await exec(transport(), "echo", ["again"]);
 
-  expect(result.stdout).toBe("answered");
+  expect(result.stdout).toBe("again");
   expect(configs.length).toBe(opened + 1);
 });
 
 test("an upload over a connection ssh2 has half-closed goes through on a new one", async () => {
-  const local = join(keyDir, "plugin.zip");
+  const local = join(server.home, "runner-plugin.zip");
+  const target = join(server.root, "plugin.zip");
   writeFileSync(local, "zip bytes");
   await exec(transport(), "echo", ["first"]);
   await halfClose();
   const opened = configs.length;
 
-  await copyIntoTarget(transport(), local, "/var/www/site/plugin.zip");
+  await copyIntoTarget(transport(), local, target);
 
-  expect(uploads.get("/var/www/site/plugin.zip")?.toString()).toBe("zip bytes");
+  expect(readFileSync(target, "utf8")).toBe("zip bytes");
   expect(configs.length).toBe(opened + 1);
 });
 
@@ -409,12 +287,64 @@ test("a link that goes silent under a running command fails that command once it
 
 // The argv carries what must never reach a report — a `--key=` value, a snippet's embedded values.
 test("a command killed by a signal names the program and the signal, never its arguments", async () => {
+  server.addProgram("kill-me", "kill -TERM $$\n");
   const failure = exec(transport(), "kill-me", ["--key=SECRET-ssh-planted"]);
 
   await expect(failure).rejects.toThrow(
     '[wp/exec] "kill-me" on site.test was terminated by signal SIGTERM before exiting.',
   );
   await expect(failure).rejects.not.toThrow(/SECRET/);
+});
+
+// `exec` leaves no shell to turn the signal into an exit status 128 + n: the kill is the command's,
+// typed as on every other transport, which is what lets the debug log fall back to a direct read.
+test("a command killed by a signal is a CommandKilledError carrying the signal", async () => {
+  server.addProgram("crash-me", "kill -SEGV $$\n");
+
+  const error: unknown = await exec(transport(), "crash-me", []).catch(
+    (caught: unknown) => caught,
+  );
+
+  expect(error).toBeInstanceOf(CommandKilledError);
+  expect((error as CommandKilledError).signal).toBe("SIGSEGV");
+});
+
+test("a lost connection is not a CommandKilledError", async () => {
+  const { pending } = await runningCommand();
+  links.at(-1)?.resetAndDestroy();
+
+  const error: unknown = await pending.catch((caught: unknown) => caught);
+
+  expect(error).toBeInstanceOf(Error);
+  expect(error).not.toBeInstanceOf(CommandKilledError);
+});
+
+// node-ssh answers neither a status nor a signal when its own connection is disposed under a command.
+test("a command whose connection is disposed under it fails, but not as a kill", async () => {
+  const { pending } = await runningCommand();
+
+  disposeConnections();
+  const error: unknown = await pending.catch((caught: unknown) => caught);
+
+  expect(error).toBeInstanceOf(Error);
+  expect(error).not.toBeInstanceOf(CommandKilledError);
+  expect((error as Error).message).toBe(
+    '[wp/exec] "sleep" on site.test ended with neither an exit status nor a signal (its channel ' +
+      "closed), so how it ended is unknown.",
+  );
+});
+
+// Sent, it would arrive as U+FFFD (measured): a different argument, silently.
+test("an argument holding a lone surrogate is refused before anything is sent", async () => {
+  const opened = configs.length;
+  const sent = server.commands.length;
+
+  await expect(exec(transport(), "echo", ["a\udfffb"])).rejects.toThrow(
+    '[wp/exec] refusing to run "echo": argument 1 is not well-formed text (a lone surrogate), ' +
+      "which no program can be handed.",
+  );
+  expect(configs.length).toBe(opened);
+  expect(server.commands.length).toBe(sent);
 });
 
 // Refused before a connection is even opened, in the words every transport uses.
@@ -439,4 +369,229 @@ test("every connection is opened with the probing that gives a silent link up wi
   expect(
     SSH_KEEPALIVE.intervalMs * (SSH_KEEPALIVE.countMax + 1),
   ).toBeLessThanOrEqual(60_000);
+});
+
+// ── The command line ─────────────────────────────────────────────────────────────────────────────
+
+test.describe("shellQuote", () => {
+  const big = "A".repeat(64 * 1024);
+  const cases: readonly (readonly [string, string, string])[] = [
+    ["an empty argument stays one", "", "''"],
+    ["a single quote closes, escapes and reopens", "it's", `'it'\\''s'`],
+    ["only quotes", "''", `''\\'''\\'''`],
+    ["a newline is kept literally", "a\nb", "'a\nb'"],
+    ["a carriage return is kept literally", "a\rb", "'a\rb'"],
+    ["a tab is kept literally", "a\tb", "'a\tb'"],
+    ["a dollar expands nothing", "$HOME $(id)", "'$HOME $(id)'"],
+    ["a backtick runs nothing", "`id`", "'`id`'"],
+    ["an option-like word is just quoted", "-x", "'-x'"],
+    ["a double dash is just quoted", "--", "'--'"],
+    ["unicode passes through", "café ✓ 日本", "'café ✓ 日本'"],
+    ["a 64 KiB word is one word", big, `'${big}'`],
+  ];
+  for (const [name, input, expected] of cases) {
+    test(name, () => {
+      expect(shellQuote(input)).toBe(expected);
+    });
+  }
+});
+
+test("the command line changes into the folder, then replaces the shell with the quoted command", () => {
+  expect(sshCommandLine("/var/www/my site", "wp", ["option", "get", ""])).toBe(
+    "cd -- '/var/www/my site' && exec 'wp' 'option' 'get' ''",
+  );
+});
+
+test.describe("sshCommandLine refuses a line that would not mean what it says", () => {
+  // `cd -- ''` succeeds and changes nothing (bash 5.2 and dash), so the command would run in the
+  // login's home; a relative one resolves from there, or through CDPATH.
+  const notAbsolute: readonly (readonly [string, string])[] = [
+    ["an empty working directory", ""],
+    ["a relative working directory", "var/www/site"],
+    ["a dot", "."],
+    ["a tilde, which a quoted word never expands", "~/site"],
+  ];
+  for (const [name, cwd] of notAbsolute) {
+    test(name, () => {
+      expect(() => sshCommandLine(cwd, "wp", ["--key=SECRET"])).toThrow(
+        `[wp/exec] refusing to run "wp" over ssh: its working directory ${JSON.stringify(cwd)} is ` +
+          "not an absolute path, which `cd` would resolve from the login's home.",
+      );
+    });
+  }
+
+  // bash reads `exec -x` as an option; dash's `exec` takes no `--` at all (both measured).
+  test("a program whose name begins with a dash", () => {
+    expect(() => sshCommandLine("/", "-weird", ["--key=SECRET"])).toThrow(
+      '[wp/exec] refusing to run "-weird" over ssh: a program name beginning with "-" would be ' +
+        "read as an option to the shell's `exec`.",
+    );
+  });
+
+  test("a dash inside a program's name or an argument is fine", () => {
+    expect(sshCommandLine("/", "e2e-print-argv", ["-n", "--"])).toBe(
+      "cd -- '/' && exec 'e2e-print-argv' '-n' '--'",
+    );
+  });
+});
+
+test("an empty working directory runs nothing, and nothing is sent", async () => {
+  const sent = server.commands.length;
+
+  await expect(
+    exec(transport(), "touch", ["marker"], { cwd: "" }),
+  ).rejects.toThrow(/its working directory "" is not an absolute path/);
+  expect(server.commands.length).toBe(sent);
+  expect(existsSync(join(server.home, "marker"))).toBe(false);
+});
+
+test("a site whose root is relative runs nothing, and nothing is sent", async () => {
+  const sent = server.commands.length;
+
+  await expect(
+    exec(server.transport({ rootDir: "site root" }), "pwd", []),
+  ).rejects.toThrow(
+    /its working directory "site root" is not an absolute path/,
+  );
+  expect(server.commands.length).toBe(sent);
+});
+
+/**
+ * Arguments that once broke, or could break, a command line: those node-ssh was measured passing
+ * through untouched, plus the empty one its own escaping dropped. The long one stops short of 64 KiB
+ * (the size measured on a real server) only because ssh2's server refuses a packet over 35,000 bytes;
+ * {@link shellQuote}'s table takes the full size.
+ */
+const HOSTILE_ARGUMENTS: readonly string[] = [
+  "",
+  "'",
+  '"',
+  "it's",
+  'say "hi"',
+  "$(id)",
+  "`id`",
+  "${HOME}",
+  "$HOME",
+  "a\nb",
+  "a\rb",
+  "a\tb",
+  "--key=a b",
+  "--key=SECRET value; rm -rf /",
+  "-n",
+  "--",
+  "a;b",
+  "a|b",
+  "a&b",
+  "a>b",
+  "*",
+  "~",
+  " leading and trailing ",
+  "café ✓",
+  Buffer.alloc(22 * 1024, "e2e").toString("base64"),
+];
+
+test("every argument, empty and hostile ones included, reaches the program exactly as given", async () => {
+  const result = await exec(transport(), PRINT_ARGV_PROGRAM, [
+    ...HOSTILE_ARGUMENTS,
+  ]);
+
+  expect(result.exitCode).toBe(0);
+  expect(decodeArgv(result.stdout)).toEqual(HOSTILE_ARGUMENTS);
+});
+
+test("an empty argument keeps its place among the others", async () => {
+  const result = await exec(transport(), PRINT_ARGV_PROGRAM, [
+    "option",
+    "update",
+    "x",
+    "",
+  ]);
+
+  expect(decodeArgv(result.stdout)).toEqual(["option", "update", "x", ""]);
+});
+
+test("an elevated command reaches sudo, and through it the program, with every argument intact", async () => {
+  resetElevationCaches();
+  const args = ["", "a b", "$(id)", "-n"];
+
+  const result = await execElevated(transport(), PRINT_ARGV_PROGRAM, args);
+
+  expect(decodeArgv(result.stdout)).toEqual(args);
+  expect(server.sudoCalls().at(-1)).toEqual([
+    "-n",
+    "--",
+    PRINT_ARGV_PROGRAM,
+    ...args,
+  ]);
+});
+
+test("a command runs in the WordPress root, a folder whose name holds a space", async () => {
+  const result = await exec(transport(), "pwd", []);
+
+  expect(result.stdout).toBe(server.root);
+});
+
+test("a command given its own working directory runs there", async () => {
+  const result = await exec(transport(), "pwd", [], { cwd: server.home });
+
+  expect(result.stdout).toBe(server.home);
+});
+
+test("a working directory that does not exist runs nothing and fails with the shell's reason", async () => {
+  const marker = join(server.home, "ran-anyway");
+  const missing = join(server.root, "no such folder");
+
+  const result = await exec(transport(), "touch", [marker], { cwd: missing });
+
+  expect(result.exitCode).not.toBe(0);
+  expect(result.stderr).toContain("no such folder");
+  expect(existsSync(marker)).toBe(false);
+});
+
+test("a missing WordPress root runs nothing in the login's home", async () => {
+  const before = readdirSync(server.home);
+  const site = server.transport({ rootDir: join(server.root, "gone") });
+
+  const result = await exec(site, "touch", ["relative-marker"]);
+
+  expect(result.exitCode).not.toBe(0);
+  expect(readdirSync(server.home)).toEqual(before);
+});
+
+test("the program's name is quoted too, so it can never run anything else", async () => {
+  const result = await exec(transport(), "$(touch injected)", []);
+
+  expect(result.exitCode).toBe(127);
+  expect(existsSync(join(server.root, "injected"))).toBe(false);
+});
+
+test("a program whose name holds a space runs by that name", async () => {
+  server.addProgram("odd name", "echo ran\n");
+
+  const result = await exec(transport(), "odd name", []);
+
+  expect(result).toEqual({ stdout: "ran", stderr: "", exitCode: 0 });
+});
+
+test("the exit status is the program's own, and output keeps its surrounding whitespace", async () => {
+  const result = await exec(transport(), "sh", [
+    "-c",
+    "printf '  out  \\n'; printf '  err  \\n' >&2; exit 3",
+  ]);
+
+  expect(result).toEqual({ stdout: "  out  ", stderr: "  err  ", exitCode: 3 });
+});
+
+test("a program that is not installed exits 127", async () => {
+  const result = await exec(transport(), "e2e-no-such-program", []);
+
+  expect(result.exitCode).toBe(127);
+});
+
+test("node-ssh is sent the whole command line and left to change no folder of its own", async () => {
+  await exec(transport(), "true", ["a b"]);
+
+  expect(server.commands.at(-1)).toBe(
+    `cd -- ${shellQuote(server.root)} && exec 'true' 'a b'`,
+  );
 });

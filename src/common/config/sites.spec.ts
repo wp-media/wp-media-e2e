@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describeValue, loadSites } from "./sites";
+import { describeValue, loadSites, quotePath } from "./sites";
 import type { SshTransport } from "./types";
 
 /**
@@ -106,6 +106,64 @@ test.describe("a refused value is described, never quoted — the file holds cre
       expect(message).not.toContain("S3cr3t");
     }
     expect(messages[0]).toContain("(got a text of 16 characters)");
+  });
+});
+
+// Every transport's root is a path on the site; a relative one would be resolved from wherever a
+// command starts (over ssh, the login's home), not from the root the pre-flight checked.
+test.describe("transport parsing — the WordPress root must be absolute", () => {
+  const relative = "html/site";
+  const cases: readonly (readonly [string, Record<string, unknown>])[] = [
+    ["ssh", { ...SSH, rootDir: relative }],
+    ["local", { mode: "local", rootDir: relative }],
+    ["docker", { mode: "docker", container: "c", rootDir: relative }],
+    ["ssh, a dot", { ...SSH, rootDir: "." }],
+    ["ssh, a tilde", { ...SSH, rootDir: "~/site" }],
+  ];
+  for (const [name, transport] of cases) {
+    test(`a relative root is refused, naming the field and quoting the value: ${name}`, () => {
+      let message = "";
+      try {
+        loadTransport(transport);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toMatch(
+        /^\[sites\] .+ → nginx\.sites\[0\]\.transport\.rootDir must be an absolute path on the site, starting with "\/" \(got ".+"\)\.$/,
+      );
+      // A path is no secret: quoted, the operator can find it in the file.
+      expect(message).toContain(`(got ${JSON.stringify(transport.rootDir)}).`);
+    });
+  }
+
+  test("a relative root's quote escapes control characters and is cut past 200 code points", () => {
+    expect(quotePath("html/\nsite")).toBe(String.raw`"html/\nsite"`);
+    const long = `${"é".repeat(199)}🙂🙂`;
+    expect(quotePath(long)).toBe(`"${"é".repeat(199)}🙂"…`);
+    expect(quotePath(long.slice(0, -2))).toBe(`"${"é".repeat(199)}🙂"`);
+  });
+
+  test("an absolute root is kept as written, on every transport", () => {
+    expect(loadTransport(SSH).rootDir).toBe("/var/www/html/site");
+    expect(loadTransport({ mode: "local", rootDir: "/srv/wp" }).rootDir).toBe(
+      "/srv/wp",
+    );
+    expect(
+      loadTransport({ mode: "docker", container: "c", rootDir: "/var/www" })
+        .rootDir,
+    ).toBe("/var/www");
+  });
+
+  test("docker may still leave its root out", () => {
+    expect(
+      loadTransport({ mode: "docker", container: "c" }).rootDir,
+    ).toBeUndefined();
+  });
+
+  test("an empty root is refused as before", () => {
+    expect(() => loadTransport({ ...SSH, rootDir: "" })).toThrow(
+      /\.transport\.rootDir must be a non-empty string\./,
+    );
   });
 });
 

@@ -75,8 +75,13 @@ Discriminated on `mode`; dispatch in [wordpress-automation.md](../architecture/w
 | `docker` | `container`                                     | `rootDir`, `stagingDir`, `elevate`, `fileOwner` |
 | `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir` | `stagingDir`, `elevate`, `fileOwner`            |
 
+`ssh` needs, on the site: a **POSIX login shell** for `username` (sh/dash/bash/zsh — never csh/tcsh,
+which read `!` inside quotes), and `wp` as an **executable on that login's `PATH`** (a shell function or
+alias is never run) ([the ssh command line](../architecture/wordpress-automation.md#transport--exec-wpexects)).
+
 - **`rootDir`** — the WordPress root (holding `wp-load.php`) and every WP-CLI command's working
-  directory. Optional for `docker` only because the container's `WORKDIR` is that root; declare it to
+  directory; **absolute** (`/…`) on every transport, refused at load otherwise (a relative one would
+  resolve from the SSH login's home). Optional for `docker` only because the container's `WORKDIR` is that root; declare it to
   skip the one-off `pwd` lookup, or when a custom image's `WORKDIR` differs.
 - **`stagingDir`** — where test artifacts (plugin zips, imports, dumps) are copied **on the site**:
   absolute, or relative to `rootDir`. Beats `E2E_SITE_STAGING_DIR`; both default to `.e2e_temp` under

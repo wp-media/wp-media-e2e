@@ -5,6 +5,8 @@ import { copyFile } from "node:fs/promises";
 import { execa } from "execa";
 import { NodeSSH } from "node-ssh";
 
+import { CommandKilledError } from "./errors";
+
 import type {
   DockerTransport,
   LocalTransport,
@@ -17,13 +19,18 @@ import type {
  *
  * A command is given as a file + array of args — never a shell string — so there is no
  * shell interpolation and no injection. It is dispatched by the site's {@link Transport}:
- * `local`/`docker` via execa, `ssh` via node-ssh (whose `exec` shell-escapes the args, and whose own
- * both-ends trimming is switched off so every transport normalises output the same way).
+ * `local`/`docker` via execa, `ssh` via node-ssh — given one command line this module builds itself,
+ * every word single-quoted ({@link sshCommandLine}), and with node-ssh's own both-ends trimming
+ * switched off so every transport normalises output the same way.
  *
  * Every mode returns a structured {@link ExecResult} with an `exitCode`, so callers branch
  * on the code (e.g. WP-CLI `is-installed`) instead of relying on thrown errors. A failure
- * to *run* the command at all — missing binary, unreachable SSH host, killed by a signal —
- * throws, because that is an environment fault, not a command outcome.
+ * to *run* the command at all — missing binary, unreachable SSH host — throws, because that is an
+ * environment fault, not a command outcome. So does a command **killed by a signal**, on every
+ * transport alike ({@link CommandKilledError}, so a caller with another way to its answer can tell it
+ * apart): it never reached an exit code. Over `ssh` that holds because the line `exec`s the program
+ * — no shell is left to turn the signal into an exit status `128 + n`, as a login shell that does
+ * not `exec` the last command (dash, or bash before 5.1) did before.
  *
  * **No error quotes a command's arguments** — it names the program and why it failed. The argv is
  * where this suite puts what must never reach a report: a `--key=` value, and every value a `wp eval`
@@ -81,7 +88,11 @@ export interface ExecResult {
 
 /** Per-call options. */
 export interface ExecOptions {
-  /** Working directory (local & ssh). Ignored by `docker` — the container defines it. */
+  /**
+   * Working directory (local & ssh), the WordPress root by default. Ignored by `docker` — the
+   * container defines it. One that does not exist runs nothing: `local` throws (execa cannot start
+   * the program), `ssh` returns the shell's failed `cd` (non-zero exit, its reason on stderr).
+   */
   readonly cwd?: string;
 }
 
@@ -151,7 +162,8 @@ export function whyItDidNotExit(outcome: ExecaOutcome, cwd?: string): string {
  * @param label - the program, as a message names it: `wp`, `sudo rm`, `docker exec <container> wp`.
  * @param result - the execa result.
  * @param cwd - the working directory the run was given, if any — named when it may be what is missing.
- * @throws Error naming `label` and the reason, never the arguments.
+ * @throws {@link CommandKilledError} when a signal ended it; Error naming `label` and the reason, never
+ * the arguments, otherwise.
  */
 function fromExeca(
   label: string,
@@ -173,7 +185,10 @@ function fromExeca(
     );
   }
   if (typeof result.exitCode !== "number") {
-    throw new Error(`[wp/exec] "${label}" ${whyItDidNotExit(result, cwd)}.`);
+    const message = `[wp/exec] "${label}" ${whyItDidNotExit(result, cwd)}.`;
+    throw result.signal === undefined
+      ? new Error(message)
+      : new CommandKilledError(message, result.signal);
   }
   return {
     stdout: result.stdout,
@@ -386,10 +401,71 @@ async function withConnection<T>(
 }
 
 /**
+ * One word for a POSIX shell, taken literally whatever it holds: wrapped in single quotes, inside
+ * which nothing is special, each `'` written as `'\''` (close, an escaped quote, reopen). An empty
+ * argument stays an argument (`''`), which node-ssh's own escaping dropped. NUL is not handled: no
+ * argv can carry one, and {@link refuseUnsendable} refuses it before a command line is built.
+ *
+ * @param arg - the word.
+ * @returns it quoted, ready to join with spaces.
+ * @example
+ * ```ts
+ * shellQuote("it's"); // 'it'\''s'
+ * shellQuote(""); // ''
+ * ```
+ */
+export function shellQuote(arg: string): string {
+  return `'${arg.replaceAll("'", `'\\''`)}'`;
+}
+
+/**
+ * The command line an `ssh` command is sent as: `cd -- <cwd> && exec <file> <args…>`, every word
+ * {@link shellQuote}d — the program too, so nothing in any position is ever read by the shell.
+ *
+ * `&&`, never `;`: a working directory that is missing or cannot be entered fails the call with the
+ * shell's own message and a non-zero exit, instead of running the command wherever the login left it
+ * (the SSH user's home). `--` keeps a directory beginning with `-` from being read as a `cd` option.
+ * `exec` replaces the shell, so the exit status and a killing signal are the command's own; it finds
+ * `file` on the login's `PATH` as an executable — a shell function or alias of that name is not run.
+ *
+ * Refused, because the line would not mean what it says: a `cwd` that is not absolute (`cd` would
+ * resolve it from the login's home, or through `CDPATH`; an empty one changes nothing at all), and a
+ * program whose name begins with `-` (`exec` would read it as an option, and dash's `exec` takes no
+ * `--` — measured).
+ *
+ * @param cwd - the directory to run in, absolute on the target.
+ * @param file - the program.
+ * @param args - its arguments.
+ * @returns the line for node-ssh's `execCommand`.
+ * @throws Error naming the program and what is wrong, never the arguments.
+ */
+export function sshCommandLine(
+  cwd: string,
+  file: string,
+  args: readonly string[],
+): string {
+  if (!posix.isAbsolute(cwd)) {
+    throw new Error(
+      `[wp/exec] refusing to run "${file}" over ssh: its working directory ${JSON.stringify(cwd)} is ` +
+        "not an absolute path, which `cd` would resolve from the login's home.",
+    );
+  }
+  if (file.startsWith("-")) {
+    throw new Error(
+      `[wp/exec] refusing to run "${file}" over ssh: a program name beginning with "-" would be read ` +
+        "as an option to the shell's `exec`.",
+    );
+  }
+  const command = [file, ...args].map(shellQuote).join(" ");
+  return `cd -- ${shellQuote(cwd)} && exec ${command}`;
+}
+
+/**
  * Runs one command over SSH, in the WordPress root unless `options.cwd` says otherwise.
  *
- * @throws Error if the connection could not be opened, or was lost — or the command killed — before
- * it exited, since how it ended is then unknown.
+ * @throws {@link CommandKilledError} when a signal ended the command; Error if the line is refused
+ * ({@link sshCommandLine}), the connection could not be opened, or it was lost or closed before the
+ * command exited, since how it ended is then unknown.
  */
 async function runSsh(
   transport: SshTransport,
@@ -401,26 +477,40 @@ async function runSsh(
   const [command, commandArgs] = elevate
     ? ["sudo", sudoArgv(file, args)]
     : [file, args];
+  const line = sshCommandLine(
+    options.cwd ?? transport.rootDir,
+    command,
+    commandArgs,
+  );
   return withConnection(transport, async (ssh) => {
-    // node-ssh `exec` shell-escapes `args`, so this is injection-safe.
+    // No `cwd` option: node-ssh would prepend its own `cd <cwd> ;`, running the command in the
+    // login's home when that directory is missing. The line above does the `cd` itself.
     //
     // `noTrim` is load-bearing, not a detail: without it node-ssh trims **both ends** of stdout and
     // stderr, which is a different normalisation from every other transport's and silently eats
     // meaningful whitespace — the leading space of a tar member name, an option value stored with
     // one. Turning it off leaves `stripFinalNewline` to do the one normalisation all transports
     // agree on.
-    const result = await ssh.exec(command, commandArgs, {
-      cwd: options.cwd ?? transport.rootDir,
-      stream: "both",
-      noTrim: true,
-    });
+    const result = await ssh.execCommand(line, { noTrim: true });
     if (result.code === null) {
       const lost = connectionLosses.get(ssh);
-      throw new Error(
-        lost === undefined
-          ? `[wp/exec] "${file}" on ${transport.host} was terminated by signal ${result.signal ?? "unknown"} before exiting.`
-          : `[wp/exec] the connection to ${transport.host} was lost (${lost.message}) while "${file}" was ` +
-              "running, so how it ended is unknown.",
+      if (lost !== undefined) {
+        throw new Error(
+          `[wp/exec] the connection to ${transport.host} was lost (${lost.message}) while "${file}" was ` +
+            "running, so how it ended is unknown.",
+        );
+      }
+      // Neither a status nor a signal: the channel closed under it (the connection disposed, the
+      // server gone) — not a kill, so not typed as one.
+      if (result.signal === null) {
+        throw new Error(
+          `[wp/exec] "${file}" on ${transport.host} ended with neither an exit status nor a signal ` +
+            "(its channel closed), so how it ended is unknown.",
+        );
+      }
+      throw new CommandKilledError(
+        `[wp/exec] "${file}" on ${transport.host} was terminated by signal ${result.signal} before exiting.`,
+        result.signal,
       );
     }
     return {
@@ -432,33 +522,51 @@ async function runSsh(
 }
 
 /**
- * Refuses a command whose program or argument holds a NUL byte, before any transport sees it.
+ * Why a word cannot reach a program as given, or `undefined` when it can.
  *
- * No program can be handed one — an argv is NUL-terminated — and each transport refused it its own
- * way (measured): execa throws, quoting the argument, and ssh2's request fails as a bare `Unable to
- * exec`. Refused here, every transport says the same thing, naming the argument by position only.
+ * A NUL byte: an argv is NUL-terminated. A lone UTF-16 surrogate (not well-formed text): it has no
+ * UTF-8 form, and every transport would silently send `U+FFFD` in its place (measured over ssh).
+ *
+ * @param word - the program's name or an argument.
+ */
+function unsendable(word: string): string | undefined {
+  if (word.includes("\0")) return "holds a NUL byte";
+  if (!word.isWellFormed()) return "is not well-formed text (a lone surrogate)";
+  return undefined;
+}
+
+/**
+ * Refuses a command whose program or argument no program can be handed unchanged, before any
+ * transport sees it — see {@link unsendable}.
+ *
+ * Each transport refused a NUL its own way (measured): execa throws, quoting the argument, and
+ * ssh2's request fails as a bare `Unable to exec`; a lone surrogate none refused. Refused here, every
+ * transport says the same thing, naming the argument by position only.
  *
  * @throws Error naming the program (unless its own name is the offender) and the argument's position.
  */
-function refuseNulBytes(file: string, args: readonly string[]): void {
-  if (file.includes("\0")) {
+function refuseUnsendable(file: string, args: readonly string[]): void {
+  const inName = unsendable(file);
+  if (inName !== undefined) {
     throw new Error(
-      "[wp/exec] refusing to run a program whose name holds a NUL byte.",
+      `[wp/exec] refusing to run a program whose name ${inName}.`,
     );
   }
-  const position = args.findIndex((arg) => arg.includes("\0"));
-  if (position !== -1) {
-    throw new Error(
-      `[wp/exec] refusing to run "${file}": argument ${String(position + 1)} holds a NUL byte, ` +
-        "which no program can be handed.",
-    );
+  for (const [index, arg] of args.entries()) {
+    const why = unsendable(arg);
+    if (why !== undefined) {
+      throw new Error(
+        `[wp/exec] refusing to run "${file}": argument ${String(index + 1)} ${why}, ` +
+          "which no program can be handed.",
+      );
+    }
   }
 }
 
 /**
  * Runs `file args…` on the transport's target, elevated or not.
  *
- * `async` so that {@link refuseNulBytes} arrives as a rejection like every other failure here.
+ * `async` so that {@link refuseUnsendable} arrives as a rejection like every other failure here.
  */
 async function dispatch(
   transport: Transport,
@@ -467,7 +575,7 @@ async function dispatch(
   options: ExecOptions,
   elevate: boolean,
 ): Promise<ExecResult> {
-  refuseNulBytes(file, args);
+  refuseUnsendable(file, args);
   switch (transport.mode) {
     case "local":
       return runLocal(transport, file, args, options, elevate);

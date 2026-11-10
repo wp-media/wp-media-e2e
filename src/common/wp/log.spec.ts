@@ -15,7 +15,7 @@ import { clearDebugLog, readDebugLog, scanDebugLog } from "./log";
 import type { LocalTransport } from "../config/types";
 
 // Stub `wp`: `eval` echoes $WP_STUB_EVAL_OUT (exit 0), or simulates a broken WordPress bootstrap
-// (exit 255) when $WP_STUB_EVAL=fail. `cat`/`rm` are NOT stubbed — the fallback uses the real
+// (exit 255) when $WP_STUB_EVAL=fail, or a PHP crash (killed by SIGSEGV) when $WP_STUB_EVAL=crash. `cat`/`rm` are NOT stubbed — the fallback uses the real
 // ones — so a failing `eval` forces log.ts down its direct-file path. Leading `--skip-*` flags are
 // read off first, as WP-CLI reads global flags; with $WP_STUB_BROKEN_PLUGIN, a boot that loads
 // plugins dies on that plugin's fatal and — as WP_DEBUG_LOG does on a real site (measured) — writes it
@@ -30,6 +30,9 @@ if [ "$1" = "eval" ] && [ -n "$WP_STUB_BROKEN_PLUGIN" ] && [[ "$SKIPPED" != *--s
   exit 1
 fi
 if [ "$1" = "eval" ]; then
+  if [ "$WP_STUB_EVAL" = "crash" ]; then
+    kill -SEGV $$
+  fi
   if [ "$WP_STUB_EVAL" = "fail" ]; then
     echo "PHP Fatal error: simulated bootstrap failure" >&2
     exit 255
@@ -152,6 +155,51 @@ test.describe("debug.log — direct-file fallback when `wp eval` fails", () => {
     writeFileSync(debugLogPath(), "stale contents");
     await clearDebugLog(local);
     expect(existsSync(debugLogPath())).toBe(false);
+  });
+
+  // A crash has no exit code, so the exec layer throws; the log is then the one thing worth reading.
+  test("readDebugLog falls back to a direct read when `wp eval` is killed by a signal", async () => {
+    process.env.WP_STUB_EVAL = "crash";
+    writeFileSync(debugLogPath(), "PHP Fatal error: logged before the crash");
+
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]): void => {
+      warnings.push(args.map((a) => String(a)).join(" "));
+    };
+    try {
+      expect(await readDebugLog(local)).toBe(
+        "PHP Fatal error: logged before the crash",
+      );
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings).toEqual([
+      "[wp/log] `wp eval` could not read debug.log (killed by SIGSEGV); falling back to a direct " +
+        "file read.",
+    ]);
+  });
+
+  test("clearDebugLog removes the file directly when `wp eval` is killed by a signal", async () => {
+    process.env.WP_STUB_EVAL = "crash";
+    writeFileSync(debugLogPath(), "stale contents");
+    const originalWarn = console.warn;
+    console.warn = (): void => undefined;
+    try {
+      await clearDebugLog(local);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(existsSync(debugLogPath())).toBe(false);
+  });
+
+  // Only a crash is survived: a `wp` that cannot be started at all is a broken environment.
+  test("readDebugLog still throws when `wp` cannot be started at all", async () => {
+    const site: LocalTransport = {
+      mode: "local",
+      rootDir: join(wpRoot, "no such root"),
+    };
+    await expect(readDebugLog(site)).rejects.toThrow(/could not be started/);
   });
 });
 

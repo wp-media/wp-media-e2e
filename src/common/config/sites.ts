@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 
 import { OWNER_SPEC_RULE, parseOwnerSpec } from "./file-owner";
 import { isNonEmptyString, isObject } from "../guards";
@@ -191,6 +191,44 @@ function requireString(value: unknown, path: string): string {
   return value;
 }
 
+/** The most code points of a path a message quotes; longer ones are cut, marked `…`. */
+const QUOTED_PATH_MAX = 200;
+
+/**
+ * A path as a message quotes it: JSON-quoted (so a control character shows escaped), cut to
+ * {@link QUOTED_PATH_MAX} code points. A path is no secret, and the operator must be able to find it.
+ *
+ * @param path - the path, as read from the file.
+ * @returns e.g. `"html/site"`, or `"html/…"…` when cut.
+ */
+export function quotePath(path: string): string {
+  const points = Array.from(path);
+  return points.length > QUOTED_PATH_MAX
+    ? `${JSON.stringify(points.slice(0, QUOTED_PATH_MAX).join(""))}…`
+    : JSON.stringify(path);
+}
+
+/**
+ * Validates a WordPress root: a non-empty string, absolute on the site (`/…`). A relative one would be
+ * resolved from wherever each command starts — over ssh the login's home, or a `CDPATH` entry — so
+ * the pre-flight's checks and the commands they vouch for could each see a different folder.
+ *
+ * @param value - the value read from the file.
+ * @param path - where it sits, for the message.
+ * @returns the root.
+ * @throws Error naming `path` and quoting the value ({@link quotePath}).
+ */
+function requireRootDir(value: unknown, path: string): string {
+  const rootDir = requireString(value, path);
+  if (!posix.isAbsolute(rootDir)) {
+    throw new Error(
+      `[sites] ${path} must be an absolute path on the site, starting with "/" ` +
+        `(got ${quotePath(rootDir)}).`,
+    );
+  }
+  return rootDir;
+}
+
 /** Validates a site's `transport` block into a typed {@link Transport} (discriminated on `mode`). */
 function validateTransport(value: unknown, path: string): Transport {
   if (!isObject(value)) throw new Error(`[sites] ${path} must be an object.`);
@@ -215,11 +253,14 @@ function validateTransport(value: unknown, path: string): Transport {
           value.privateKeyPath,
           `${path}.privateKeyPath`,
         ),
-        rootDir: requireString(value.rootDir, `${path}.rootDir`),
+        rootDir: requireRootDir(value.rootDir, `${path}.rootDir`),
       };
     case "docker": {
       // Optional for docker: the container's WORKDIR is the WP root in the images we use.
-      const rootDir = optionalString(value.rootDir, `${path}.rootDir`);
+      const rootDir =
+        value.rootDir === undefined
+          ? undefined
+          : requireRootDir(value.rootDir, `${path}.rootDir`);
       return {
         ...base,
         mode: "docker",
@@ -231,7 +272,7 @@ function validateTransport(value: unknown, path: string): Transport {
       return {
         ...base,
         mode: "local",
-        rootDir: requireString(value.rootDir, `${path}.rootDir`),
+        rootDir: requireRootDir(value.rootDir, `${path}.rootDir`),
       };
     default:
       throw new Error(

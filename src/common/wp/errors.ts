@@ -13,7 +13,8 @@
  * {@link SiteResidueRemovalFailedError} is about what a plugin left on the *filesystem* after it
  * was removed (see ./residue.ts). {@link PluginDirRemovalFailedError} and
  * {@link PluginDestinationExistsError} are about the plugin's own folder when WordPress no longer
- * sees a plugin in it (see ./plugin-dir.ts).
+ * sees a plugin in it (see ./plugin-dir.ts). {@link CommandKilledError} is the exec layer's own: a
+ * command ended by a signal (see ./exec.ts).
  */
 
 // Type-only, so it is erased at runtime and this module stays free of a cycle with the exec layer.
@@ -352,5 +353,30 @@ export class DebugLogFatalError extends Error {
     );
     this.name = "DebugLogFatalError";
     this.fatals = fatals;
+  }
+}
+
+/**
+ * A command a transport ran was ended by a signal before it exited (`local`/`docker`: execa saw the
+ * signal; `ssh`: the channel reported one) — how it would have ended is unknown, so it is not an
+ * `ExecResult`. Typed so the few callers with an answer that needs no exit code can tell it
+ * from a transport that failed: `readDebugLog` falls back to a direct read when a crashed `wp eval`
+ * (a segfault, the kernel's OOM kill) could not read the log, and the pre-flight names a crashed
+ * WordPress rather than a missing `wp`.
+ *
+ * The message names the program and the signal only, never the arguments.
+ */
+export class CommandKilledError extends Error {
+  /** The signal's name, e.g. `SIGSEGV`. */
+  readonly signal: string;
+
+  /**
+   * @param message - the whole message, built by the transport in its own words.
+   * @param signal - the signal's name.
+   */
+  constructor(message: string, signal: string) {
+    super(message);
+    this.name = "CommandKilledError";
+    this.signal = signal;
   }
 }

@@ -11,12 +11,18 @@ A [`Transport`](../../src/common/config/types.ts), discriminated on `mode`:
 | -------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------- |
 | `local`  | `rootDir`, `stagingDir?`, `elevate?`, `fileOwner?`                                       | `execa`, run in `rootDir`.                      |
 | `docker` | `container`, `rootDir?`, `stagingDir?`, `elevate?`, `fileOwner?`                         | `docker exec <container> …` (see `dockerArgv`). |
-| `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir`, `stagingDir?`, `elevate?`, `fileOwner?` | `node-ssh` (its `exec` shell-escapes the args). |
+| `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir`, `stagingDir?`, `elevate?`, `fileOwner?` | `node-ssh` `execCommand`, one line we build (below). |
 
 - A command is a **file + args array**, never a shell string: no interpolation, no injection.
 - `exec(transport, file, args, opts?)` returns [`ExecResult`](../../src/common/wp/exec.ts)
   `{ exitCode, stdout, stderr }`; callers branch on `exitCode`. Failing to _run_ at all (missing
-  binary, unreachable host, killed by signal) **throws** — an environment fault, not an outcome.
+  binary, unreachable host) **throws** — an environment fault, not an outcome. So does a command
+  **killed by a signal**, on every transport: `CommandKilledError` (`.signal`), so the few callers with
+  another route to their answer tell it from a broken transport — `readDebugLog`/`clearDebugLog` fall
+  back to the direct read/removal, the pre-flight reports a crashed `wp` as WP-CLI's or WordPress's
+  failure (one reading the admin locale is a failed boot the cell's plugin may be blamed for). Over `ssh` this is new with `exec` in the line (below): a login shell that did not `exec`
+  the last command (dash, or bash before 5.1) turned the signal into exit `128 + n`. A channel closing with neither status nor signal (connection disposed)
+  is a plain `Error`.
   `wpCli(transport, args, opts?)` runs `wp …` and is the primary entry point.
 - **An exec error names the program and the reason, never the arguments.** The argv carries a
   `--key=` value and every value a `wp eval` snippet embeds (`phpLiteral`'s base64 is an encoding, not
@@ -25,12 +31,28 @@ A [`Transport`](../../src/common/config/types.ts), discriminated on `mode`:
   (`ENOENT` means a missing program or a missing working directory alike). The label is the program
   only (`wp`, `sudo rm`, `docker exec <container> wp`; `docker cp`'s adds the suite's own paths). No
   execa error rides along as a `cause`; a call execa refuses outright is re-raised naming the program.
-  An argument holding a NUL byte is refused before any transport sees it, by position (execa's refusal quotes it; ssh2's is a
-  bare `Unable to exec`). `ssh` messages never quoted anything. Pinned in `exec.spec.ts` and
+  A program or argument no program can be handed unchanged is refused before any transport sees it,
+  by position: a NUL byte (execa's refusal quotes it; ssh2's is a bare `Unable to exec`) or a lone
+  UTF-16 surrogate (no UTF-8 form; sent as `U+FFFD` otherwise). `ssh` messages never quoted anything. Pinned in `exec.spec.ts` and
   `exec.ssh.spec.ts` with a secret planted in each argv. Not covered: a running command's argv is
   visible in the host's process list.
 - **Every command runs in the WordPress root** (`rootDir` for `local`/`ssh`, the container `WORKDIR`
-  for `docker`), so a relative path means the same everywhere.
+  for `docker`), so a relative path means the same everywhere. A `cwd` that does not exist runs
+  nothing: `local` throws, `ssh` returns the failed `cd` (non-zero exit, the shell's reason).
+- **The `ssh` command line** (`sshCommandLine`): `cd -- <cwd> && exec <file> <args…>`, every word —
+  the program too — single-quoted by `shellQuote` (`'` → `'\''`, `""` → `''`), sent with no node-ssh
+  `cwd`. node-ssh's own `exec` was dropped: its `shell-escape` lost an empty argument, and its
+  `cd <cwd> ;` ran the command in the login's home when `cwd` was missing. Refused before connecting:
+  a `cwd` that is not absolute (`cd -- ''` is a no-op; a relative one resolves from the login's home or
+  `CDPATH`) and a program starting with `-` (dash's `exec` takes no `--`). `exec` runs **an executable
+  on the login's `PATH`** — a `wp` shell function or alias (`~/.bashrc`) is never run. The SSH user's
+  **login shell must be POSIX** (sh/dash/bash/zsh): sshd hands it the line, and csh/tcsh read `!`
+  inside single quotes. Pinned in
+  `exec.ssh.spec.ts` against an in-process ssh2 server that **runs** each line with `sh -c`, with a
+  recording fake `sudo` on its `PATH` and real SFTP writes
+  ([`__fixtures__/ssh-server.ts`](../../src/common/__fixtures__/ssh-server.ts); ssh2's server caps a
+  line at ~34 KB, OpenSSH took 64 KiB). Not fixed: node-ssh decodes each output chunk alone, so a
+  multi-byte character split between two chunks arrives as `U+FFFD` (measured; phase-12 plan, 12.4).
 - **No command is handed input.** node-ssh ends the channel's input, `local` passes
   `stdin: "ignore"`, `docker exec` without `-i` attaches none. A `[y/n]` prompt (WP-CLI's `confirm()`,
   shown by a destructive command without `--yes`) therefore reads end-of-input and declines at once,
@@ -207,8 +229,8 @@ trusted. **"Absent" means nothing at the plugin's path**, never "WordPress lists
   is at the path, if anything.
 
 Also: `isPluginInstalled` / `isPluginActive` (WordPress's view), `ensurePluginDeactivated`
-(idempotent), `pluginBreaksBoot` (the fatal WordPress dies on with the plugin loaded, when it boots
-with `--skip-plugins=<slug>`; asked only after a failure, since that boot logs the fatal), `activatePlugin`, and `installPlugin(transport, source, opts?)` — a slug, a zip path
+(idempotent), `pluginBreaksBoot` (the fatal — or the signal, a crash counting as a failed boot — WordPress
+dies on with the plugin loaded, when it boots with `--skip-plugins=<slug>`; asked only after a failure, since that boot logs the fatal), `activatePlugin`, and `installPlugin(transport, source, opts?)` — a slug, a zip path
 **on the site**, or a URL ([`InstallPluginOptions`](../../src/common/wp/plugin.ts)
 `{ activate?, force? }`); a runner zip goes through `stageAndInstallPlugin`. "Destination folder
 already exists" becomes `PluginDestinationExistsError`, saying whether WordPress lists a plugin in the
@@ -271,6 +293,7 @@ Distinct classes so steps and reports tell failure modes apart:
 - `PluginDestinationBlockedError` — an install met a file or a dangling link at the plugin's path.
 - `DebugLogFatalError` — PHP wrote a fatal to `debug.log` during a scenario; carries every fatal and
   quotes the first few, so the reporter alone diagnoses it.
+- `CommandKilledError` — the exec layer's: a command ended by a signal (`.signal`), no exit code.
 
 ## Debug-log scanning ([`wp/log.ts`](../../src/common/wp/log.ts))
 
@@ -279,8 +302,9 @@ Reads and categorises `wp-content/debug.log` to catch PHP errors a UI assertion 
 - Reads and clears via `wp --skip-plugins --skip-themes eval` (resolves a custom `WP_CONTENT_DIR`,
   which `wp-config.php` sets; core sets up `WP_DEBUG_LOG` before any plugin loads). No plugin is
   loaded: a copy that cannot boot would kill the read and, through `WP_DEBUG_LOG`, write its fatal
-  into the log being judged (measured). A boot that still fails logs and **falls back** to a direct
-  file read/removal.
+  into the log being judged (measured). A boot that still fails — or a `wp` killed by a signal
+  (`CommandKilledError`: a segfault, the OOM kill) — logs and **falls back** to a direct file
+  read/removal; any other throw (the transport failed) propagates.
 - **`wp eval` exits 0 even when its PHP failed** (a denied write to the web server's `debug.log` is
   only a warning), so each snippet reports its own outcome: the clear prints `cleared`/`kept`, and a
   read that cannot open an existing log exits non-zero instead of returning `""`. A log that never

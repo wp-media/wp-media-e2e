@@ -1,6 +1,7 @@
 import { posix } from "node:path";
 
 import {
+  CommandKilledError,
   PluginDeactivationFailedError,
   PluginDestinationBlockedError,
   PluginDestinationExistsError,
@@ -238,22 +239,42 @@ export function isSkippableSlug(slug: string): boolean {
  *
  * @param transport - the site.
  * @param slug - the plugin's slug.
- * @returns the line the boot died on, or `undefined` when the plugin is not what stops WordPress
- * booting (it boots with it, or not even without it), or the slug cannot be skipped alone.
+ * @returns the line the boot died on (or the signal that killed it), or `undefined` when the plugin is
+ * not what stops WordPress booting (it boots with it, or not even without it — a crash counts), or the
+ * slug cannot be skipped alone.
+ * @throws Error when a command could not be run at all.
  */
 export async function pluginBreaksBoot(
   transport: Transport,
   slug: string,
 ): Promise<string | undefined> {
   if (!isSkippableSlug(slug)) return undefined;
-  const without = await wpCli(transport, [
-    `--skip-plugins=${slug}`,
-    "eval",
-    "echo 1;",
-  ]);
-  if (without.exitCode !== 0) return undefined;
-  const loaded = await wpCli(transport, ["eval", "echo 1;"]);
-  return loaded.exitCode === 0 ? undefined : firstError(loaded);
+  const without = await bootFailure(transport, [`--skip-plugins=${slug}`]);
+  if (without !== undefined) return undefined;
+  return bootFailure(transport, []);
+}
+
+/**
+ * Why a no-op `wp eval` could not boot WordPress, a crash included: PHP killed by a signal (a
+ * segfault, the kernel's OOM kill) fails the boot just as a fatal does.
+ *
+ * @param transport - the site.
+ * @param options - WP-CLI's global options before `eval`, e.g. `--skip-plugins=<slug>`.
+ * @returns `undefined` when it booted; else the line it died on, or the signal's message (which
+ * names no argument).
+ * @throws Error when the command could not be run at all.
+ */
+async function bootFailure(
+  transport: Transport,
+  options: readonly string[],
+): Promise<string | undefined> {
+  try {
+    const result = await wpCli(transport, [...options, "eval", "echo 1;"]);
+    return result.exitCode === 0 ? undefined : firstError(result);
+  } catch (error) {
+    if (error instanceof CommandKilledError) return error.message;
+    throw error;
+  }
 }
 
 /**
