@@ -1,7 +1,8 @@
 # E2E Modernization Plan — `wp-rocket-e2e` → `wp-media-e2e`
 
-- Status: Phases 0–5 and 7 (terminal output, done 2026-11-01) done. **Next: Phase 11 — shared SSH
-  server profiles** (open). The rest of Phase 6 (6H–6K) follows in
+- Status: Phases 0–5 and 7 (terminal output, done 2026-11-01) done. **Next: Phase 12 — run as the
+  site** ([phase-12 plan](phase-12-site-identity-plan.md)), then Phase 11 — shared SSH server
+  profiles (open). The rest of Phase 6 (6H–6K) follows in
   the [phase-6 plan](phase-6-feature-porting-plan.md). Phase 10 open. Phase 8 dropped. Phase 9 moved
   to the [orchestrator plan](orchestrator-plan.md). WP Rocket's port starts after Phase 10.
 - Merged in, both done: plugin artifacts (§7) and site file ownership (§8), formerly plans of their
@@ -27,7 +28,9 @@
   files the suite installs on a site are handed back to the site's own owner (§8).
 - Terminal output (Phase 7, done): one renderer for the suite and the orchestrator — live block and
   table on a terminal, plain stable lines piped, `E2E_OUTPUT=auto|plain|fancy`.
-- Next: Phase 11 — shared SSH server profiles: a site may omit `host`, `username`, `privateKeyPath`
+- Next: Phase 12 — run as the site ([phase-12 plan](phase-12-site-identity-plan.md)): every site
+  command runs as the web server's user and group through `sudo`, every `wp` call as the site's
+  WordPress admin (`--user`), with warned fallbacks. Then Phase 11 — shared SSH server profiles: a site may omit `host`, `username`, `privateKeyPath`
   and `port`, while `rootDir` stays per site. Phase 6 resumes at 6H after it; Phase 10 (dependency check, cleanup)
   and WP Rocket's port (parity matrix, §4) follow.
 
@@ -316,7 +319,8 @@ Open, for WP Rocket's port:
 | 8 CI on real cells | dropped | below |
 | 9 Orchestrator | moved | orchestrator plan |
 | 10 Cleanup & validation | open | below |
-| 11 Shared SSH server profiles | next | below |
+| 11 Shared SSH server profiles | after Phase 12 | below |
+| 12 Run as the site | next | [phase-12 plan](phase-12-site-identity-plan.md) |
 | WP Rocket port | after Phase 10 | phase-6 plan, "After Phase 10 — WP Rocket" |
 
 Phase 10 states no dependencies, effort or parallelism; Phase 11 states its own below.
@@ -541,8 +545,9 @@ Phase 10 — Cleanup & validation (open).
   `generateKeyPairSync("ed25519")` yields a key its own `parseKey` rejects 0.34 % of the time
   (68/20,000). Regenerate until `parseKey` accepts it, or commit fixed test keys.
 
-Phase 11 — Shared SSH server profiles (open; next). Configuration and transport;
-depends on nothing (independent of Phase 6 and Phase 10); next, before 6H. Stack:
+Phase 11 — Shared SSH server profiles (open; after Phase 12). Configuration and transport;
+depends on nothing (independent of Phase 6 and Phase 10); before 6H. Phase 12's `runAs`/`umask` join
+the fields a profile cannot carry. Stack:
 existing TypeScript on Node 24, `node-ssh` as already used, the repo's Playwright unit runner, and
 `node:fs`/`node:path`; no new dependency.
 
@@ -976,7 +981,8 @@ server's next write into it fails — a raw `EACCES` inside `WP_Filesystem_Direc
   web-server process: `ps` says `www-data` on both cells, wrong on `pro@apache`, where
   `chown www-data:www-data` would strip `sftp_backwpup`, the host's SFTP deployment account, off the
   tree.
-- Rejected: running WP-CLI as the docroot owner. `sudo -n -u <owner> wp …` works, even for the
+- Rejected then, **reversed 2026-11-10** (operator: servers are ours, docroots chowned to the web
+  server's identity; the [phase-12 plan](phase-12-site-identity-plan.md) measures and builds it): running WP-CLI as the docroot owner. `sudo -n -u <owner> wp …` works, even for the
   `nologin` `sftp_backwpup`, but there is no single correct user (on `pro@apache` that owner's
   primary gid is 123 and its umask `0022`, so it would create `sftp_backwpup:sftp_backwpup 755`
   files the web server cannot write); `sudo -u` sets the target's `HOME` — `/var/www` on nginx,
@@ -1037,9 +1043,8 @@ server's next write into it fails — a raw `EACCES` inside `WP_Filesystem_Direc
   threefold. Deferred: it changes `normalizeOwnership`'s one-path contract and needs its own tests.
   Revisit when a product declares more than a handful of data paths, or the Before hook nears its
   budget. (Residue removal is already batched — wordpress-automation.md.)
-- Running WP-CLI as the docroot owner (§8.2): rejected on evidence, not forgotten. If installing
-  call sites keep leaking ownership, revisit as a per-site opt-in (`transport.runWpAs`), never a
-  default.
+- Running WP-CLI as the docroot owner (§8.2): taken up as Phase 12, default on after its
+  verification ([phase-12 plan](phase-12-site-identity-plan.md)); this module becomes its fallback.
 
 ## 9. References
 

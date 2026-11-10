@@ -1,7 +1,7 @@
 # Phase 6 — Feature porting: BackWPup first
 
 Status: paused after 6H.0 for modernization Phase 7 — terminal output (done 2026-11-01), then
-Phase 11 — shared SSH server profiles; resumes at 6H. Done: 6A–6F, 6G.0, 6G and 6G.1 (shipped inside
+Phase 12 — run as the site, then Phase 11 — shared SSH server profiles; resumes at 6H. Done: 6A–6F, 6G.0, 6G and 6G.1 (shipped inside
 6G, 2026-10-05), 6H.0 (2026-10-21). Deferred: 6H.2 (needs storage credentials).
 
 Parent: [e2e-modernization-plan.md](e2e-modernization-plan.md), Phase 6 — this plan supersedes that
@@ -24,7 +24,9 @@ in [authoring-tests.md](../guides/authoring-tests.md) and `AGENTS.md`.
   (6E.0: the leftover-footprint sweep); 6F the WP-CLI surface (6F.0–6F.4); 6G.0 errors that never
   quote an argv; 6G restore (6G.1: hashed restore directories); 6H.0 a half-removed plugin folder
   costs one scenario, never all later ones.
-- Next: modernization Phase 11 — shared SSH server profiles — before 6H (decided 2026-10-22; Phase 7,
+- Next: modernization Phase 12 — run as the site
+  ([phase-12 plan](phase-12-site-identity-plan.md); BackWPup moves onto it; its one two-user
+  scenario keeps today's identity, 12.10) — then Phase 11 — shared SSH server profiles — before 6H (decided 2026-10-22; Phase 7,
   terminal output, done 2026-11-01). It does not touch the port.
 - Open: 6H (storage config and skip gate), 6I (Free upsell scenario, parity gate) and **6I.1 restore
   parity** (Free upload counterparts to Pro's five UI restores), 6J (shared: keep the staging area off
@@ -1383,6 +1385,10 @@ format switch.
 
 Deferred (decided 2026-10-06): WP Rocket's port starts once Phase 10 (cleanup & validation) is done.
 Phase 6 closes on BackWPup alone (§5).
+
+Prerequisite: the [phase-12 plan](phase-12-site-identity-plan.md)'s Part B (12.12–12.16: install
+outputs, licence, settling request, deactivation recovery, in-place `.htaccess`/`wp-config.php`
+cleanup, one lifecycle scenario).
 
 WP Rocket reuses 6A unchanged and the same recipe: page objects first, then features. Its baseline
 is much larger (`src/features/`, `src/specs/`, `src/support/steps/`, the 921-line `page-utils.ts`,

@@ -571,6 +571,9 @@ history:
   obligations).
 - [`phase-6-feature-porting-plan.md`](docs/plans/phase-6-feature-porting-plan.md) — feature porting
   (BackWPup first); supersedes the parent plan's Phase 6.
+- [`phase-12-site-identity-plan.md`](docs/plans/phase-12-site-identity-plan.md) — next: every site
+  command as the web server's identity (`sudo -u/-g`), `wp --user=<admin>`, warned fallbacks; Part B
+  readies WP Rocket's lifecycle.
 - [`orchestrator-plan.md`](docs/plans/orchestrator-plan.md) — the orchestrator, a long-running service
   running cells on a server (supersedes the parent plan's Phase 9); includes Phase 0 (done): the run
   contract and each suite change's decision.
