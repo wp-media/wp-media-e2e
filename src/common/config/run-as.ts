@@ -7,8 +7,8 @@
  * transport field (`sites.ts`). Dependency-free like `file-owner.ts`, whose `"user:group"` rule
  * `runAs` reuses, so one spelling is valid in both fields.
  *
- * No command reads these fields yet: they only become behaviour once the exec layer runs commands as
- * the site's identity.
+ * `exec`/`wpCli` read them through the identity state (`wp/site-identity.ts`); probes and root
+ * commands never do.
  */
 
 import { parseOwnerSpec, type OwnerSpec } from "./file-owner";

@@ -7,8 +7,10 @@ import { exec } from "./exec";
 import {
   RUN_AS_NAME,
   RUN_AS_SCRIPT,
+  quotesSudoDenial,
   hasSudoNoise,
   isSudoName,
+  isSudoRefusal,
   runAsArgv,
   sudoName,
   withoutSudoNoise,
@@ -192,11 +194,12 @@ test.describe("the wrapper, run by /bin/sh", () => {
   });
 });
 
-test("sudo's unresolvable-host lines are removed from stderr, every other line kept", () => {
+test("sudo's leading unresolvable-host lines are removed from stderr, every other line kept", () => {
+  const noise = "sudo: unable to resolve host twin: Name or service not known";
   const stderr = [
-    "sudo: unable to resolve host twin: Name or service not known",
+    noise,
+    `${noise}\r`,
     "Warning: something real",
-    "sudo: unable to resolve host twin: Name or service not known\r",
     "sudo: a password is required",
   ].join("\n");
 
@@ -206,6 +209,85 @@ test("sudo's unresolvable-host lines are removed from stderr, every other line k
   expect(hasSudoNoise(stderr)).toBe(true);
   expect(hasSudoNoise("sudo: a password is required")).toBe(false);
   expect(withoutSudoNoise("")).toBe("");
+  expect(withoutSudoNoise(noise)).toBe("");
+});
+
+test("the same line printed later is the program's own: kept, and not noise", () => {
+  const noise = "sudo: unable to resolve host twin: Name or service not known";
+  const programs = `Warning: real\n${noise}`;
+
+  expect(withoutSudoNoise(programs)).toBe(programs);
+  expect(hasSudoNoise(programs)).toBe(false);
+  expect(withoutSudoNoise(`${noise}\n${programs}`)).toBe(programs);
+});
+
+test.describe("isSudoRefusal", () => {
+  const noise = "sudo: unable to resolve host twin: Name or service not known";
+  /** sudo 1.9.15p5's explicit deny (rule `ALL, !/bin/sh`), as captured, host replaced. */
+  const denied = `Sorry, user bob is not allowed to execute '/bin/sh -c ${RUN_AS_SCRIPT} e2e-run-as 0022 / wp --key=SECRET a\nb it's' as www-data:www-data on host.example.\n`;
+  for (const [label, stderr] of [
+    ["an explicit deny, its quoted arguments over two lines", denied],
+    ["an explicit deny after the hostname noise", `${noise}\n${denied}`],
+    [
+      "an explicit deny on one line, CRLF",
+      "Sorry, user bob is not allowed to execute '/bin/sh -c x' as www-data:www-data on host.example.\r\n",
+    ],
+    ["a sudo line, then an explicit deny", `sudo: x\n${denied}`],
+    ["no rule", "sudo: a password is required"],
+    ["after the hostname noise", `${noise}\nsudo: a password is required`],
+    [
+      "a rule naming other users",
+      "sudo: sorry, user ubuntu is not allowed to execute '/bin/sh -c x' as www-data:deploy on twin.",
+    ],
+    [
+      "an unknown account, two lines, CRLF",
+      "sudo: unknown user nobody2\r\nsudo: error initializing audit plugin sudoers_audit\r\n",
+    ],
+  ] as const) {
+    test(`exit 1 and only sudo's lines: refused (${label})`, () => {
+      expect(isSudoRefusal({ exitCode: 1, stderr })).toBe(true);
+    });
+  }
+
+  for (const [label, exitCode, stderr] of [
+    ["another exit", 2, "sudo: a password is required"],
+    ["the program's own exit 1, silent", 1, ""],
+    ["only the hostname noise", 1, noise],
+    ["the program's words after sudo's", 1, "sudo: x\nError: not installed"],
+    ["the wrapper's failure", 1, "e2e-run-as: 1: cd: can't cd to /x"],
+    [
+      "a sudo line not at a line start",
+      1,
+      "Error: sudo: a password is required",
+    ],
+    ["an explicit deny with another exit", 2, denied],
+    ["an explicit deny, then the program's words", 1, `${denied}Error: x`],
+    [
+      "a deny's opening the program printed, never finished",
+      1,
+      "Sorry, user bob is not allowed to execute 'x'",
+    ],
+  ] as const) {
+    test(`not a refusal: ${label}`, () => {
+      expect(isSudoRefusal({ exitCode, stderr })).toBe(false);
+    });
+  }
+});
+
+test("quotesSudoDenial: sudo's explicit deny on any line, either spelling; nothing else", () => {
+  for (const stderr of [
+    "Sorry, user bob is not allowed to execute 'wp --key=S' as www-data:www-data on h.",
+    "sudo: x\nsudo: sorry, user bob is not allowed to execute 'wp' as root on h.",
+  ]) {
+    expect(quotesSudoDenial(stderr)).toBe(true);
+  }
+  for (const stderr of [
+    "sudo: a password is required",
+    "Error: Sorry, user bob is not allowed to execute 'wp'",
+    "Sorry, user bob may not run this",
+  ]) {
+    expect(quotesSudoDenial(stderr)).toBe(false);
+  }
 });
 
 test("only a whole line of sudo's noise counts: CRLF ends one, text before it is not noise", () => {

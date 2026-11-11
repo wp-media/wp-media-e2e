@@ -3,6 +3,7 @@ import { test, expect } from "@playwright/test";
 import {
   FALLBACK_REASONS,
   asTransportUser,
+  SUDO_DENIED,
   classifyRunProbe,
   decideIdentityState,
   describeIdentityState,
@@ -47,12 +48,16 @@ const UBUNTU: RunIdentity = {
   group: "ubuntu",
   uid: 1000,
   gid: 1000,
+  groupIds: [1000, 33],
+  groupNames: ["ubuntu", "www-data"],
 };
 const WWW: RunIdentity = {
   user: "www-data",
   group: "www-data",
   uid: 33,
   gid: 33,
+  groupIds: [33],
+  groupNames: ["www-data"],
 };
 const WEB_WWW: WebIdentity = {
   euid: 33,
@@ -206,6 +211,26 @@ test("auto with the transport's user being the verified owner is same-user, befo
   ).toBe("same-user");
 });
 
+test("auto with no verdict is unverified before any probe; a declared identity is not held to one", () => {
+  const { verdict: _verdict, site: _site, runProbe: _run, ...bare } = AUTO;
+
+  // Nothing probed yet: no `stat`/`id` needed to know it.
+  expect(decideIdentityState(bare)).toEqual({
+    kind: "fallback",
+    reason: "unverified",
+    detail: "no pre-flight verdict for this site in this run",
+  });
+  // A root-owned or unreadable docroot would be no-identity, but nothing is probed to learn it: the
+  // pre-flight that gives the verdict reports it.
+  expect(
+    outcome({ ...bare, site: { owner: undefined, transportUser: UBUNTU } }),
+  ).toBe("fallback/unverified");
+  expect(decideIdentityState({ ...bare, runAs: "www-data:www-data" })).toEqual({
+    kind: "pending",
+    probe: "site",
+  });
+});
+
 test("auto with the transport's user being an owner PHP is not, or not verified as, falls back", () => {
   // A deployment account owns the docroot and is the SSH user; PHP runs as www-data through the group.
   const { runProbe: _run, ...noProbe } = AUTO;
@@ -214,6 +239,8 @@ test("auto with the transport's user being an owner PHP is not, or not verified 
     group: "www-data",
     uid: 1001,
     gid: 33,
+    groupIds: [33],
+    groupNames: ["www-data"],
   };
   const site = { owner: SFTP_OWNER, transportUser: sftp };
   const notWeb: SiteIdentityVerdict = {
@@ -617,7 +644,14 @@ const PROBES: readonly (readonly [
     },
     {
       kind: "ran",
-      identity: { user: "33", group: "33", uid: 33, gid: 33 },
+      identity: {
+        user: "33",
+        group: "33",
+        uid: 33,
+        gid: 33,
+        groupIds: [33],
+        groupNames: [],
+      },
       sudoNoise: false,
     },
   ],
@@ -741,6 +775,27 @@ for (const [label, result, expected] of PROBES) {
   });
 }
 
+/** sudo 1.9.15p5's explicit deny of the run probe (rule `ALL, !/bin/sh`), as captured, host replaced. */
+const PROBE_DENIED = `Sorry, user bob is not allowed to execute '/bin/sh -c ${RUN_AS_SCRIPT} ${RUN_AS_NAME} 0022 / /bin/sh -c x' as www-data:www-data on host.example.\n`;
+
+for (const [label, stderr] of [
+  ["sudo's explicit deny", PROBE_DENIED],
+  [
+    "sudo's explicit deny behind hostname noise",
+    `sudo: unable to resolve host twin: x\n${PROBE_DENIED}`,
+  ],
+  [
+    "sudo's explicit deny, lower-cased behind its prefix",
+    `sudo: s${PROBE_DENIED.slice(1)}`,
+  ],
+] as const) {
+  test(`run probe: ${label} is no-sudo, named, never quoted`, () => {
+    const outcome = classifyRunProbe({ stdout: "", stderr, exitCode: 1 });
+    expect(outcome).toMatchObject({ kind: "failed", reason: "no-sudo" });
+    expect(outcome.kind === "failed" ? outcome.detail : "").toBe(SUDO_DENIED);
+  });
+}
+
 test("a run probe detail is the first stderr line only", () => {
   expect(
     classifyRunProbe({
@@ -771,6 +826,9 @@ test("runIdentityFrom reads the primary group's name off the id line", () => {
     group: "www-data",
     uid: 1000,
     gid: 33,
+    // Every group it carries, for the ownership grant's membership test.
+    groupIds: [33, 1000],
+    groupNames: ["www-data", "ubuntu"],
   });
   expect(runIdentityFrom("no id here")).toBeUndefined();
 });

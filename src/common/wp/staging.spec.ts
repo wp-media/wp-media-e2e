@@ -24,6 +24,7 @@ import {
 } from "./staging";
 import type { LocalTransport, SshTransport } from "../config/types";
 import { removeTempDir } from "../__fixtures__/temp-dir";
+import { SKIP_SUDO_OPTIONS } from "../__fixtures__/fake-sudo";
 
 // The pure path/category logic needs no transport at all; the transfer + lifecycle behaviour is
 // exercised end to end on the `local` transport (a real WP-root-like directory, real
@@ -562,8 +563,7 @@ test.describe("stageAndInstallPlugin", () => {
 const FAKE_SUDO = `#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$FAKE_SUDO_LOG"
 if [ "$FAKE_SUDO_DENY" = "1" ]; then exit 1; fi
-[ "$1" = "-n" ] && shift
-[ "$1" = "--" ] && shift
+${SKIP_SUDO_OPTIONS}
 if [ "$1" = "true" ]; then exit 0; fi
 for arg in "$@"; do target="$arg"; done
 chmod u+rwx "$(dirname "$target")" 2>/dev/null

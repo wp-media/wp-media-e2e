@@ -369,6 +369,8 @@ write_overlays() {
             username: e.TWIN_SSH_USER,
             privateKeyPath: e.TWIN_KEY,
             rootDir: e.TWIN_ROOT_DIR,
+            // Site commands as the docroot owner once the pre-flight verified PHP runs as it.
+            runAs: "auto",
           },
         };
         return edition === undefined ? [site] : { edition, sites: [site] };

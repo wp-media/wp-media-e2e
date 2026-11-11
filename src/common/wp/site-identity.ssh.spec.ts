@@ -117,7 +117,14 @@ test("auto with a verified owner: one run probe through the exact wrapper, then 
   expect(state).toEqual({
     kind: "site",
     target: { user: "www-data", group: "www-data" },
-    identity: { user: "www-data", group: "www-data", uid: 33, gid: 33 },
+    identity: {
+      user: "www-data",
+      group: "www-data",
+      uid: 33,
+      gid: 33,
+      groupIds: [33],
+      groupNames: ["www-data"],
+    },
     umask: "0002",
     sudoNoise: false,
   });
@@ -144,6 +151,16 @@ test("auto without this run's verdict falls back as unverified, never asking sud
     reason: "unverified",
   });
   expect(server.sudoCalls().length).toBe(sudoBefore);
+});
+
+test("auto without this run's verdict sends no command at all: no stat, no id", async () => {
+  const sent = server.commands.length;
+
+  await expect(resolveSiteIdentity(auto())).resolves.toMatchObject({
+    kind: "fallback",
+    reason: "unverified",
+  });
+  expect(server.commands.length).toBe(sent);
 });
 
 test("a verdict given after an unverified answer makes the next call decide again", async () => {

@@ -19,6 +19,7 @@ import {
   CONTENT_COPY_TOKEN,
   RECOVERING_PREFIX,
 } from "../content-copy";
+import { SKIP_SUDO_OPTIONS } from "../../../../common/__fixtures__/fake-sudo";
 import type { LocalTransport } from "../../../../common/config/types";
 
 /**
@@ -127,7 +128,7 @@ export function copyHost(): CopyHost {
   stub(
     binDir,
     "sudo",
-    `shift 2
+    `${SKIP_SUDO_OPTIONS}
 case "$1" in
   true) exit 0 ;;
   du) [ -n "\${COPY_DU_EMPTY:-}" ] && exit 1; printf '%s\\t%s\\n' "\${COPY_DU_KB:-1000}" "$4"; exit 0 ;;

@@ -124,15 +124,19 @@ alias is never run) ([the ssh command line](../architecture/wordpress-automation
   - Normalisation needs privileges (`chown` always does): with `elevate: false` or no passwordless
     `sudo`, the site reports it cannot and carries on
     ([file ownership](../architecture/wordpress-automation.md#file-ownership-wpownershipts)).
-- **`runAs`** (`ssh` only; **no effect yet**: read once [Phase 12](../plans/phase-12-site-identity-plan.md)
-  lands; absent = `false` until its rollout, then `"auto"`) — who site commands run as: `"auto"` (the
-  docroot's owner, once verified to be the web server's identity), `"user:group"` (the `fileOwner`
-  rule, trimmed; root by name or id `0`, or an id above 4294967294, refused as user **and** group: the
-  web server never runs with group 0) or `false` (the transport's user, as today).
-- **`umask`** (`ssh` only; **no effect yet**; default `0022`) — the umask of commands run as the site's
-  identity: a text of 3–4 octal digits (`"022"`, `"0022"`), stored as four. Its owner digit must be
-  `0` (`"0177"` would make new directories `0600`, unusable by their owner); a JSON number is refused
-  (`22` would read as decimal).
+- **`runAs`** (`ssh` only; absent = `false` until the
+  [Phase 12](../plans/phase-12-site-identity-plan.md) rollout, then `"auto"`) — who site commands
+  (`exec`/`wpCli`) run as: `"auto"` (the docroot's owner, once verified to be the web server's
+  identity), `"user:group"` (the `fileOwner` rule, trimmed; root by name or id `0`, or an id above
+  4294967294, refused as user **and** group: the web server never runs with group 0) or `false` (the
+  transport's user, as today). **Phase 12 in progress — keep real sites at `false`:** `"auto"` stays
+  `unverified` (the transport's user) until the pre-flight writes its verdict, and a declared
+  `"user:group"` already runs commands as the identity while staging, `--user` and ownership do not
+  follow yet (a plugin upload then fails, measured on the twins).
+- **`umask`** (`ssh` only; default `0022`) — the umask of commands run as the site's identity (the
+  `site` state only): a text of 3–4 octal digits (`"022"`, `"0022"`), stored as four. Its owner digit
+  must be `0` (`"0177"` would make new directories `0600`, unusable by their owner); a JSON number is
+  refused (`22` would read as decimal).
 - `runAs`/`umask` on `docker`/`local` fail the load: their commands have no second identity.
 
 ## Editions (Free / Pro)
@@ -358,13 +362,17 @@ never removes a twin, and no port is shared.
   checkouts' overlays: run `down` there too.
 - **Overlays** (git-ignored, 0600), one per product: BackWPup `sites.twins.json` → `pro@twin-apache`,
   `pro@twin-nginx` (`edition: "pro"`); WP Rocket → `twin-apache`, `twin-nginx`. Each: `ssh` to
-  `127.0.0.1:<ssh port>` as `ubuntu` with the twins' key, `rootDir` `/var/www/site/public`, no `runAs`.
+  `127.0.0.1:<ssh port>` as `ubuntu` with the twins' key, `rootDir` `/var/www/site/public`,
+  `runAs: "auto"` (the transport's user until the pre-flight writes its verdict; twin specs register
+  their own, asked of the twin's web server).
   They merge with a `sites.json` (disjoint cells; BackWPup's editions all-or-none hold, since every
   real cell declares one). **Without a `sites.json` the overlays are all that loads, never the
   example**: every run, `@noauth` included, and the healthcheck see only the twins' cells, and their
   setup needs the twins up — so `env:cells:down` removes the overlays with the twins.
 - **Twin specs**: `*.spec.ts` gated on `E2E_SSH_TWINS=1` (skipped by `npm run test:unit`); twin cells
-  and sites through [`__fixtures__/ssh-twins.ts`](../../src/common/__fixtures__/ssh-twins.ts). With
+  and sites through [`__fixtures__/ssh-twins.ts`](../../src/common/__fixtures__/ssh-twins.ts). A spec
+  touching a twin holds it with `withTwin(stack, …)` (a lock across workers); one needing a variant
+  resets with `resetTwin(stack, variant)` inside it and puts `legacy-777` (`RESTING_VARIANT`) back. With
   the twins up: `E2E_SSH_TWINS=1 npx playwright test --config playwright.unit.config.ts ssh-twins`.
   CI: [`ssh-twins.yml`](../../.github/workflows/ssh-twins.yml) (manual, or a branch push touching
   `src/common/{wp,setup,config,auth}/`, the twin fixtures, `healthcheck.ts`, `package*.json`,

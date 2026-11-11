@@ -16,6 +16,7 @@ import {
   sshCommandLine,
 } from "./exec";
 import { CommandKilledError } from "./errors";
+import { HOSTILE_ARGUMENTS } from "../__fixtures__/hostile-arguments";
 import {
   PRINT_ARGV_PROGRAM,
   decodeArgv,
@@ -455,40 +456,6 @@ test("a site whose root is relative runs nothing, and nothing is sent", async ()
   );
   expect(server.commands.length).toBe(sent);
 });
-
-/**
- * Arguments that once broke, or could break, a command line: those node-ssh was measured passing
- * through untouched, plus the empty one its own escaping dropped. The long one stops short of 64 KiB
- * (the size measured on a real server) only because ssh2's server refuses a packet over 35,000 bytes;
- * {@link shellQuote}'s table takes the full size.
- */
-const HOSTILE_ARGUMENTS: readonly string[] = [
-  "",
-  "'",
-  '"',
-  "it's",
-  'say "hi"',
-  "$(id)",
-  "`id`",
-  "${HOME}",
-  "$HOME",
-  "a\nb",
-  "a\rb",
-  "a\tb",
-  "--key=a b",
-  "--key=SECRET value; rm -rf /",
-  "-n",
-  "--",
-  "a;b",
-  "a|b",
-  "a&b",
-  "a>b",
-  "*",
-  "~",
-  " leading and trailing ",
-  "café ✓",
-  Buffer.alloc(22 * 1024, "e2e").toString("base64"),
-];
 
 test("every argument, empty and hostile ones included, reaches the program exactly as given", async () => {
   const result = await exec(transport(), PRINT_ARGV_PROGRAM, [

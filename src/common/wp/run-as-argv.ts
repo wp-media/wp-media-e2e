@@ -131,31 +131,103 @@ export function runAsArgv(
 /**
  * The line `sudo` adds to stderr on every call when the host cannot resolve its own name. It changes
  * neither the exit code nor stdout, but whoever reads stderr (a refusal's reason, WP-CLI's notices)
- * would read it as the command's own.
+ * would read it as the command's own. `sudo` prints it before anything else, so only a **leading** run
+ * of such lines is sudo's: the same text later on is the program's own and stays.
  */
 const HOSTNAME_NOISE = /^sudo: unable to resolve host .*$/;
 
 /**
- * `stderr` without sudo's unresolvable-hostname lines.
+ * How many of `lines` open with sudo's hostname noise.
  *
- * @param stderr - a command's stderr, run through `sudo`.
- * @returns the same text, those lines removed (the line breaks between the others kept).
+ * @param lines - stderr split on `\n` (a trailing `\r` is ignored).
  */
-export function withoutSudoNoise(stderr: string): string {
-  return stderr
-    .split("\n")
-    .filter((line) => !HOSTNAME_NOISE.test(line.replace(/\r$/, "")))
-    .join("\n");
+function leadingNoise(lines: readonly string[]): number {
+  const first = lines.findIndex(
+    (line) => !HOSTNAME_NOISE.test(line.replace(/\r$/, "")),
+  );
+  return first === -1 ? lines.length : first;
 }
 
 /**
- * Whether `stderr` holds sudo's unresolvable-hostname noise, for a report naming the fix (the host's
- * name in `/etc/hosts`).
+ * `stderr` without the leading run of sudo's unresolvable-hostname lines.
+ *
+ * @param stderr - a command's stderr, run through `sudo`.
+ * @returns the same text from the first other line on (every later line kept as printed).
+ */
+export function withoutSudoNoise(stderr: string): string {
+  const lines = stderr.split("\n");
+  return lines.slice(leadingNoise(lines)).join("\n");
+}
+
+/**
+ * Whether `stderr` opens with sudo's unresolvable-hostname noise, for a report naming the fix (the
+ * host's name in `/etc/hosts`).
  *
  * @param stderr - a command's stderr, run through `sudo`.
  */
 export function hasSudoNoise(stderr: string): boolean {
-  return stderr
+  return leadingNoise(stderr.split("\n")) > 0;
+}
+
+/**
+ * sudo's explicit-deny message (a rule like `ALL, !/bin/sh`): `Sorry, user <u> is not allowed to
+ * execute '<command and its arguments>' as <user>:<group> on <host>.`, with no `sudo:` prefix (some
+ * versions add one and lower-case it). It quotes the whole command, a `--key=` value included, and
+ * runs on over as many lines as the arguments hold newlines — so it is matched over the rest of
+ * stderr, never line by line, and never quoted to anyone.
+ */
+const NOT_ALLOWED =
+  /^(?:sudo: )?[Ss]orry, user [^\n]*? is not allowed to execute '[\s\S]*' as [^\n]* on [^\n]*\.$/;
+
+/** The opening of a {@link NOT_ALLOWED} message, on any line: whether some text quotes one. */
+const NOT_ALLOWED_START =
+  /^(?:sudo: )?[Ss]orry, user .*? is not allowed to execute /m;
+
+/**
+ * Whether `stderr` carries sudo's explicit-deny message (`Sorry, user … is not allowed to execute
+ * '<command>' …`), which quotes the command's arguments: a caller must name it, never print it.
+ *
+ * @param stderr - a command's stderr, run through `sudo`.
+ */
+export function quotesSudoDenial(stderr: string): boolean {
+  return NOT_ALLOWED_START.test(stderr);
+}
+
+/**
+ * Whether `stderr`, sudo's noise removed, is wholly sudo's own refusal: one or more `sudo:` lines,
+ * and/or sudo's explicit-deny message running to the end ({@link NOT_ALLOWED}).
+ *
+ * @param stderr - a command's stderr, run through `sudo`.
+ */
+export function isSudoRefusalText(stderr: string): boolean {
+  const lines = withoutSudoNoise(stderr)
     .split("\n")
-    .some((line) => HOSTNAME_NOISE.test(line.replace(/\r$/, "")));
+    .map((line) => line.replace(/\r$/, ""))
+    .filter((line) => line.trim() !== "");
+  for (const [i, line] of lines.entries()) {
+    // The deny message quotes the arguments, newlines included: it runs to the end of stderr.
+    if (
+      NOT_ALLOWED_START.test(line) &&
+      NOT_ALLOWED.test(lines.slice(i).join("\n"))
+    ) {
+      return true;
+    }
+    if (!line.startsWith("sudo: ")) return false;
+  }
+  return lines.length > 0;
+}
+
+/**
+ * Whether a command run through {@link runAsArgv} was refused by `sudo` itself, never reaching the
+ * program: exit 1 and stderr wholly sudo's ({@link isSudoRefusalText}: `a password is required`,
+ * `unknown user …`, `Sorry, user … is not allowed to execute …`). The wrapper's own failures name
+ * `e2e-run-as`, and a program's exit 1 with its own words is the program's.
+ *
+ * @param result - the command's exit code and stderr.
+ */
+export function isSudoRefusal(result: {
+  readonly exitCode: number;
+  readonly stderr: string;
+}): boolean {
+  return result.exitCode === 1 && isSudoRefusalText(result.stderr);
 }

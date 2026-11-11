@@ -3,7 +3,12 @@ import { existsSync, statSync } from "node:fs";
 import { execa } from "execa";
 
 import { CommandKilledError } from "../wp/errors";
-import { describeTarget, elevationSupport, exec } from "../wp/exec";
+import {
+  describeTarget,
+  elevationSupport,
+  exec,
+  execAsTransport,
+} from "../wp/exec";
 import type { ElevationSupport, ExecResult } from "../wp/exec";
 import { planOwnership } from "../wp/ownership";
 import type { OwnershipPlan } from "../wp/ownership";
@@ -529,10 +534,11 @@ async function verifySsh(transport: SshTransport): Promise<CheckResult[]> {
   // `ls -d <path>` only stats the entry via its parent, so it would pass even for a
   // regular file or a directory the user cannot enter — neither of which is usable here.
   // (It does NOT require read/list permission on the directory, which WP-CLI never needs.)
-  // Run from `/`, so the answer is `ls`'s own rather than the failed `cd` into rootDir.
+  // Run from `/`, so the answer is `ls`'s own rather than the failed `cd` into rootDir; and as the
+  // SSH user whatever the site runs as, since that user is who the check and its hint are about.
   let rootDirOk = false;
   try {
-    const result = await exec(
+    const result = await execAsTransport(
       transport,
       "ls",
       ["-d", `${transport.rootDir}/.`],

@@ -16,6 +16,7 @@ import { join } from "node:path";
 
 import {
   detectSiteOwnership,
+  fromRunIdentity,
   grantModeFor,
   matches,
   normalizeOwnership,
@@ -342,6 +343,49 @@ test.describe("parseIdentity — a banner cannot supply half the identity", () =
       groupIds: [33],
       groupNames: [],
     });
+  });
+});
+
+test.describe("fromRunIdentity", () => {
+  test("keeps ids and every group, so the grant tests membership as the identity", () => {
+    const identity = fromRunIdentity({
+      user: "www-data",
+      group: "www-data",
+      uid: 33,
+      gid: 33,
+      groupIds: [33, 1001],
+      groupNames: ["www-data", "deploy"],
+    });
+
+    expect(identity).toEqual({
+      user: "www-data",
+      uid: 33,
+      gid: 33,
+      groupIds: [33, 1001],
+      groupNames: ["www-data", "deploy"],
+    });
+    // A member of the target's group by a supplementary group: no world-write.
+    expect(
+      grantModeFor(identity, {
+        user: "sftp_x",
+        group: "deploy",
+        uid: 1002,
+        gid: 1001,
+      }).worldWritable,
+    ).toBe(false);
+  });
+
+  test("an unmapped user (its uid as digits) carries no name, as parseIdentity reads one", () => {
+    expect(
+      fromRunIdentity({
+        user: "33",
+        group: "33",
+        uid: 33,
+        gid: 33,
+        groupIds: [33],
+        groupNames: [],
+      }),
+    ).toEqual({ uid: 33, gid: 33, groupIds: [33], groupNames: [] });
   });
 });
 

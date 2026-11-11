@@ -1,6 +1,6 @@
 # Phase 12 — Run as the site: the web server's identity for every site command
 
-Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10. Parent:
+Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4 done 2026-11-11. Parent:
 [e2e-modernization-plan.md](e2e-modernization-plan.md) (§3 phase table). Reverses that plan's §8.2
 rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of WP Rocket's port
 ([phase-6 plan §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket)).
@@ -140,7 +140,7 @@ Fallback reasons, each with its fix:
   server over HTTP (12.3) and write `site-identity.json` in the cell's auth folder, keyed
   by `installKey`: owner, web identity, web umask, verdict.
   - Workers read it. `site` only when the web identity equals the owner.
-  - No verdict (e.g. `--no-deps`) → `fallback/unverified`.
+  - No verdict (e.g. `--no-deps`) → `fallback/unverified`, decided before any probe.
   - This is what keeps `auto` from running as a deployment account (`sftp_*`) that the web server
     reaches only through group bits.
 - **umask:** `transport.umask`, default `0022` (systemd's default for apache2 and php-fpm). Applied
@@ -258,7 +258,7 @@ Code never cites this plan; docs may.
 | 12.1 | ssh command line: our quoting, `cd … &&`; an executing ssh test server (done 2026-11-10) | — | 12.0a, 12.2 | S / M |
 | 12.2 | Config: `runAs`, `umask`, `wpUser` (done 2026-11-10) | — | 12.0a, 12.1 | S / S |
 | 12.3 | `wp/site-identity.ts`: states, probes, web probe and verdict file, `asTransportUser` (done 2026-11-10) | 12.2 | 12.0b | M / H |
-| 12.4 | Exec wiring: wrapper, `execAsTransport`, probe callers moved, stderr noise | 12.1, 12.3 | — | M / H |
+| 12.4 | Exec wiring: wrapper, `execAsTransport`, probe callers moved, stderr noise (done 2026-11-11) | 12.1, 12.3 | — | M / H |
 | 12.5 | Staging through an inbox; staging owned by another identity | 12.4 | 12.6, 12.7 | S / M |
 | 12.6 | `--user=<login>` | 12.4 | 12.5, 12.7 | S / M |
 | 12.7 | Ownership, residue, log, files in the `site` state | 12.4 | 12.5, 12.6 | M / M |
@@ -338,8 +338,8 @@ phases use:
   `"runAs": "auto"`** in `cells.sh`'s `write_overlays`.
 - Twin specs: gate and sites in `src/common/__fixtures__/ssh-twins.ts` (`sshTwinsEnabled`,
   `TWIN_CELLS`, `twinSite`); first spec `src/common/setup/ssh-twins.spec.ts` (`verifySite` on all four
-  cells). A spec needing a variant resets the twin itself (`docker exec wpme-ssh-<stack>
-  /opt/twin/site.sh <variant>`) and puts `legacy-777` back.
+  cells). A spec needing a variant holds the twin (`withTwin`, 12.4), resets it (`resetTwin`) and
+  puts `legacy-777` back.
 - CI: `.github/workflows/ssh-twins.yml` builds both images with `docker/build-push-action` (GitHub
   layer cache per stack), `env:cells:up` with `TWIN_SKIP_BUILD=1`, then the twin specs and
   `npm run healthcheck`; `env:cells:down` always.
@@ -417,9 +417,7 @@ command line with `/bin/sh -c` as the runner's user, from a temp `home`, with `b
 
 Found (measured 2026-11-10 with the seam): node-ssh's `execCommand` decodes each output chunk alone
 (`chunk.toString()`), so a multi-byte UTF-8 character split between chunks becomes `U+FFFD`
-(200,000 × `é` came back with one). Pre-existing; fixed in 12.4, which already edits `runSsh`'s
-output: collect the `onStdout`/`onStderr` buffers and decode once (or a `StringDecoder`), ignoring
-node-ssh's strings; spec through the seam.
+(200,000 × `é` came back with one). Fixed in 12.4.
 
 ### 12.2 — Config (done 2026-11-10)
 
@@ -524,11 +522,6 @@ found`). The sweep removed a 2 h-old root-owned probe (escalated) and kept a fre
 its payload.
 
 Left for later sub-phases:
-- **12.4:** every probe here uses `exec` (transport user today): move them to `execAsTransport` —
-  `site-identity.ts` (`stat`, `id`, the run probe) and `web-identity.ts` (`sh` write, `find`, `rm`).
-  `site-identity.ts` imports `exec.ts`, so wiring the resolver into `dispatch` needs the cycle broken
-  (e.g. `dispatch` takes the resolver by registration, or `execAsTransport` lives in a module both
-  import). Use `runAsArgv`/`withoutSudoNoise` from `run-as-argv.ts`.
 - **12.9:** in the auth setup, after the gates: `checkWebIdentity(site, request)` per real site →
   `writeSiteIdentityFile(dirs(product, cell).auth, RUN_ID, verdicts)` +
   `registerSiteIdentityVerdicts`; workers (a worker fixture, before any site command) read it with
@@ -543,39 +536,93 @@ Left for later sub-phases:
   - The `/etc/hosts` fix reads `sudoNoise` off the `site`/`fallback` state (no re-probe).
   - `not-writable` from a `dd` lacking `conv=excl` (BSD/BusyBox host; dd's line is in `detail`): say so.
 
-### 12.4 — Exec wiring
+### 12.4 — Exec wiring (done 2026-11-11)
 
-- The identity's halves come from `runAsIdentity(runAs, context)` (12.2: re-checks the load rule — no
-  root, no id above 4294967294 — and returns `{ user, group }`), numeric ones then prefixed `#`.
-- `runAsArgv(identity, umask, cwd, file, args)` (pure) returns
-  `["sudo", "-n", "-u", u, "-g", g, "--", "/bin/sh", "-c", 'umask "$1" && cd -- "$2" && shift 2 && exec "$@"', "e2e-run-as", umask, cwd, file, ...args]`
-  (built in 12.3: `RUN_AS_SCRIPT`, `RUN_AS_NAME` — `$0` names the wrapper in the shell's errors).
-  - The script is a constant; values only travel as positional arguments.
-  - The outer command has no `cd`.
-- `dispatch`:
-  - `exec`/`wpCli` resolve the state;
-  - `execAsTransport` forces the transport user;
-  - `execElevated` stays root.
-- Move every probe in §1.3's row to `execAsTransport`. `planOwnership` reads the run identity from
-  the resolved state (§2.1).
-- `runSsh` decodes stdout/stderr from whole buffers, not node-ssh's per-chunk strings (found in 12.1).
-- Under the wrapper, `runSsh` removes lines `^sudo: unable to resolve host .*$` from stderr (F8):
-  `parseCliNotices`, `describeExit` and `evalPhp` errors read stderr.
-- Error labels name the program, never `sudo`.
-- `exec.ts` header: "WP-CLI is never root"; site commands run as the site's identity when the state
-  is `site`; the root rules are unchanged; `execElevated`'s notice text updated.
-- Tests:
-  - argv per state;
-  - the executing ssh test server (12.1) runs the wrapper with a fake `sudo`; its `denySudo` refuses
-    every call — extend it to a per-argv policy (e.g. refuse `-u www-data` but run `-n true`) if a
-    state's spec needs a partial refusal;
-  - shared fake-`sudo` stubs learn `-u`/`-g`: `exec.spec.ts`, `residue.spec.ts`, `log.spec.ts`,
-    `staging.spec.ts`, `plugin-dir.spec.ts`, `support/__fixtures__/copy-host.ts`;
-  - `content-copy-leftover.spec.ts`'s `^sudo -n -- mv -T` stays;
-  - twin spec (`E2E_SSH_TWINS=1`), every variant: the expected state; `id`; hostile arguments; a
-    `wp option` round-trip; a written file's owner and mode; `elevationSupport` still `available`.
-- Done: every variant reaches its expected state (table); `site` writes `www-data:www-data` with
-  644 stubs; `legacy-777`/`no-sudo` reproduce today's argv byte for byte.
+Documented in [wordpress-automation.md → Transport & exec](../architecture/wordpress-automation.md#transport--exec-wpexects).
+- **Split, to break the cycle:** `wp/exec.ts` → `wp/transport-exec.ts` (git rename; everything but
+  `exec`/`wpCli`, plus `ExecAs` = `transport`|`root`|`site`, `execAsTransport`, `execAsSite`,
+  `sshWrappedLine`, `decodeOutput`); the new `wp/exec.ts` re-exports it (`export *`) and adds
+  `exec`/`wpCli`, which call `resolveSiteIdentity`: `site` → `execAsSite(transport, state, …)`, else
+  `execAsTransport`. `ownership.ts`'s probes and parsers moved to `wp/owner-probe.ts` (re-exported by
+  `ownership.ts`). `transport-exec`, `run-as-argv`, `owner-probe`, `site-identity`, `web-identity`
+  never load `exec.ts`/`ownership.ts` at run time (`layering.spec.ts`, type-only imports not followed).
+- **Line in `site`:** `exec <runAsArgv quoted>` (no outer `cd`); stderr through `withoutSudoNoise`
+  (the **leading** run of noise lines only) under the wrapper only (root's `sudo -n --` line and
+  stderr and the transport's untouched); messages name the program. Output: `onStdout`/`onStderr`
+  buffers decoded once. A `sudo` refusal after verification (`isSudoRefusal`: exit 1, stderr only
+  `sudo:` lines and/or the unprefixed, multi-line `Sorry, user … is not allowed to execute '…'`)
+  throws `SiteIdentityRefusedError` (program + site, no stderr: sudo quotes the command) and
+  `forgetSiteIdentity(transport, promise)` drops that resolution only (`resolveSiteIdentity` returns
+  the memoised promise itself), so the next command re-resolves once.
+- **Moved to `execAsTransport`:** `stat`, `id`, `id -u`/`getent` (owner-probe, ownership), the run
+  probe and `id` (site-identity), the probe's `sh` write, `find`, `rm` (web-identity), `sudo -n true`,
+  `readlink -f`, docker `pwd`, and the pre-flight's `ls -d <root>/.` check (its hint names the SSH
+  user). The pre-flight's `wp --info` and `core is-installed` stay `exec` (as the site in `site`).
+- **`planOwnership`** reads who commands run as: `site` → the state's identity (`RunIdentity` gained
+  `groupIds`/`groupNames`, `fromRunIdentity`); else `probeIdentity`'s cache (transport user only). A
+  throw resolving the state → `unknown-identity`, not cached.
+- **Overlays:** `cells.sh` writes `"runAs": "auto"`. Without a verdict (no 12.9 yet) runs and the
+  healthcheck stay `fallback/unverified` = as today.
+- **Test seams:** `__fixtures__/fake-sudo.ts` `SKIP_SUDO_OPTIONS` (`-n`, `-u`/`-g` exported, `--` or
+  first non-option; unknown option → exit 1), used by `ssh-server.ts` and the stubs in `exec.spec`,
+  `log.spec`, `residue.spec`, `staging.spec`, `plugin-dir.spec`, `copy-host.ts` (its `sudo -n true`
+  now parsed, not shifted away); `denySudo({ user })` refuses only `-u <user>` (root and
+  `sudo -n true` still run); `__fixtures__/hostile-arguments.ts`; `ssh-twins.ts` `TWIN_VARIANTS`
+  (pinned to `lib.sh`), `resetTwin`, `withTwin` (lock folder in the fixed `/tmp/wpme-ssh-twins/`, `1777`,
+  `lockDir`/`pollMs` for specs; made whole with its pid and renamed onto the path; a dead holder's
+  lock taken over under `<lock>.takeover`, re-judged, renamed away and checked; released by rename,
+  loud if no longer ours; another user's stale lock waited on; a pid counts only as `[1-9]\d*`, else
+  the pidless-age rule; a lock folder of another user's that is not sticky + world-writable is
+  refused): the pre-flight twin spec holds it too.
+- **Specs:** `exec.site.ssh.spec.ts` (22: today's line for `runAs` absent/false, `fallback/no-sudo`
+  and `owner-not-web` with the probes' exact lines, an `asTransportUser` copy; in `site`: hostile args
+  through the wrapper, `wpCli`, umask/cwd/missing cwd, `#33`, noise, kill label, probes/root
+  unwrapped, partial refusal → `no-sudo` with elevation `available`, the pre-flight's two lines,
+  `planOwnership`; UTF-8 split on both paths). `exec.ssh-twins.spec.ts` (14: every variant × stack).
+  15 mutants, all killed (decode, noise ×2, routing, outer `cd`, `planOwnership`, layering, label,
+  per-user deny, groups, pre-flight `ls`, `elevationSupport`, run probe's `/`, `-u` export, lock).
+- **Audit fixes (2026-11-11):** sudo refusal mid-run thrown + re-resolved (was read as the
+  program's exit 1: `isPluginInstalled` true → false); noise stripped only when leading; `auto` with
+  no verdict decided before `stat`/`id`; `withTwin`'s racy takeover (8 processes on a dead lock lost
+  holds) and per-user `$TMPDIR` lock folder replaced (above). New specs: `exec.site.ssh.spec.ts` +6
+  (refusal, late noise + root stderr kept, program's own exit 1, `www-data:deploy` user/group in
+  place + per-user deny, `execAsSite` on docker/local, `planOwnership` run-probe failure →
+  `unknown-identity` then `unnecessary`), `isSudoRefusal`/noise cases, `layering.spec.ts`
+  `valueImports` cases, `ssh-twins.spec.ts` lock cases (8 processes × 12 rounds on a planted dead
+  lock), `exec.ssh-twins.spec.ts` +2 (rule withdrawn mid-run, real sudo). 25 mutants: 24 killed;
+  1 equivalent (the takeover's post-move check, unreachable under the takeover folder).
+- **Re-review fixes (2026-11-11):** sudo's explicit deny (`Sorry, user …`, measured on sudo 1.9.15p5,
+  no prefix, quoting the arguments over several lines) now a refusal in `exec` and `no-sudo` in
+  `classifyRunProbe`, never quoted (`SUDO_DENIED`); a late refusal forgets only its own resolution;
+  lock: pid shape, foreign non-sticky folder refused. Specs: explicit deny (unit + fake sudo
+  `denySudo(…, "explicit")`), late refusal (one extra run probe), refusal on one of two installs (none),
+  lock: aged `.takeover`, swap between judging and moving (`removeIfStale`'s `beforeMove` seam),
+  EPERM waited on (`tryLock`'s `takeOver` seam), pids `0`/empty/`-1`, `ensureLockBase(base, uid)`.
+- **Verified on the twins** (2026-11-11, ports 2270/2271/8170/8171): every variant reached its state
+  on both stacks — `legacy-777`/`owner-mismatch` → `fallback/owner-not-web`, `no-sudo` → `no-sudo`
+  (elevation `unavailable`), `no-wp` → `no-wp`, `site`/`site-775`/`wpconfig-root` → `site`; `id -un`
+  `www-data` in `site`, `ubuntu` otherwise; the 25 hostile arguments byte-identical through the real
+  sudo; a `wp option` round-trip (UTF-8, `$(id)`, quotes); a new `wp-content` file `www-data:www-data
+  644` in `site`, `ubuntu:ubuntu 664` in fallback (ubuntu's umask `0002`), refused in `no-wp` (755,
+  outside the group); `elevationSupport` `available` (but `no-sudo`). Pre-flight twin spec 4/4 and
+  healthcheck 4/4 in `legacy-777` and in `site` (`unverified` → as today). BackWPup
+  `pro@twin-nginx`, 2 `@plugin` scenarios (`cli-reads`): `legacy-777` green; `site` with `auto` fails
+  as today (`.e2e_temp` not creatable by `ubuntu`); `site` with a declared `www-data:www-data` reaches
+  `site`: staging is created as `www-data`, then the SFTP upload as `ubuntu` fails — 12.5's inbox.
+
+Left open (owners named):
+- **12.5:** staging in `site` (above, measured).
+- **12.7:** `ownership.ts`'s `warnOnce` dedupes per install + reason across states (an
+  `asTransportUser` copy shares an install's warnings).
+- **12.9:** the `wp --info` gate's hint still names the SSH user's `PATH`; root's sudo lines keep
+  the hostname noise (only the wrapper strips it; the report's `/etc/hosts` fix covers both).
+- **Known limit:** a program run as the site that itself exits 1 printing only `sudo:` lines is read
+  as sudo's refusal (none of the suite's does).
+- **12.9 (decide):** transport-level and root commands still start with `cd -- <cwd>` as the SSH
+  user (default `cwd` = the root): on a docroot the SSH user cannot enter (`750 www-data`), probes and
+  root's housekeeping fail although the identity works. Today's twins and cells are `o+x`. Either run
+  them from `/` — after making relative operands absolute (`log.ts`'s elevated `rm`/`cat` of
+  `wp-content/debug.log` relies on the root as `cwd`) — or gate on it in the pre-flight.
 
 ### 12.5 — Staging through an inbox
 

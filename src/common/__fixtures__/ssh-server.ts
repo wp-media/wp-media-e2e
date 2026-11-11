@@ -19,6 +19,7 @@ import { NodeSSH } from "node-ssh";
 
 import type { SshTransport } from "../config/types";
 import { installExclDd } from "./excl-dd";
+import { SKIP_SUDO_OPTIONS } from "./fake-sudo";
 import { killTethered, spawnTethered } from "./tether";
 import { removeTempDir } from "./temp-dir";
 
@@ -148,11 +149,13 @@ export const COMMAND_TIMEOUT_MS = 20_000;
 
 /**
  * A `sudo` standing in for the real one: it appends its whole argv to `$E2E_FAKE_SUDO_LOG` (each
- * argument hex-encoded, so any byte survives), then refuses as `sudo -n` without a rule does —
- * `sudo: a password is required`, exit 1 — while `$E2E_FAKE_SUDO_DENY` exists, and otherwise skips its
- * options (`-n`; `-u`/`-g` and their value) up to `--` and `exec`s the rest as the current user, with
- * the `-u`/`-g` values exported as `$E2E_FAKE_SUDO_USER`/`$E2E_FAKE_SUDO_GROUP` so a fake program
- * (`id`) can answer as the identity asked for.
+ * argument hex-encoded, so any byte survives), reads its options ({@link SKIP_SUDO_OPTIONS}: `-u`/`-g`
+ * exported as `$E2E_FAKE_SUDO_USER`/`$E2E_FAKE_SUDO_GROUP`, so a fake program such as `id` can answer as
+ * the identity asked for), then refuses as `sudo -n` without a rule does — `sudo: a password is
+ * required`, exit 1 — while `$E2E_FAKE_SUDO_DENY` exists and is empty, or names the `-u` user asked
+ * for (a rule that allows root but not that user); otherwise it `exec`s the rest as the current user.
+ * With `$E2E_FAKE_SUDO_DENY.explicit` present it refuses as an explicit deny rule does instead
+ * (sudo 1.9.15p5's measured message, no `sudo:` prefix, quoting the whole command, newlines kept).
  */
 const FAKE_SUDO = `#!/bin/sh
 line=
@@ -160,19 +163,19 @@ for arg in "$@"; do
   line="$line:$(printf '%s' "$arg" | od -An -v -tx1 | tr -d ' \\n')"
 done
 printf '%s\\n' "$line" >> "$E2E_FAKE_SUDO_LOG"
+${SKIP_SUDO_OPTIONS}
 if [ -e "$E2E_FAKE_SUDO_DENY" ]; then
-  echo 'sudo: a password is required' >&2
-  exit 1
+  denied=$(cat "$E2E_FAKE_SUDO_DENY")
+  if [ -z "$denied" ] || [ "$denied" = "\${E2E_FAKE_SUDO_USER:-}" ]; then
+    if [ -e "$E2E_FAKE_SUDO_DENY.explicit" ]; then
+      printf "Sorry, user tester is not allowed to execute '%s' as %s:%s on site.test.\\n" \\
+        "$*" "\${E2E_FAKE_SUDO_USER:-root}" "\${E2E_FAKE_SUDO_GROUP:-root}" >&2
+    else
+      echo 'sudo: a password is required' >&2
+    fi
+    exit 1
+  fi
 fi
-while [ "$#" -gt 0 ]; do
-  case $1 in
-    --) shift; break ;;
-    -n) shift ;;
-    -u) E2E_FAKE_SUDO_USER=$2; export E2E_FAKE_SUDO_USER; shift 2 ;;
-    -g) E2E_FAKE_SUDO_GROUP=$2; export E2E_FAKE_SUDO_GROUP; shift 2 ;;
-    *) echo "sudo (fake): unsupported option $1" >&2; exit 1 ;;
-  esac
-done
 exec "$@"
 `;
 
@@ -314,8 +317,19 @@ export interface SshTestServer {
   removeProgram(name: string): void;
   /** Every call the fake `sudo` received, oldest first, as argv arrays. */
   sudoCalls(): string[][];
-  /** Makes the fake `sudo` refuse every call (`true`) or run it (`false`, the default). */
-  denySudo(deny: boolean): void;
+  /**
+   * Makes the fake `sudo` refuse every call (`true`), only calls running as one user (`{ user }`:
+   * `-u <user>`, while root's `sudo -n -- …` and `sudo -n true` still run), or none (`false`, the
+   * default).
+   *
+   * @param deny - which calls to refuse.
+   * @param how - `no-rule` (`sudo: a password is required`, the default) or `explicit` (a deny rule's
+   * `Sorry, user … is not allowed to execute '<command>' …`).
+   */
+  denySudo(
+    deny: boolean | { readonly user: string },
+    how?: "no-rule" | "explicit",
+  ): void;
   /**
    * An ssh transport for this server, rooted at {@link root}. Its host is never resolved: connect
    * through {@link steerNodeSsh}.
@@ -589,9 +603,12 @@ async function listen(
       rmSync(join(layout.bin, name), { force: true });
     },
     sudoCalls: () => decodeSudoLog(readFileSync(layout.sudoLog, "utf8")),
-    denySudo(deny) {
-      if (deny) writeFileSync(layout.sudoDeny, "");
-      else rmSync(layout.sudoDeny, { force: true });
+    denySudo(deny, how = "no-rule") {
+      const explicit = `${layout.sudoDeny}.explicit`;
+      if (deny === false) rmSync(layout.sudoDeny, { force: true });
+      else writeFileSync(layout.sudoDeny, deny === true ? "" : deny.user);
+      if (deny !== false && how === "explicit") writeFileSync(explicit, "");
+      else rmSync(explicit, { force: true });
     },
     transport: (overrides = {}) => ({
       mode: "ssh",
