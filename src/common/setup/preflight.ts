@@ -3,7 +3,7 @@ import { existsSync, statSync } from "node:fs";
 import { execa } from "execa";
 
 import { CommandKilledError } from "../wp/errors";
-import { elevationSupport, exec } from "../wp/exec";
+import { describeTarget, elevationSupport, exec } from "../wp/exec";
 import type { ElevationSupport, ExecResult } from "../wp/exec";
 import { planOwnership } from "../wp/ownership";
 import type { OwnershipPlan } from "../wp/ownership";
@@ -121,11 +121,24 @@ export interface SitePreflightResult {
 
 // ── Transport label (used in error output) ─────────────────────────────────────
 
-/** Human-readable label for a site's transport, e.g. `ssh: ubuntu@203.0.113.10`. Used in reports. */
+/**
+ * The `ssh` command line an operator can paste to reach a site by hand, with its key and, when the
+ * site declares one, its port.
+ *
+ * @param transport - the site's ssh transport.
+ * @returns `ssh [-p <port>] -i "<key>" <user>@<host>`, to which a hint appends the remote command.
+ */
+function sshTestCommand(transport: SshTransport): string {
+  const port =
+    transport.port === undefined ? "" : `-p ${String(transport.port)} `;
+  return `ssh ${port}-i "${transport.privateKeyPath}" ${transport.username}@${transport.host}`;
+}
+
+/** Human-readable label for a site's transport, e.g. `ssh: ubuntu@203.0.113.10` (`…:2210` with a port). Used in reports. */
 export function transportLabel(transport: Transport): string {
   switch (transport.mode) {
     case "ssh":
-      return `ssh: ${transport.username}@${transport.host}`;
+      return `ssh: ${describeTarget(transport)}`;
     case "docker":
       return `docker: ${transport.container}`;
     case "local":
@@ -479,7 +492,7 @@ async function verifySsh(transport: SshTransport): Promise<CheckResult[]> {
           `WP-CLI exited ${String(result.exitCode)}` +
           (result.stderr.trim() ? `: ${result.stderr.trim()}` : "."),
         hint:
-          `Ensure 'wp' is in PATH on ${transport.host} for user '${transport.username}', as an ` +
+          `Ensure 'wp' is in the PATH of ${describeTarget(transport)}, as an ` +
           "executable file: a shell function or alias named `wp` is never run.",
       });
       // We connected (the command ran), so we still check rootDir below.
@@ -500,8 +513,8 @@ async function verifySsh(transport: SshTransport): Promise<CheckResult[]> {
         ok: false,
         detail: msg,
         hint: [
-          `Verify host "${transport.host}" is reachable on port 22.`,
-          `Test locally: ssh -i "${transport.privateKeyPath}" ${transport.username}@${transport.host} "echo ok"`,
+          `Verify host "${transport.host}" is reachable on port ${String(transport.port ?? 22)}.`,
+          `Test locally: ${sshTestCommand(transport)} "echo ok"`,
         ].join("\n"),
       });
       // Cannot connect → rootDir check is moot.
@@ -542,7 +555,7 @@ async function verifySsh(transport: SshTransport): Promise<CheckResult[]> {
         hint: [
           `Confirm the path exists, is a directory, and user "${transport.username}" can enter it`,
           `(WP-CLI runs from this directory, so it needs execute/search permission — not read):`,
-          `  ssh -i "${transport.privateKeyPath}" ${transport.username}@${transport.host} "ls -ld '${transport.rootDir}'"`,
+          `  ${sshTestCommand(transport)} "ls -ld '${transport.rootDir}'"`,
           `  If access is restricted, grant traverse rights via chmod, ACLs, or group membership.`,
         ].join("\n"),
       });

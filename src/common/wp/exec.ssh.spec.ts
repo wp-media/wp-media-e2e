@@ -219,7 +219,7 @@ test("a reset under a running command fails that command, naming the lost connec
 
   // Unhandled, the same reset is an uncaught exception that ends the whole worker process.
   await expect(pending).rejects.toThrow(
-    /the connection to site\.test was lost \(read ECONNRESET\) while "sleep" was running/,
+    /the connection to tester@site\.test was lost \(read ECONNRESET\) while "sleep" was running/,
   );
 });
 
@@ -281,7 +281,7 @@ test("a link that goes silent under a running command fails that command once it
   silence();
 
   await expect(pending).rejects.toThrow(
-    /the connection to site\.test was lost \(Keepalive timeout\) while "sleep" was running/,
+    /the connection to tester@site\.test was lost \(Keepalive timeout\) while "sleep" was running/,
   );
 });
 
@@ -291,7 +291,7 @@ test("a command killed by a signal names the program and the signal, never its a
   const failure = exec(transport(), "kill-me", ["--key=SECRET-ssh-planted"]);
 
   await expect(failure).rejects.toThrow(
-    '[wp/exec] "kill-me" on site.test was terminated by signal SIGTERM before exiting.',
+    '[wp/exec] "kill-me" on tester@site.test was terminated by signal SIGTERM before exiting.',
   );
   await expect(failure).rejects.not.toThrow(/SECRET/);
 });
@@ -329,7 +329,7 @@ test("a command whose connection is disposed under it fails, but not as a kill",
   expect(error).toBeInstanceOf(Error);
   expect(error).not.toBeInstanceOf(CommandKilledError);
   expect((error as Error).message).toBe(
-    '[wp/exec] "sleep" on site.test ended with neither an exit status nor a signal (its channel ' +
+    '[wp/exec] "sleep" on tester@site.test ended with neither an exit status nor a signal (its channel ' +
       "closed), so how it ended is unknown.",
   );
 });
@@ -594,4 +594,53 @@ test("node-ssh is sent the whole command line and left to change no folder of it
   expect(server.commands.at(-1)).toBe(
     `cd -- ${shellQuote(server.root)} && exec 'true' 'a b'`,
   );
+});
+
+// The twins share a host and differ by port, so a declared port must reach node-ssh, and an
+// undeclared one must leave node-ssh's own default (22) alone.
+test("a declared port is what node-ssh connects to; without one, node-ssh is given none", async () => {
+  await exec({ ...transport(), port: 2210 }, "true", []);
+  expect(configs.at(-1)?.port).toBe(2210);
+
+  await exec(transport(), "true", []);
+  expect(configs.at(-1)).not.toHaveProperty("port");
+});
+
+// One host serves both twins: a message naming only the host would not say which site failed.
+test.describe("a declared port is named wherever the site is", () => {
+  test("a connection that cannot be opened names user@host:port", async () => {
+    connectPort = await closedPort();
+
+    await expect(
+      exec({ ...transport(), port: 2210 }, "echo", ["unreachable"]),
+    ).rejects.toThrow(
+      /\[wp\/exec\] could not connect to tester@site\.test:2210: connect ECONNREFUSED/,
+    );
+  });
+
+  test("a killed command names user@host:port", async () => {
+    server.addProgram("kill-me", "kill -TERM $$\n");
+
+    await expect(
+      exec({ ...transport(), port: 2210 }, "kill-me", []),
+    ).rejects.toThrow(
+      '[wp/exec] "kill-me" on tester@site.test:2210 was terminated by signal SIGTERM before exiting.',
+    );
+  });
+
+  // The scp form (`user@host:"path"`) has no room for a port, so it follows the path.
+  test("a failed upload keeps the scp form and names the port after it", async () => {
+    const local = join(server.home, "runner-upload.zip");
+    const target = join(server.root, "no such folder", "plugin.zip");
+    writeFileSync(local, "zip bytes");
+
+    await expect(
+      copyIntoTarget({ ...transport(), port: 2210 }, local, target),
+    ).rejects.toThrow(
+      `[wp/exec] could not upload "${local}" to tester@site.test:"${target}" (port 2210).`,
+    );
+    await expect(copyIntoTarget(transport(), local, target)).rejects.toThrow(
+      `[wp/exec] could not upload "${local}" to tester@site.test:"${target}".`,
+    );
+  });
 });

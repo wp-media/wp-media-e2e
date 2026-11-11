@@ -1,6 +1,6 @@
 # Phase 12 — Run as the site: the web server's identity for every site command
 
-Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.1, 12.2 and 12.3 done 2026-11-10. Parent:
+Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10. Parent:
 [e2e-modernization-plan.md](e2e-modernization-plan.md) (§3 phase table). Reverses that plan's §8.2
 rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of WP Rocket's port
 ([phase-6 plan §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket)).
@@ -254,7 +254,7 @@ Code never cites this plan; docs may.
 | # | Delivers | Depends | Parallel with | Effort / difficulty |
 | --- | --- | --- | --- | --- |
 | 12.0a | Twin images, `system.sh`, `site.sh` variants | — | 12.1, 12.2 | M / M |
-| 12.0b | Compose, npm scripts, sites overlays, docs; optional CI | 12.0a | 12.3 | S / S |
+| 12.0b | Compose, npm scripts, sites overlays, `transport.port`, twin CI (done 2026-11-10) | 12.0a | 12.3 | S / S |
 | 12.1 | ssh command line: our quoting, `cd … &&`; an executing ssh test server (done 2026-11-10) | — | 12.0a, 12.2 | S / M |
 | 12.2 | Config: `runAs`, `umask`, `wpUser` (done 2026-11-10) | — | 12.0a, 12.1 | S / S |
 | 12.3 | `wp/site-identity.ts`: states, probes, web probe and verdict file, `asTransportUser` (done 2026-11-10) | 12.2 | 12.0b | M / H |
@@ -325,22 +325,58 @@ Facts found (2026-11-10, both twins):
 - A `'` in `wp core install --admin_password` makes that login fail over the web;
   `wp user update --user_pass` with the same value logs in. Hence the twins' password charset.
 
-### 12.0b — Compose, scripts, overlays, docs
+### 12.0b — Compose, scripts, overlays, docs (done 2026-11-10)
 
-- `docker-compose.yml`: containers `wpme-ssh-apache`, `wpme-ssh-nginx`; SSH on fixed, configurable
-  high ports.
-- A throw-away key in `docker/ssh-cells/.keys/` (git-ignored).
-- npm scripts `env:cells:up`, `env:cells:down`, `env:cells:reset -- <apache|nginx> <variant>`.
-- `env:cells:up` writes git-ignored overlays (`runAs` omitted until 12.4 lands, then `"auto"`):
-  - BackWPup `sites.twins.json`: `pro@twin-apache` and `pro@twin-nginx`, `edition: "pro"`;
-  - WP Rocket `sites.twins.json`: `twin-apache` and `twin-nginx`.
-- `env:cells:down` removes containers, volumes, overlays and the key.
-- CI: `.github/workflows/ssh-twins.yml` (`workflow_dispatch`, plus pushes touching
-  `src/common/wp/**`, `src/common/setup/**`, `docker/ssh-cells/**`) runs the twin specs
-  (`E2E_SSH_TWINS=1`). In scope; the main CI is unchanged.
-- Docs: configuration.md "SSH twins"; README, one line; AGENTS.md NPM commands and structure.
-- Done: `npm run healthcheck` passes on both twins in `legacy-777` with today's code; the CI
-  workflow runs green once.
+Usage and settings: [configuration.md → SSH twins](../guides/configuration.md#ssh-twins). What later
+phases use:
+- `npm run env:cells:up` (key, build, free-port check, `compose up --wait`, host-side port proof,
+  overlays, a `loadSites` check), `env:cells:reset -- <apache|nginx> <variant>` (~6 s),
+  `env:cells:down [-- --force] [-- --purge-key]` (overlays, containers, volumes; images kept).
+  `docker/ssh-cells/cells.sh` + `docker-compose.yml` (project `wpme-ssh`).
+- Overlays: `ssh` to `127.0.0.1:2210` (apache) / `:2211` (nginx) as `ubuntu`, `rootDir`
+  `/var/www/site/public`, site `http://localhost:8110` / `:8111`, `runAs` absent. **12.4 adds
+  `"runAs": "auto"`** in `cells.sh`'s `write_overlays`.
+- Twin specs: gate and sites in `src/common/__fixtures__/ssh-twins.ts` (`sshTwinsEnabled`,
+  `TWIN_CELLS`, `twinSite`); first spec `src/common/setup/ssh-twins.spec.ts` (`verifySite` on all four
+  cells). A spec needing a variant resets the twin itself (`docker exec wpme-ssh-<stack>
+  /opt/twin/site.sh <variant>`) and puts `legacy-777` back.
+- CI: `.github/workflows/ssh-twins.yml` builds both images with `docker/build-push-action` (GitHub
+  layer cache per stack), `env:cells:up` with `TWIN_SKIP_BUILD=1`, then the twin specs and
+  `npm run healthcheck`; `env:cells:down` always.
+
+Decisions:
+- **`transport.port`** (`ssh` only, whole number 1–65535, default 22): the twins share a host, and no
+  port existed. Part of `connectionKey`/`targetKey`/`installKey` and of `describeTarget`
+  (`user@host:port`), since both twins have one host and root.
+- A compose project apart from `docker/docker-compose.yml`: `env:down` never removes the twins.
+- **Deviation: the key is per user, not `docker/ssh-cells/.keys/`** —
+  `~/.local/share/wp-media-e2e/ssh-twins/` (`TWIN_KEY_DIR`). The twins' names are fixed, so every
+  checkout shares one set; a per-checkout key made a second checkout's `up` recreate them and break
+  the first's overlays (measured). Containers carry their creating checkout
+  (`wpme.ssh-twins.checkout`, physical path); another checkout's `up` never builds (shared tags) and
+  refuses a missing twin, a `config-hash` label unlike `compose config --hash` or an image unlike its
+  tag's (not `--dry-run`'s text: `COMPOSE_PROGRESS=quiet|json` hid a recreate), its `down` refuses
+  without `--force`; `--purge-key` alone removes the key. The key folder is used or purged only when
+  `cells.sh` made it (marker `.wpme-ssh-twins` + key comment `wpme-ssh-twins`): never `~/.ssh`.
+- Free ports checked on `127.0.0.1` and `::1`, the site on `localhost` and `127.0.0.1`: macOS resolves
+  the overlays' `localhost` to `::1` first, so a `::1`-only listener answered the runs (measured).
+- Ports on `127.0.0.1` only; overlays 0600 (they hold the password).
+- Overlays alone (no `sites.json`) replace the example: every run then sees only the twin cells
+  (measured: `E2E_CELL=twin-nginx npm run test:wp-rocket -- --grep @noauth` passes against the twin).
+  CI's smoke has no overlay, so it is unchanged.
+
+Verified 2026-11-10 (macOS arm64, Docker Compose 5.5): `env:cells:up` from clean (both builds, ~2.5 min;
+again ~3 s); healthcheck 4/4 in `legacy-777` (WP Rocket `twin-apache`/`twin-nginx`, BackWPup
+`pro@twin-apache`/`pro@twin-nginx`, 8/8 checks each); twin spec 4/4 (a wrong port in an overlay fails
+it); `reset -- nginx site` then `legacy-777`; `env:cells:down` leaves nothing. After the audit fixes
+(2026-11-11, ports 2230/2231/8130/8131): a second checkout's `up` keeps both containers (same IDs;
+its rebuilt images get new IDs, compose keeps the twins) and both checkouts' healthchecks pass 4/4;
+its `up` with another password and its `down` both refuse; a taken port fails `up` naming it, and
+with that check bypassed the host-side proof fails naming the port (and the twin's port stayed
+unreachable after the listener left, though compose reported it healthy); a `sites.json` clash
+removes the overlays and prints the loader's message; `down` with Docker unreachable (a stub `docker`
+failing `info`) removes the overlays (and the key with `--purge-key`), exit 1. **Open:** the workflow's
+first green run on GitHub (done criterion; run by the supervisor on push).
 
 ### 12.1 — ssh command line (done 2026-11-10)
 

@@ -96,6 +96,12 @@ export type RunAs = "auto" | `${string}:${string}` | false;
 export interface SshTransport extends TransportBase {
   readonly mode: "ssh";
   readonly host: string;
+  /**
+   * The SSH server's TCP port (1–65535). Absent means 22, and a declared 22 is dropped at load, so
+   * both key one connection. Lets one host serve several sites, such as the SSH twins
+   * (`npm run env:cells:up`), which publish theirs on high local ports.
+   */
+  readonly port?: number;
   readonly username: string;
   readonly privateKeyPath: string;
   readonly rootDir: string;

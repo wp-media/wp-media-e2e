@@ -1,0 +1,58 @@
+# The SSH twins: Docker copies of the apache and nginx cells, reached over the `ssh` transport.
+#
+# A compose project of its own (`wpme-ssh`), apart from the local-WordPress one (`docker/docker-compose.yml`,
+# project `wpme`): `env:down` must never remove the twins, nor `env:cells:down` the docker sites, and the
+# two never share a port. Run through `npm run env:cells:up|down|reset` (cells.sh), which generates the
+# SSH key, passes its public half in, waits for both twins and writes the sites overlays.
+#
+# One twin set per machine, shared by every checkout (cells.sh's header): the label names the checkout
+# that created it, and cells.sh keeps it as it is, since a changed label, like any changed setting,
+# recreates the container.
+#
+# Every port is published on 127.0.0.1 only. A site's HTTP port is published as <port>:<port>: the twin
+# listens on 80 and on TWIN_HTTP_PORT, so its URL works from the host and from inside the container
+# (WordPress's loopback requests, the nginx twin's system cron).
+name: wpme-ssh
+
+x-twin: &twin
+  restart: unless-stopped
+  # start.sh stops PHP and the web server at once and the database last; ~2 s, kept generous.
+  stop_grace_period: 30s
+  labels:
+    wpme.ssh-twins.checkout: ${TWIN_CHECKOUT:-}
+
+x-twin-env:
+  &twin-env # Set by cells.sh from the shared key's public half; empty only for `down`, which needs none.
+  TWIN_AUTHORIZED_KEY: ${TWIN_AUTHORIZED_KEY:-}
+  TWIN_ADMIN_USER: ${TWIN_ADMIN_USER:-admin}
+  TWIN_ADMIN_PASSWORD: ${TWIN_ADMIN_PASSWORD:-twin-admin-password}
+  TWIN_VARIANT: ${TWIN_VARIANT:-legacy-777}
+
+services:
+  twin-apache:
+    <<: *twin
+    build:
+      context: .
+      dockerfile: Dockerfile.apache
+    image: wpme-ssh-apache:local
+    container_name: wpme-ssh-apache
+    environment:
+      <<: *twin-env
+      TWIN_HTTP_PORT: ${TWIN_APACHE_HTTP_PORT:-8110}
+    ports:
+      - "127.0.0.1:${TWIN_APACHE_SSH_PORT:-2210}:22"
+      - "127.0.0.1:${TWIN_APACHE_HTTP_PORT:-8110}:${TWIN_APACHE_HTTP_PORT:-8110}"
+
+  twin-nginx:
+    <<: *twin
+    build:
+      context: .
+      dockerfile: Dockerfile.nginx
+    image: wpme-ssh-nginx:local
+    container_name: wpme-ssh-nginx
+    environment:
+      <<: *twin-env
+      TWIN_HTTP_PORT: ${TWIN_NGINX_HTTP_PORT:-8111}
+    ports:
+      - "127.0.0.1:${TWIN_NGINX_SSH_PORT:-2211}:22"
+      - "127.0.0.1:${TWIN_NGINX_HTTP_PORT:-8111}:${TWIN_NGINX_HTTP_PORT:-8111}"

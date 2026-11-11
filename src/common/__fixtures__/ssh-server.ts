@@ -625,7 +625,7 @@ type Connect = (
 ) => Promise<NodeSSH>;
 
 /**
- * Points every node-ssh connection at a local port: a transport has no port of its own, and its host
+ * Points every node-ssh connection at a local port, whatever port a transport declares; its host
  * is never resolved.
  *
  * @param target - called per connection: the port, plus any config to override (keepalives…).
