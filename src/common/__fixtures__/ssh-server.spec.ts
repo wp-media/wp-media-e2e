@@ -129,6 +129,44 @@ test("the fake sudo records the call and runs the command after --, skipping -u 
   ]);
 });
 
+test("the fake sudo exports the -u and -g values it was given to the command it runs", async () => {
+  const asked = await exec(server.transport(), "sudo", [
+    "-n",
+    "-u",
+    "#33",
+    "-g",
+    "www data",
+    "--",
+    "sh",
+    "-c",
+    'printf "%s|%s" "$E2E_FAKE_SUDO_USER" "$E2E_FAKE_SUDO_GROUP"',
+  ]);
+  const plain = await exec(server.transport(), "sh", [
+    "-c",
+    'printf "%s|%s" "${E2E_FAKE_SUDO_USER-unset}" "${E2E_FAKE_SUDO_GROUP-unset}"',
+  ]);
+
+  expect(asked.stdout).toBe("#33|www data");
+  expect(plain.stdout).toBe("unset|unset");
+});
+
+test("the commands' dd takes conv=excl, whatever the runner's own dd is", async () => {
+  const path = join(server.root, "excl-check");
+  const write = () =>
+    exec(server.transport(), "sh", [
+      "-c",
+      'printf x | dd of="$1" conv=excl status=none',
+      "sh",
+      path,
+    ]);
+  try {
+    await expect(write()).resolves.toMatchObject({ exitCode: 0 });
+    await expect(write()).resolves.toMatchObject({ exitCode: 1 });
+  } finally {
+    rmSync(path, { force: true });
+  }
+});
+
 test("a denied fake sudo refuses the way sudo -n without a rule does, running nothing", async () => {
   server.denySudo(true);
   const marker = join(server.home, "ran-as-root");

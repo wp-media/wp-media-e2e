@@ -46,8 +46,8 @@ src/
 │   ├── pages/              # cross-product page objects (plugins, site-health) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm + warm-lines.ts its output, pin)
-│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/), raw Allure results, a stub Allure CLI and a stop at a chosen check (allure.ts), a FIFO's blocked reader released, or fed chunk by chunk, within a deadline (fifo.ts), a `.tar.gz` listed from its raw headers (tar-listing.ts), an in-process SSH server that runs what it is sent, with a recording fake `sudo` (ssh-server.ts)
-│   └── wp/                 # WordPress over WP-CLI (exec, php, staging, plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
+│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/), raw Allure results, a stub Allure CLI and a stop at a chosen check (allure.ts), a web server serving the identity probe (probe-web-server.ts), a FIFO's blocked reader released, or fed chunk by chunk, within a deadline, or a FIFO tapped to prove nothing was written through a path (fifo.ts), a `dd` taking `conv=excl` where the runner's (BSD) lacks it (excl-dd.ts), a `.tar.gz` listed from its raw headers (tar-listing.ts), an in-process SSH server that runs what it is sent, with a recording fake `sudo` (ssh-server.ts), a shell command that dies with its spawner even on SIGKILL (tether.ts; `php -S` and the SSH server's commands)
+│   └── wp/                 # WordPress over WP-CLI (exec, php, staging, plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors; site-identity + web-identity + run-as-argv: who site commands run as, not wired yet)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
     └── <product>/
@@ -483,6 +483,11 @@ automatically, and that verification **must not** be skipped. Mirrored as a comm
   survived elevated; `transport.elevate: false` refuses elevation) and `ProductConfig.siteDbResidue`
   (options, tables, roles, capabilities, `wp/db-residue.ts`; never elevated, multisite refused). Both
   verified by re-reading.
+- **Site identity** ([`wp/site-identity.ts`](src/common/wp/site-identity.ts), not wired into exec
+  yet): a probe that throws is rethrown, never answered with a fallback (one call would run as
+  another user); the web probe file is constant PHP, random-named, created with `O_EXCL` (`dd conv=excl`, never
+  `set -C`, which writes through a symlink to a FIFO), removed in `finally`
+  ([details](docs/architecture/wordpress-automation.md#site-identity-wpsite-identityts)).
 - **Debug log** ([`wp/log.ts`](src/common/wp/log.ts)): `clearDebugLog` in a `Before`, `scanDebugLog`
   (`{ raw, fatals, warnings, notices }`; WordPress booted with no plugin or theme, so a broken one
   cannot write into the log it reads; a direct read when even that fails) in an
@@ -634,6 +639,9 @@ this file goes in the right `docs/` file, linked from the [Documentation map](#d
 - The debug-log API (`readDebugLog`, `clearDebugLog`, `scanDebugLog`, `ScanDebugLogOptions`).
 - Ownership (`ownership.ts`: `planOwnership`, `normalizeOwnership`, the grant rule,
   `transport.fileOwner`) and path guards (`paths.ts`, `pathInsideRoot`).
+- Site identity (`site-identity.ts`: states, `decideIdentityState`, `resolveSiteIdentity`,
+  `asTransportUser`; `web-identity.ts`: the web probe, its sweep, `site-identity.json`;
+  `run-as-argv.ts`: the sudo wrapper).
 - Residue (`residue.ts`: `parseResidueDeclaration`, `SiteResidueFamily`, `resolveSiteResidue`,
   `prepareResolvedDataDirs`, `isDeclaredResidue`) and the footprint sweep (`db-residue.ts`:
   `SiteDbResidue`, `findSiteDbResidue`, `removeSiteDbResidue`, `PROTECTED_OPTIONS`, `PROTECTED_TABLES`,

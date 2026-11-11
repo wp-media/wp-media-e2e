@@ -1,6 +1,6 @@
 # Phase 12 — Run as the site: the web server's identity for every site command
 
-Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.1 and 12.2 done 2026-11-10. Parent:
+Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.1, 12.2 and 12.3 done 2026-11-10. Parent:
 [e2e-modernization-plan.md](e2e-modernization-plan.md) (§3 phase table). Reverses that plan's §8.2
 rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of WP Rocket's port
 ([phase-6 plan §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket)).
@@ -10,7 +10,7 @@ rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of 
 - **Goal:** what the suite does on a site should look as if the website did it.
   - Over `ssh`, every site command runs as the web server's user and group. That is the docroot
     owner, once the pre-flight has verified it is who PHP runs as:
-    `sudo -n -u <user> -g <group> -- /bin/sh -c 'umask "$0" && cd -- "$1" && shift && exec "$@"' 0022 <root> <cmd> …`.
+    `sudo -n -u <user> -g <group> -- /bin/sh -c 'umask "$1" && cd -- "$2" && shift 2 && exec "$@"' e2e-run-as 0022 <root> <cmd> …`.
   - Every `wp` call through `wpCli` adds `--user=<the site's WordPress login>`.
 - **Operator decision (2026-11-10):** we control the servers. Docroots are chowned to
   `<web user>:<web group>`, and the SSH user has passwordless sudo, plus `Defaults:<ssh user>
@@ -119,7 +119,7 @@ the checks to repeat on the twins. Re-measure when in doubt.
 | State | When | Commands run as | Reported |
 | --- | --- | --- | --- |
 | `site` | `ssh`; `runAs` is `"auto"` (owner verified as the web identity) or `"user:group"`; the run probe passes | identity, via sudo + wrapper | ✓ "runs as `<user>:<group>`, umask `<m>`" |
-| `same-user` | mode `docker`/`local` (checked first: `effectiveRunAs` is `undefined` there), or the transport user already is the identity | itself (no sudo); umask as today | ✓ |
+| `same-user` | mode `docker`/`local` (checked first: `effectiveRunAs` is `undefined` there), or the transport user already is the identity (`auto`: only once verified — else `owner-not-web`/`unverified`) | itself (no sudo); umask as today | ✓ |
 | `fallback` | `runAs` asks for it but there is a reason (below) | transport user + today's hand-over | ⚠ the reason and its fix |
 | `disabled` | `runAs: false` (default until 12.11), or a transport from `asTransportUser` | transport user + today's hand-over | note (silent for `asTransportUser`) |
 
@@ -137,7 +137,7 @@ Fallback reasons, each with its fix:
   - Numeric ids become `#uid`/`#gid` for sudo.
   - Root (uid 0 or `root`) is refused: a config error at load, `fallback/no-identity` when detected.
 - **`auto` needs the pre-flight's verdict.** The auth setup (and the healthcheck) probe the web
-  server over HTTP (12.3) and write `site-identity.json` beside the run's resolved artifacts, keyed
+  server over HTTP (12.3) and write `site-identity.json` in the cell's auth folder, keyed
   by `installKey`: owner, web identity, web umask, verdict.
   - Workers read it. `site` only when the web identity equals the owner.
   - No verdict (e.g. `--no-deps`) → `fallback/unverified`.
@@ -257,7 +257,7 @@ Code never cites this plan; docs may.
 | 12.0b | Compose, npm scripts, sites overlays, docs; optional CI | 12.0a | 12.3 | S / S |
 | 12.1 | ssh command line: our quoting, `cd … &&`; an executing ssh test server (done 2026-11-10) | — | 12.0a, 12.2 | S / M |
 | 12.2 | Config: `runAs`, `umask`, `wpUser` (done 2026-11-10) | — | 12.0a, 12.1 | S / S |
-| 12.3 | `wp/site-identity.ts`: states, probes, web probe and verdict file, `asTransportUser` | 12.2 | 12.0b | M / H |
+| 12.3 | `wp/site-identity.ts`: states, probes, web probe and verdict file, `asTransportUser` (done 2026-11-10) | 12.2 | 12.0b | M / H |
 | 12.4 | Exec wiring: wrapper, `execAsTransport`, probe callers moved, stderr noise | 12.1, 12.3 | — | M / H |
 | 12.5 | Staging through an inbox; staging owned by another identity | 12.4 | 12.6, 12.7 | S / M |
 | 12.6 | `--user=<login>` | 12.4 | 12.5, 12.7 | S / M |
@@ -417,56 +417,103 @@ fields in `types.ts`. No command reads them yet: 12.3 reads `effectiveRunAs`/`ef
 - Nothing serialises a transport (project metadata carries only routing; the orchestrator reads
   `host`), so reports and run facts gain nothing.
 
-### 12.3 — `wp/site-identity.ts`
+### 12.3 — `wp/site-identity.ts` (done 2026-11-10)
 
-- **Pure core:** `decideIdentityState(inputs): IdentityState`, a discriminated union with a
-  `reason`. Inputs: mode, `runAs`, the detected owner, the transport identity, the verdict, the run
-  probe result. Plus `describeIdentityState()` for messages.
-- **Web probe** (`probeWebIdentity(transport, request)`), used by the pre-flight and the
-  healthcheck:
-  1. write `<root>/e2e-identity-<32 hex>.php` through `evalPhp` with `file_put_contents`, mode
-     0644, constant content printing JSON `{euid, egid, user, group, umask, sapi}`. Written as root
-     if the transport user cannot write the root, since the identity is not known yet;
-  2. GET `new URL("e2e-identity-<hex>.php", baseURL + "/")` with a per-site
-     `request.newContext({ baseURL, ignoreHTTPSErrors })` using the same TLS settings as the
-     login;
-  3. delete the file in `finally`;
-  4. sweep `e2e-identity-*.php` older than 1 h first.
-  - A WordPress whose root is not the URL root (WordPress in a subdirectory with `rootDir` above
-    it) gives a 404 → `unverified`.
-- **Verdict file:** `site-identity.json` in the run's folder, written by the auth setup, read by
-  workers (the `resolution.json` pattern). Keyed by `installKey`, never holding credentials.
-- **`resolveSiteIdentity(transport)`**:
-  1. `docker`/`local` → `same-user` (mode first: `effectiveRunAs` is `undefined` there, never `false`);
-  2. `effectiveRunAs(transport) === false` → `disabled`;
-  3. probes as the transport user: owner (`detectSiteOwnership`), transport identity (`id`);
-  4. equal → `same-user`;
-  5. `auto`: the verdict must say the web identity equals the owner, else
-     `fallback/owner-not-web` or `fallback/unverified`;
-  6. the run probe (§2.1).
-  - Memoised per `installKey`; a throw propagates and is not cached.
-  - `resetSiteIdentityCaches()` for specs.
-- `asTransportUser(transport)`: a frozen copy without `wpUser`; on `ssh` also `runAs: false`. On
-  `docker`/`local` (no `runAs` field in their type) it only drops `wpUser`: they stay `same-user`, and
-  `--user` is all that changes. Idempotent.
-- Edge cases: the docroot owned by root; BusyBox `UNKNOWN` names → numeric `#uid`/`#gid`; F8 noise
-  (read the ids from stdout); a probe printing other ids.
-- Tests:
-  - table-driven over every state and reason;
-  - a throw propagates and is not cached;
-  - the exact probe argv;
-  - the probe JSON parser (malformed, extra fields, HTML error page);
-  - URL building with and without a path;
-  - the sweep's age filter;
-  - verdict file round-trip;
-  - `asTransportUser` keeps every other field.
+Three modules, documented in [wordpress-automation.md](../architecture/wordpress-automation.md#site-identity-wpsite-identityts):
+- `wp/site-identity.ts`: `IdentityState` (`site` with `target`/`identity`/`umask`/`sudoNoise`;
+  `same-user` `mode`|`transport-user`; `fallback` `reason`+`detail` (+`sudoNoise` once the run probe
+  ran); `disabled` `config`|`as-transport-user`),
+  `decideIdentityState` (pure: state, or the next probe `site`|`run`), `FALLBACK_REASONS` (what +
+  fix), `describeIdentityState`, `runProbeArgv`, `classifyRunProbe`, `runIdentityFrom`,
+  `resolveSiteIdentity` (memo per `installKey`+`runAs`+`umask`, shared promise, a throw rethrown and
+  dropped), `registerSiteIdentityVerdicts`, `resetSiteIdentityCaches`, `asTransportUser`.
+- `wp/web-identity.ts`: `PROBE_PHP`, `WRITE_SCRIPT`/`ROOT_WRITE_SCRIPT`, `writeFailure`, `probeWebIdentity`, `sweepProbeFiles`, `checkWebIdentity`,
+  `webVerdict`, `writeSiteIdentityFile`/`readSiteIdentityFile`/`parseSiteIdentityFile`.
+- `wp/run-as-argv.ts` (pure, imports nothing of `wp/`): `RUN_AS_SCRIPT`, `RUN_AS_NAME`, `runAsArgv`, `sudoName`/
+  `isSudoName` (`#id` for digits), `withoutSudoNoise`/`hasSudoNoise` (F8) — 12.4's argv, built here so
+  the run probe uses the exact wrapper.
+- `ownership.ts` exports `probeSiteOwnership` (unmemoised, throws); the fake `sudo` exports
+  `$E2E_FAKE_SUDO_USER`/`$E2E_FAKE_SUDO_GROUP` so a fake `id` answers as the identity. Spec fixtures:
+  `probe-web-server.ts` (HTTP/HTTPS, gzip/chunked replies), `excl-dd.ts` (a `conv=excl` `dd` where the
+  runner's, BSD, lacks it; the ssh fixture installs it), `fifo.ts`'s `tapFifo`, `tether.ts` (a
+  spawned shell command SIGKILLed with its group when the spec's worker dies; `php -S`, ssh-server).
+
+Decisions (the plan left them open, or the code showed better):
+- **The probe file is written by `sh -c 'umask 022 && printf "%s" "$1" | dd of="$2" conv=excl
+  status=none'`, not `evalPhp`:** one argv for the transport's user and root (`wp` never runs as root),
+  no WordPress boot, no recursion through the resolver once 12.4 routes `wpCli` through it. Content
+  constant, path an argument. **`O_EXCL`, not `set -C`** (audit): the web user may own the root and
+  plant a symlink between the guards and root's write; dash/bash `set -C` writes through one to a FIFO
+  or device, `dd conv=excl` refuses any existing path (measured, coreutils 9.4). A `dd` without
+  `conv=excl` (BSD, BusyBox 1.37) refuses the operand before opening → `not-writable` naming it, no
+  root retry. Root only when the user's write is refused for permission and elevation is `available`,
+  after both path guards, from inside the root (`cd -P`, `pwd -P` = the guards' resolved root, else
+  exit 3; `O_EXCL` covers the last component only: a root swapped for a symlink was written through
+  before, measured). A failed write but `File exists` is followed by `rm -f` as its writer (`dd` on a
+  full disk leaves an empty file, measured); the user's error stays in the detail. Removal by the
+  writer (a transport-written file is never removed as root); the sweep escalates; a guard refusing a
+  removal is a warning.
+- **`auto` checks the verdict before "the transport's user already is it"** (audit): an SSH user that
+  owns a docroot PHP reaches through its group (`sftp_x:www-data`) is `owner-not-web`/`unverified`,
+  not `same-user`. A declared `runAs` goes through `runAsIdentity` (hand-built `root:root` →
+  `no-identity`, no sudo call) and needs no verdict.
+- `RUN_AS_SCRIPT`'s `$0` is `e2e-run-as`, umask/cwd `$1`/`$2`: dash names the wrapper in its errors
+  (`e2e-run-as: 1: cd: can't cd to …`, measured), never the umask.
+- **The verdict file lives in the cell's auth folder** (`dirs(product, cell).auth`, beside the
+  logins), not the artifacts folder: the artifacts setup wipes that one and runs beside the auth setup.
+  `wp/` takes `(dir, runId)` as arguments (it never imports `run-context.ts`).
+- A verdict counts only for this `RUN_ID` (`stale` otherwise → `unverified`) and only when its owner's
+  uid/gid equal the owner the process reads now (else `unverified`, "owner changed").
+- `same-user` needs user **and** primary group to match (another group would change who else may
+  write). Wanted halves compare by id when known (the owner, or digits), else by name.
+- The run probe is `echo e2e-run-probe && { id || exit 91; } && { wp --info >/dev/null || exit 92; }`:
+  the mark tells "the wrapper got in" from a refusal, and ids are read only after it (a banner cannot
+  supply them). A `stat` name sudo cannot take (`-x`, `#…`, control characters) → `no-identity`.
+- The probe's TLS: the login sets no `ignoreHTTPSErrors`, so neither does the probe (unit-proved with
+  a self-signed server). The body: a declared `Content-Length` past 16 KiB is refused before reading
+  (Playwright 1.63 has already buffered it whole), else its length read; a UTF-8 BOM is accepted.
+- Unmapped web names are omitted from the verdict file and read back as absent (was: whole file
+  `invalid`).
+- Unit-proved `probeWebIdentity` against real PHP (`php -S`, skipped where `php` is absent).
+
+Verified on the twins (2026-11-10, both images, containers removed): `site` (nginx) → probe written as
+root (ubuntu outside the group, 755 root), `fpm-fcgi` www-data 33:33 umask `0022`, `owner-is-web`, state
+`site` through the real sudo; `site` (apache) → `site`; `legacy-777` → `owner-not-web`
+(`sftp_twin(1002):www-data(33)`); `no-sudo` → `no-sudo`; `no-wp` → `no-wp` (`/bin/sh: 1: wp: not
+found`). The sweep removed a 2 h-old root-owned probe (escalated) and kept a fresh one; no allowed
+`COMMAND=` line in the sudo log (`!log_allowed`); no probe file left. After the audit fixes (nginx
+`site`): `owner-is-web` → `site` (`sudoNoise: false`) through the real sudo and the new wrapper; with
+`readlink` slowed 0.8 s and a `www-data` watcher planting a symlink to a root-read FIFO, 3/3 planted,
+3/3 `not-writable` (`dd: … File exists`), 0 bytes through; the old `set -C` line, same plant, delivered
+its payload.
+
+Left for later sub-phases:
+- **12.4:** every probe here uses `exec` (transport user today): move them to `execAsTransport` —
+  `site-identity.ts` (`stat`, `id`, the run probe) and `web-identity.ts` (`sh` write, `find`, `rm`).
+  `site-identity.ts` imports `exec.ts`, so wiring the resolver into `dispatch` needs the cycle broken
+  (e.g. `dispatch` takes the resolver by registration, or `execAsTransport` lives in a module both
+  import). Use `runAsArgv`/`withoutSudoNoise` from `run-as-argv.ts`.
+- **12.9:** in the auth setup, after the gates: `checkWebIdentity(site, request)` per real site →
+  `writeSiteIdentityFile(dirs(product, cell).auth, RUN_ID, verdicts)` +
+  `registerSiteIdentityVerdicts`; workers (a worker fixture, before any site command) read it with
+  `readSiteIdentityFile` and register `read` verdicts, warning once on `missing`/`stale`/`invalid`;
+  the healthcheck registers its own in memory. Print identity names and details through
+  `printableLines` (names come from the host). The web-umask warning compares `verdict.web.umask` with
+  `effectiveUmask`.
+  - **Budget** `PROBE_TIMEOUT_MS` (15 s) plus the probe's write, sweep and removal into the setup's
+    timeout (additively, like `BEST_EFFORT_ALLOWANCE_PER_SITE_MS`): a setup timing out mid-GET skips
+    the `finally`, leaving the probe servable (uid/gid/names/umask/SAPI behind a 128-bit name) until
+    the next probe's hour-old sweep.
+  - The `/etc/hosts` fix reads `sudoNoise` off the `site`/`fallback` state (no re-probe).
+  - `not-writable` from a `dd` lacking `conv=excl` (BSD/BusyBox host; dd's line is in `detail`): say so.
 
 ### 12.4 — Exec wiring
 
 - The identity's halves come from `runAsIdentity(runAs, context)` (12.2: re-checks the load rule — no
   root, no id above 4294967294 — and returns `{ user, group }`), numeric ones then prefixed `#`.
 - `runAsArgv(identity, umask, cwd, file, args)` (pure) returns
-  `["sudo", "-n", "-u", u, "-g", g, "--", "/bin/sh", "-c", 'umask "$0" && cd -- "$1" && shift && exec "$@"', umask, cwd, file, ...args]`.
+  `["sudo", "-n", "-u", u, "-g", g, "--", "/bin/sh", "-c", 'umask "$1" && cd -- "$2" && shift 2 && exec "$@"', "e2e-run-as", umask, cwd, file, ...args]`
+  (built in 12.3: `RUN_AS_SCRIPT`, `RUN_AS_NAME` — `$0` names the wrapper in the shell's errors).
   - The script is a constant; values only travel as positional arguments.
   - The outer command has no `cd`.
 - `dispatch`:

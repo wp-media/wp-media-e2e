@@ -311,6 +311,27 @@ async function probeIdentity(
 }
 
 /**
+ * The ownership this site's WordPress install uses, unmemoised: `wp-content`'s, else the root's (a
+ * relocated `wp-content`).
+ *
+ * For a caller that must tell "could not answer" from "the transport failed", which
+ * {@link detectSiteOwnership} folds together.
+ *
+ * @param transport - the target site's transport.
+ * @returns the ownership, or `undefined` when neither path could be read.
+ * @throws Error if the transport failed.
+ */
+export async function probeSiteOwnership(
+  transport: Transport,
+): Promise<SiteOwnership | undefined> {
+  const root = await wpRootDir(transport);
+  return (
+    (await probeOwnership(transport, posix.join(root, "wp-content"))) ??
+    (await probeOwnership(transport, root))
+  );
+}
+
+/**
  * The ownership this site's WordPress install already uses, memoised per **install**.
  *
  * Probes `wp-content` — the directory plugins actually write into — and falls back to the
@@ -329,10 +350,7 @@ export async function detectSiteOwnership(
 
   let found: SiteOwnership | undefined;
   try {
-    const root = await wpRootDir(transport);
-    found =
-      (await probeOwnership(transport, posix.join(root, "wp-content"))) ??
-      (await probeOwnership(transport, root));
+    found = await probeSiteOwnership(transport);
   } catch {
     // Not cached. A throw means the *transport* failed, not that this site has no readable
     // ownership — remembering it would let one dropped connection disable normalisation for every

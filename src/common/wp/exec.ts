@@ -53,7 +53,8 @@ import type {
  * Elevation is deliberately **narrow**, because a test suite holding root is only safe while what it
  * does with it is boring:
  *
- *  - **Only ever housekeeping.** Removing leftover files, clearing `debug.log`. Never `wp`: WP-CLI
+ *  - **Only ever housekeeping.** Removing leftover files, clearing `debug.log`, and the pre-flight's
+ *    short-lived identity probe in a root the transport's user cannot write. Never `wp`: WP-CLI
  *    refuses to run as root without `--allow-root`, and files it created as root would be unwritable
  *    by the web server afterwards — the suite would break the site it is testing. {@link wpCli} has
  *    no way to request it, which is what makes that rule structural rather than a convention.
@@ -797,7 +798,8 @@ export async function execElevated(
     console.info(
       `[wp/exec] using elevated privileges on ${describeTarget(transport)} for housekeeping the ` +
         "transport's user is not permitted to do — removing files the web server owns, reading its " +
-        "debug.log, or keeping a copy of wp-content around a command that rewrites it. Only " +
+        "debug.log, keeping a copy of wp-content around a command that rewrites it, or dropping " +
+        "the pre-flight's short-lived identity probe into the WordPress root. Only " +
         "housekeeping is ever elevated; WP-CLI never is.",
     );
   }
@@ -878,6 +880,8 @@ export async function assertResolvedInsideRoot(
  * @param targets - the absolute paths privileged commands would act on; none does nothing.
  * @param root - the site's WordPress root, as the transport resolved it.
  * @param describeRejection - builds the message from the rule that was broken.
+ * @returns the root as it resolved for the check (`undefined` with no targets): a caller re-checking
+ * it at the moment it acts compares against this.
  * @throws Error built by `describeRejection`, for the first target that fails.
  */
 export async function assertAllResolvedInsideRoot(
@@ -885,8 +889,8 @@ export async function assertAllResolvedInsideRoot(
   targets: readonly string[],
   root: string,
   describeRejection: (reason: string) => string,
-): Promise<void> {
-  if (targets.length === 0) return;
+): Promise<string | undefined> {
+  if (targets.length === 0) return undefined;
   const realRoot = await resolveOnTarget(transport, root);
   for (const target of targets) {
     const realTarget = await resolveDeepestExisting(transport, target, root);
@@ -907,6 +911,7 @@ export async function assertAllResolvedInsideRoot(
       );
     }
   }
+  return realRoot;
 }
 
 /**
