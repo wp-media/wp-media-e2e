@@ -14,7 +14,8 @@ A [`Transport`](../../src/common/config/types.ts), discriminated on `mode`:
 | `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir`, `stagingDir?`, `elevate?`, `fileOwner?`, `runAs?`, `umask?` | `node-ssh` `execCommand`, one line we build (below). |
 
 Every loaded transport also carries `wpUser`, resolved-only (the site's `username`; a sites file may
-not set it); `runAs`/`umask` and `wpUser` are read by no command yet
+not set it). No command reads `runAs`/`umask`/`wpUser` yet: `runAs`/`umask` decide only the
+[site identity](#site-identity-wpsite-identityts) state, which no command uses yet
 ([configuration.md](../guides/configuration.md#transport-modes-transport), Phase 12).
 
 - A command is a **file + args array**, never a shell string: no interpolation, no injection.
@@ -94,7 +95,8 @@ site keeps a database dump from every scenario.
 Limits:
 
 - **Housekeeping only** — removing leftovers, clearing `debug.log`, copying `wp-content` around a
-  command under test that rewrites it. **Never `wp`**: WP-CLI refuses root without `--allow-root`, and
+  command under test that rewrites it, writing and removing the pre-flight's identity probe in a root
+  the transport's user cannot write ([site identity](#site-identity-wpsite-identityts)). **Never `wp`**: WP-CLI refuses root without `--allow-root`, and
   files it made as root would be unwritable by the web server. `wpCli` cannot request elevation, so
   the rule is structural.
 - **Never on a path a scenario asserts against**: it cannot make a product pass, only removes what the product left, after the
@@ -588,6 +590,74 @@ one `ubuntu@host`).
 **Linux only.** `stat -c` and `id` are read in GNU form; BusyBox (`wordpress:cli`) differs on unmapped
 ids (`stat -c %U` prints `UNKNOWN`, `id` bare ids) and is handled. Each read is confined to one
 function, so a BSD branch would stay local.
+
+## Site identity ([`wp/site-identity.ts`](../../src/common/wp/site-identity.ts))
+
+Who a site's commands run as, once per install per process. Built, not wired yet: no command runs as
+another identity until the exec layer reads the state (Phase 12, [plan](../plans/phase-12-site-identity-plan.md)).
+
+| State       | When                                                                                   | Runs as                 |
+| ----------- | -------------------------------------------------------------------------------------- | ----------------------- |
+| `site`      | `ssh`, `runAs` `"auto"` (owner verified as PHP's identity) or `"user:group"`, run probe passed | the identity, via sudo  |
+| `same-user` | `docker`/`local` (`mode`), or the transport's user already is the identity (`auto`: verified) | the transport's user    |
+| `fallback`  | asked for, not possible: `reason` + `detail` (`FALLBACK_REASONS` gives each its fix)    | the transport's user    |
+| `disabled`  | `runAs: false` (`config`), or an `asTransportUser` copy (`as-transport-user`)           | the transport's user    |
+
+- `decideIdentityState(inputs)` is the rule, pure: it returns the state or the next probe it needs
+  (`site`: owner via `probeSiteOwnership` + `id`; `run`: the run probe). `resolveSiteIdentity`
+  runs those probes as the transport's user and memoises per `installKey` + `runAs` + `umask`
+  (concurrent callers share one). **A probe that throws is rethrown, never answered or cached.**
+  `describeIdentityState` words a state; `resetSiteIdentityCaches` is for specs.
+- **The run probe** (`runProbeArgv`): the exact wrapper of
+  [`run-as-argv.ts`](../../src/common/wp/run-as-argv.ts) — `sudo -n -u <u> -g <g> -- /bin/sh -c
+'umask "$1" && cd -- "$2" && shift 2 && exec "$@"' e2e-run-as <umask> <root> …` (numeric halves `#id`;
+  `$0` names the wrapper in the shell's errors) — running
+  `echo e2e-run-probe && id && wp --info` in the root, from `/`. `classifyRunProbe` drops sudo's
+  `unable to resolve host` lines (`withoutSudoNoise`), reads ids only after the mark, and maps: a
+  `sudo:` refusal or no sudo → `no-sudo`; `sudo: unknown user|group` → `no-identity`; no mark
+  otherwise (the wrapper's `cd`) → `no-root-access`; exit 92 → `no-wp`; other ids → `probe-mismatch`;
+  uid/gid 0 → `no-identity`. `sudoNoise` (on the outcome, and on the `site`/`fallback` state it
+  decides) records the noise line for a report's `/etc/hosts` fix.
+- `auto` needs the pre-flight's verdict, given to the process with `registerSiteIdentityVerdicts`
+  (forgets states already resolved for those installs): `owner-is-web` for the owner read now, else
+  `owner-not-web` / `unverified` — checked **before** "the transport's user already is it", so an SSH
+  user owning a docroot PHP reaches through its group falls back. The owner root (uid or gid 0) or
+  unreadable → `no-identity`. A declared `runAs` is re-checked by `runAsIdentity` (a hand-built
+  `root:root` → `no-identity`, no sudo call).
+- `asTransportUser(transport)`: a frozen copy without `wpUser`, `runAs: false` over `ssh`;
+  idempotent; its state is `disabled/as-transport-user` and never reads the original's cache.
+
+**The web probe** ([`wp/web-identity.ts`](../../src/common/wp/web-identity.ts)) asks the web server
+who PHP runs as: `probeWebIdentity(site, request)` sweeps leftovers, writes
+`<root>/e2e-identity-<32 hex>.php` (constant `PROBE_PHP`; `WRITE_SCRIPT`: `printf | dd conv=excl`,
+umask 022 → `0644`; as root only when the transport's user's write was refused for permission, through
+the path guards; `elevate: false` → none), GETs it with its own `request.newContext({ baseURL })` (the
+login's TLS: verified), removes it in a `finally` as its writer (a file the transport's user wrote is
+never removed as root). A failed write is followed by `rm -f` as its writer (a full disk fails `dd`
+after its open created the file), unless it failed on `File exists`; the user's own error stays in
+the detail. **`O_EXCL`, never `set -C`:** the web server's user may own the root and plant a symlink
+between the guards and root's write; `dd conv=excl` refuses any existing last component, a symlink
+included, while dash/bash's `set -C` writes through one to a FIFO or device (measured, Ubuntu 24.04).
+For the parents, root's write (`ROOT_WRITE_SCRIPT`) runs `cd -P` into the root, refuses (exit 3)
+unless `pwd -P` is the root the guards resolved, and writes `./<name>` (measured: a root swapped for a
+symlink is refused; residual: another directory renamed onto the resolved path, which needs write
+access to the root's parent). A `dd` without `conv=excl` (BSD `unknown conversion excl`, BusyBox 1.37
+`invalid argument 'excl' to 'conv'`, older GNU `invalid conversion`) refuses the operand before
+opening: `not-writable` naming that, never retried as root. Result: `identified` (`euid`, `egid`, names, umask, SAPI)
+or `unverified` with a reason — `not-writable`, `unreachable`, `not-served` (any non-200; a 404 is
+WordPress below the URL root), `not-probe-output` (also a declared `Content-Length` or a body past
+16 KiB; a UTF-8 BOM before the JSON is accepted), `no-posix`. Throws only for a transport failure, a
+guard refusing root's **write**, a bad `options.name`, or a `baseURL` that is no URL (`TypeError`,
+before anything is written); a removal that fails or a guard refuses is a warning. The sweep
+(`sweepProbeFiles`): `find <root>/ -mindepth 1 -maxdepth 1 -type f -name … -mmin +60`, each name
+re-checked against `PROBE_FILE_NAME`, removed by `root/<name>` as the transport's user, then as root
+(through the guards) for what that user may not remove.
+`checkWebIdentity` = owner + probe → `webVerdict` (`owner-is-web` when `euid`/`egid` equal the
+owner's uid/gid). `writeSiteIdentityFile(dir, runId, verdicts)` / `readSiteIdentityFile(dir, runId)`:
+`site-identity.json` (`0600`, atomic rename) keyed by `installKey` (user, host, key **path**, root —
+no secret; unmapped names are omitted and read back as absent); a reader gets `read`, `missing`,
+`stale` (another `RUN_ID`) or `invalid` (unreadable included), never a throw.
+The module takes the folder and run id as arguments: `wp/` never imports `run-context.ts`.
 
 ## Path guards ([`wp/paths.ts`](../../src/common/wp/paths.ts))
 

@@ -1,4 +1,5 @@
-import { constants } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { closeSync, constants, openSync, readSync } from "node:fs";
 import { open, type FileHandle } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -65,4 +66,49 @@ export async function openFifoWriter(
     }
     await delay(RETRY_MS);
   }
+}
+
+/** A FIFO with this process holding its read end: what {@link tapFifo} returns. */
+export interface FifoTap {
+  /** Everything written into the FIFO so far, as text; `""` when nothing was. */
+  drain(): string;
+  /** Closes the read end. */
+  close(): void;
+}
+
+/**
+ * Creates a FIFO at `path` (`mkfifo`) and holds its read end open, non-blocking, so a writer's `open`
+ * returns at once and what it writes waits in the pipe — never blocking a writer, never left behind
+ * as a process. For proving that nothing was written through a path that leads to it.
+ *
+ * @param path - where to create the FIFO; must not exist.
+ * @returns the tap; the caller closes it.
+ * @throws Error when `mkfifo` fails.
+ */
+export function tapFifo(path: string): FifoTap {
+  const made = spawnSync("mkfifo", [path], { stdio: "ignore" });
+  if (made.status !== 0) throw new Error(`mkfifo ${path} failed.`);
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  return {
+    drain() {
+      const chunks: Buffer[] = [];
+      const buffer = Buffer.alloc(65_536);
+      for (;;) {
+        let read: number;
+        try {
+          read = readSync(fd, buffer);
+        } catch (error) {
+          // EAGAIN: open for writing by someone, but empty for now.
+          if (errnoCode(error) === "EAGAIN") break;
+          throw error;
+        }
+        if (read === 0) break;
+        chunks.push(Buffer.from(buffer.subarray(0, read)));
+      }
+      return Buffer.concat(chunks).toString("utf8");
+    },
+    close() {
+      closeSync(fd);
+    },
+  };
 }

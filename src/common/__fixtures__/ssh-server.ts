@@ -1,4 +1,4 @@
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, type ChildProcess } from "node:child_process";
 import {
   closeSync,
   mkdirSync,
@@ -18,6 +18,8 @@ import { join } from "node:path";
 import { NodeSSH } from "node-ssh";
 
 import type { SshTransport } from "../config/types";
+import { installExclDd } from "./excl-dd";
+import { killTethered, spawnTethered } from "./tether";
 import { removeTempDir } from "./temp-dir";
 
 /**
@@ -30,7 +32,8 @@ import { removeTempDir } from "./temp-dir";
  * Everything lives in one temporary folder, removed by {@link SshTestServer.close} — and when
  * {@link startSshServer} fails part-way; every command is killed (its whole process group) when its
  * channel closes, when it outlives its time limit ({@link COMMAND_TIMEOUT_MS} by default), or at
- * `close`, so a spec can neither hang on one nor leave one behind.
+ * `close` — or when this process dies, even SIGKILLed (`tether.ts`) — so a spec can neither hang on
+ * one nor leave one behind.
  *
  * Not a real server's limits: ssh2 refuses any packet over 35,000 bytes, so a command line longer
  * than about 34 KB fails as `Unable to exec` here, where OpenSSH takes far more.
@@ -147,7 +150,9 @@ export const COMMAND_TIMEOUT_MS = 20_000;
  * A `sudo` standing in for the real one: it appends its whole argv to `$E2E_FAKE_SUDO_LOG` (each
  * argument hex-encoded, so any byte survives), then refuses as `sudo -n` without a rule does —
  * `sudo: a password is required`, exit 1 — while `$E2E_FAKE_SUDO_DENY` exists, and otherwise skips its
- * options (`-n`; `-u`/`-g` and their value) up to `--` and `exec`s the rest as the current user.
+ * options (`-n`; `-u`/`-g` and their value) up to `--` and `exec`s the rest as the current user, with
+ * the `-u`/`-g` values exported as `$E2E_FAKE_SUDO_USER`/`$E2E_FAKE_SUDO_GROUP` so a fake program
+ * (`id`) can answer as the identity asked for.
  */
 const FAKE_SUDO = `#!/bin/sh
 line=
@@ -163,7 +168,8 @@ while [ "$#" -gt 0 ]; do
   case $1 in
     --) shift; break ;;
     -n) shift ;;
-    -u|-g) shift 2 ;;
+    -u) E2E_FAKE_SUDO_USER=$2; export E2E_FAKE_SUDO_USER; shift 2 ;;
+    -g) E2E_FAKE_SUDO_GROUP=$2; export E2E_FAKE_SUDO_GROUP; shift 2 ;;
     *) echo "sudo (fake): unsupported option $1" >&2; exit 1 ;;
   esac
 done
@@ -353,7 +359,8 @@ function createLayout(clientKey: string, tempRoot: string): Layout {
 }
 
 /**
- * Fills a fresh server folder: `bin/` with the fake programs, `home/`, the root, the client key.
+ * Fills a fresh server folder: `bin/` with the fake programs (and a `dd` taking `conv=excl` where the
+ * system's lacks it), `home/`, the root, the client key.
  *
  * @param base - the server's empty temporary folder.
  * @param clientKey - the client's private key, written `0600`.
@@ -376,22 +383,9 @@ function populateLayout(base: string, clientKey: string): Layout {
   writeFileSync(join(layout.bin, PRINT_ARGV_PROGRAM), PRINT_ARGV, {
     mode: 0o755,
   });
+  // The identity probe writes with `dd conv=excl`, which BSD's `dd` lacks.
+  installExclDd(layout.bin);
   return layout;
-}
-
-/**
- * Kills a command's whole process group — what is left of it once it ended too — ignoring a group
- * already gone.
- *
- * @param child - the `sh` started detached, so its pid is its group's.
- */
-function killGroup(child: ChildProcess): void {
-  if (child.pid === undefined) return;
-  try {
-    process.kill(-child.pid, "SIGKILL");
-  } catch {
-    // Already exited: nothing to kill.
-  }
 }
 
 /**
@@ -410,10 +404,10 @@ function runCommand(
   running: Set<ChildProcess>,
   timeoutMs: number,
 ): void {
-  const child = spawn("/bin/sh", ["-c", command], {
+  // Tethered: a killed worker cannot leave a command running (its own timer would die with it).
+  const child = spawnTethered(command, [], {
     cwd: layout.home,
-    detached: true,
-    stdio: ["ignore", "pipe", "pipe"],
+    output: "pipe",
     env: {
       PATH: `${layout.bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
       HOME: layout.home,
@@ -424,7 +418,7 @@ function runCommand(
   running.add(child);
   const stop = (): void => {
     // Once it ended, its pid may be reused: never signalled again.
-    if (running.has(child)) killGroup(child);
+    if (running.has(child)) killTethered(child);
   };
   const timer = setTimeout(stop, timeoutMs);
   // The client went away (a cut link, a disposed connection): nobody is left to answer. The channel
@@ -432,10 +426,10 @@ function runCommand(
   // get no input, so what the client sends (nothing) is drained here.
   stream.once("close", stop);
   stream.resume();
-  child.stdout.on("data", (chunk: Buffer) => {
+  child.stdout?.on("data", (chunk: Buffer) => {
     stream.write(chunk);
   });
-  child.stderr.on("data", (chunk: Buffer) => {
+  child.stderr?.on("data", (chunk: Buffer) => {
     stream.stderr.write(chunk);
   });
   child.on("error", (error) => {
@@ -444,7 +438,7 @@ function runCommand(
   child.on("close", (code, signal) => {
     clearTimeout(timer);
     // Anything it left running in the background goes with it.
-    killGroup(child);
+    killTethered(child);
     running.delete(child);
     stream.exit(signal ?? code ?? 255);
     stream.end();
@@ -611,7 +605,7 @@ async function listen(
       // A connected client keeps `server.close` waiting until it hangs up; ending each first sends
       // it a disconnect, which it answers by closing its side.
       for (const conn of connections) conn.end();
-      for (const child of running) killGroup(child);
+      for (const child of running) killTethered(child);
       await new Promise<void>((resolve) => {
         server.close(() => {
           resolve();
