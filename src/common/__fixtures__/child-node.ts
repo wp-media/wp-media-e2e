@@ -28,7 +28,46 @@ export interface ChildNodeOptions {
   readonly cwd: string;
   /** Variables beyond `PATH` and `HOME`, the only ones it inherits. */
   readonly env?: Readonly<Record<string, string>>;
+  /** Kills the child (SIGTERM) when aborted, e.g. from a test's `afterEach`. */
+  readonly signal?: AbortSignal;
+  /**
+   * Make the child end itself (see {@link LIFELINE_EXIT}) when this process dies — a SIGKILLed or
+   * timed-out worker runs no cleanup, and the time limit's timer dies with it — or when
+   * {@link CHILD_TIMEOUT_MS} has passed. For a child that waits on something only this process makes
+   * happen. Off by default: it adds a timer to the child, which a probe of process state would see.
+   */
+  readonly diesWithParent?: boolean;
 }
+
+/** The exit codes of a child that ended itself: its parent died, or its time ran out. */
+export const LIFELINE_EXIT = { parentGone: 97, timedOut: 98 } as const;
+
+/** How often a {@link ChildNodeOptions.diesWithParent} child looks for its parent. */
+const LIFELINE_POLL_MS = 100;
+
+/**
+ * The code {@link ChildNodeOptions.diesWithParent} puts before a child's body: an unref'd interval
+ * (it never keeps the child alive) that exits once its parent is no longer this process — it was
+ * reparented, this process is gone — or past the deadline. This process's pid is written in, never
+ * read from the child's `process.ppid` at start: a parent killed while the child still loads would
+ * leave it reading its new parent's. It runs between the body's awaits, so a body that blocks
+ * synchronously is bounded by neither; an awaited wait (a polling loop) is.
+ */
+const LIFELINE = `{
+  const parent = ${String(process.pid)};
+  const deadline = Date.now() + ${String(CHILD_TIMEOUT_MS)};
+  setInterval(() => {
+    if (process.ppid !== parent) {
+      process.stderr.write("child Node: its parent (pid " + parent + ") is gone; exiting\\n");
+      process.exit(${String(LIFELINE_EXIT.parentGone)});
+    }
+    if (Date.now() > deadline) {
+      process.stderr.write("child Node: still running after ${String(CHILD_TIMEOUT_MS)} ms; exiting\\n");
+      process.exit(${String(LIFELINE_EXIT.timedOut)});
+    }
+  }, ${String(LIFELINE_POLL_MS)}).unref();
+}
+`;
 
 /** Why a child failed: killed at the time limit, its exit code, or why it never started. */
 function describeChildFailure(error: unknown): string {
@@ -63,11 +102,19 @@ export async function execInChildNode(
   try {
     return await execFileAsync(
       process.execPath,
-      ["--import", TSX_LOADER, "--input-type=module", "--eval", body],
+      [
+        "--import",
+        TSX_LOADER,
+        "--input-type=module",
+        "--eval",
+        // ESM hoists the body's imports above it, so the lifeline may come first.
+        options.diesWithParent === true ? LIFELINE + body : body,
+      ],
       {
         cwd: options.cwd,
         encoding: "utf8",
         timeout: CHILD_TIMEOUT_MS,
+        signal: options.signal,
         env: {
           PATH: process.env.PATH,
           HOME: process.env.HOME,

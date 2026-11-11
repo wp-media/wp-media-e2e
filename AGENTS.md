@@ -46,8 +46,8 @@ src/
 │   ├── pages/              # cross-product page objects (plugins, site-health) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm + warm-lines.ts its output, pin)
-│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/), raw Allure results, a stub Allure CLI and a stop at a chosen check (allure.ts), a web server serving the identity probe (probe-web-server.ts), a FIFO's blocked reader released, or fed chunk by chunk, within a deadline, or a FIFO tapped to prove nothing was written through a path (fifo.ts), a `dd` taking `conv=excl` where the runner's (BSD) lacks it (excl-dd.ts), a `.tar.gz` listed from its raw headers (tar-listing.ts), an in-process SSH server that runs what it is sent, with a recording fake `sudo` (ssh-server.ts), the SSH twins' gate and sites (ssh-twins.ts: `E2E_SSH_TWINS=1`), a shell command that dies with its spawner even on SIGKILL (tether.ts; `php -S` and the SSH server's commands)
-│   └── wp/                 # WordPress over WP-CLI (exec, php, staging, plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors; site-identity + web-identity + run-as-argv: who site commands run as, not wired yet)
+│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/), raw Allure results, a stub Allure CLI and a stop at a chosen check (allure.ts), a web server serving the identity probe (probe-web-server.ts), a FIFO's blocked reader released, or fed chunk by chunk, within a deadline, or a FIFO tapped to prove nothing was written through a path (fifo.ts), a `dd` taking `conv=excl` where the runner's (BSD) lacks it (excl-dd.ts), a `.tar.gz` listed from its raw headers (tar-listing.ts), an in-process SSH server that runs what it is sent, with a recording fake `sudo` (ssh-server.ts; `denySudo` all or one `-u` user), the option parsing every fake `sudo` shares (fake-sudo.ts), arguments that must survive every command line (hostile-arguments.ts), the SSH twins' gate, sites, variants, `resetTwin` and the cross-worker lock `withTwin` (ssh-twins.ts: `E2E_SSH_TWINS=1`), a shell command that dies with its spawner even on SIGKILL (tether.ts; `php -S` and the SSH server's commands)
+│   └── wp/                 # WordPress over WP-CLI (exec — exec/wpCli by identity state — over transport-exec, php, staging, plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership + owner-probe, paths, cache, db, teardown, errors; site-identity + web-identity + run-as-argv: who site commands run as)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
     └── <product>/
@@ -190,12 +190,12 @@ Schema: **[configuration.md](docs/guides/configuration.md)**.
   committed `sites.example.json` (placeholders) is used, so a fresh checkout passes the `@noauth`
   smoke; an overlay alone (e.g. the SSH twins' `sites.twins.json`) replaces the example. Credentials
   live only there and never enter reports. `transport.port` (`ssh` only, default 22).
-- **Site identity fields** ([`run-as.ts`](src/common/config/run-as.ts)), no effect until Phase 12's
-  rollout: `transport.runAs` (`ssh` only; `"auto"`, `"user:group"` never root, or `false`, the default
-  `DEFAULT_SSH_RUN_AS`) and `transport.umask` (`ssh` only; 3–4 octal digits keeping the owner's bits,
-  stored as four, default `0022`), both refused on `docker`/`local`; `transport.wpUser` is
-  resolved-only, copied from the site's `username` (a sites file setting it is refused). Unknown site
-  or transport keys fail the load.
+- **Site identity fields** ([`run-as.ts`](src/common/config/run-as.ts)), read by `exec`/`wpCli` (keep
+  real sites at `false` until Phase 12's rollout): `transport.runAs` (`ssh` only; `"auto"`,
+  `"user:group"` never root, or `false`, the default `DEFAULT_SSH_RUN_AS`) and `transport.umask`
+  (`ssh` only; 3–4 octal digits keeping the owner's bits, stored as four, default `0022`), both
+  refused on `docker`/`local`; `transport.wpUser` is resolved-only, copied from the site's `username`
+  (a sites file setting it is refused). Unknown site or transport keys fail the load.
 - **`.env`** (from `.env.example`, loaded by [`load-env.ts`](src/common/config/load-env.ts)):
   runtime flags and BackWPup storage credentials. Real env vars win; `E2E_LOAD_DOTENV=false` in the
   environment skips the file. Read env only through the typed accessors in
@@ -452,6 +452,14 @@ automatically, and that verification **must not** be skipped. Mirrored as a comm
 - Over `ssh` a command is `cd -- <cwd> && exec <program> <args…>`, every word quoted: `rootDir` must
   be absolute (refused at load), the program an executable on the login's `PATH` (never a shell
   function), the login shell POSIX. A signal kill throws `CommandKilledError` on every transport.
+- **Who runs it:** `exec`/`wpCli` follow the site's identity state (`wp/site-identity.ts`): in `site`,
+  `exec 'sudo' '-n' '-u' <u> '-g' <g> '--' '/bin/sh' '-c' <wrapper> …` (umask and `cd` inside,
+  sudo's leading hostname noise stripped from stderr, errors name the program, never `sudo`; a
+  refusal by `sudo` after verification throws `SiteIdentityRefusedError` and forgets the state);
+  every other state sends today's line byte for byte. **Probes and checks about the SSH user use `execAsTransport`**, never
+  `exec` (`stat`, `id`, `getent`, `sudo -n true`, `readlink -f`, docker `pwd`): `wp/transport-exec.ts`
+  (re-exported by `wp/exec.ts`), `wp/owner-probe.ts`, `site-identity.ts` and `web-identity.ts` never
+  load `exec.ts`/`ownership.ts` (`layering.spec.ts`). Root stays `execElevated`; `wp` is never root.
 - Commands are file + args arrays, never shell strings. **An exec error names the program and the
   reason, never the arguments** (they carry `--key=` values and snippet values): never pass on execa's
   `message`/`shortMessage`/`command` or attach its error as a `cause`.
@@ -482,14 +490,14 @@ automatically, and that verification **must not** be skipped. Mirrored as a comm
   server cannot write). `stageAndInstallPlugin` does it when given the `slug` — pass it. Override per
   site with `transport.fileOwner` (`"user:group"`, or `false`).
 - An elevated target built from `rootDir` passes the lexical guards in `wp/paths.ts` and
-  `assertResolvedInsideRoot` (`wp/exec.ts`), which refuses a path a symlink in any parent leads out of
+  `assertResolvedInsideRoot` (`wp/transport-exec.ts`), which refuses a path a symlink in any parent leads out of
   the docroot, or one it cannot resolve.
 - Leftovers: `ProductConfig.siteResidue` (files, `wp/residue.ts`; unprivileged first, then only what
   survived elevated; `transport.elevate: false` refuses elevation) and `ProductConfig.siteDbResidue`
   (options, tables, roles, capabilities, `wp/db-residue.ts`; never elevated, multisite refused). Both
   verified by re-reading.
-- **Site identity** ([`wp/site-identity.ts`](src/common/wp/site-identity.ts), not wired into exec
-  yet): a probe that throws is rethrown, never answered with a fallback (one call would run as
+- **Site identity** ([`wp/site-identity.ts`](src/common/wp/site-identity.ts), routing `exec`/`wpCli`):
+  a probe that throws is rethrown, never answered with a fallback (one call would run as
   another user); the web probe file is constant PHP, random-named, created with `O_EXCL` (`dd conv=excl`, never
   `set -C`, which writes through a symlink to a FIFO), removed in `finally`
   ([details](docs/architecture/wordpress-automation.md#site-identity-wpsite-identityts)).

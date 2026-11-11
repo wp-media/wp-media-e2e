@@ -14,12 +14,13 @@
  * was removed (see ./residue.ts). {@link PluginDirRemovalFailedError} and
  * {@link PluginDestinationExistsError} are about the plugin's own folder when WordPress no longer
  * sees a plugin in it (see ./plugin-dir.ts). {@link CommandKilledError} is the exec layer's own: a
- * command ended by a signal (see ./exec.ts).
+ * command ended by a signal (see ./exec.ts); {@link SiteIdentityRefusedError} a command `sudo` refused
+ * the site's identity after it was verified.
  */
 
 // Type-only, so it is erased at runtime and this module stays free of a cycle with the exec layer.
 import type { CapabilityGrant, FoundDbResidue } from "./db-residue";
-import type { ElevationSupport } from "./exec";
+import type { ElevationSupport } from "./transport-exec";
 
 /** A plugin expected to be installed is not one WordPress lists (e.g. before a removal-under-test). */
 export class PluginNotInstalledError extends Error {
@@ -378,5 +379,32 @@ export class CommandKilledError extends Error {
     super(message);
     this.name = "CommandKilledError";
     this.signal = signal;
+  }
+}
+
+/**
+ * A command meant to run as the site's identity never ran: `sudo` refused it (exit 1, nothing on
+ * stderr but `sudo:` lines) although the identity was verified earlier in this process — a sudoers or
+ * PAM change mid-run. Not an `ExecResult`: an exit 1 is an answer to many callers (`wp plugin
+ * is-installed`: "absent"), and this one is not the program's. The state is forgotten, so the next
+ * command resolves it again.
+ *
+ * The message names the program and the site only: sudo's own refusal quotes the whole command line.
+ */
+export class SiteIdentityRefusedError extends Error {
+  /** The program asked for. */
+  readonly program: string;
+
+  /**
+   * @param program - the program asked for (never `sudo`).
+   * @param target - the site, as `describeTarget` names it.
+   */
+  constructor(program: string, target: string) {
+    super(
+      `[wp/exec] "${program}" on ${target} did not run: the site's identity, verified earlier in this ` +
+        "run, was refused by the host (its rule changed since). It is resolved again on the next command.",
+    );
+    this.name = "SiteIdentityRefusedError";
+    this.program = program;
   }
 }

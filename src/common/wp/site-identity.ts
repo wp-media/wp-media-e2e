@@ -5,17 +5,18 @@ import {
 } from "../config/run-as";
 import { errorMessage } from "../guards";
 import { printableLine } from "../text";
-import { exec, installKey, wpRootDir } from "./exec";
-import { parseIdentity, probeSiteOwnership } from "./ownership";
+import { execAsTransport, installKey, wpRootDir } from "./transport-exec";
+import { parseIdentity, probeSiteOwnership } from "./owner-probe";
 import {
   hasSudoNoise,
   isSudoName,
+  quotesSudoDenial,
   runAsArgv,
   withoutSudoNoise,
 } from "./run-as-argv";
 import type { RunAs, ServerMode, Transport } from "../config/types";
-import type { ExecResult } from "./exec";
-import type { SiteOwnership } from "./ownership";
+import type { ExecResult } from "./transport-exec";
+import type { SiteOwnership } from "./owner-probe";
 import type { SudoTarget } from "./run-as-argv";
 import type { SiteIdentityVerdict } from "./web-identity";
 
@@ -39,8 +40,10 @@ import type { SiteIdentityVerdict } from "./web-identity";
  * one dropped connection can never make a single call run as another user mid-scenario. Only a probe
  * that ran and said no becomes a `fallback`, kept for the process.
  *
- * Probes run as the transport's user (`id`, `stat`, the `sudo` probe itself): what they measure must
- * not depend on the answer they are computing.
+ * Probes run as the transport's user (`id`, `stat`, the `sudo` probe itself), through
+ * `./transport-exec.ts`'s `execAsTransport`, never through `exec` (`./exec.ts`), which asks this module
+ * who to run as: what they measure must not depend on the answer they are computing, and this module
+ * never imports `./exec.ts`.
  */
 
 // ── States ───────────────────────────────────────────────────────────────────────────────────────
@@ -70,6 +73,10 @@ export interface RunIdentity {
   readonly group: string;
   readonly uid: number;
   readonly gid: number;
+  /** Every group id it carries, the primary one included (`id`'s `groups=`). */
+  readonly groupIds: readonly number[];
+  /** The names of those groups the host could map, the primary one included when `id` named it. */
+  readonly groupNames: readonly string[];
 }
 
 /** A site's identity state. Every state but `site` runs commands as the transport's user. */
@@ -169,6 +176,10 @@ export type RunProbeOutcome =
       readonly detail: string;
     };
 
+/** The detail for sudo's explicit deny, said in place of its message (which quotes the command). */
+export const SUDO_DENIED =
+  "sudo: a rule denies the transport's user this command as the site's identity";
+
 /** The `sudo` messages for an account the host does not have. */
 const UNKNOWN_ACCOUNT = /^sudo: unknown (?:user|group)\b/m;
 
@@ -178,8 +189,11 @@ const UNKNOWN_ACCOUNT = /^sudo: unknown (?:user|group)\b/m;
  *
  * - The mark printed: the wrapper got in → exit 0 is `ran`, {@link ID_FAILED} an unreadable `id`,
  *   {@link WP_FAILED} `no-wp`.
- * - No mark, and `sudo:` said an account is unknown → `no-identity`; any other `sudo:` line, or no
- *   `sudo` at all (127) → `no-sudo`; otherwise the wrapper's `umask`/`cd` failed → `no-root-access`.
+ * - No mark, and `sudo:` said an account is unknown → `no-identity`; any other `sudo:` line, sudo's
+ *   explicit deny (`Sorry, user … is not allowed to execute …`), or no `sudo` at all (127) →
+ *   `no-sudo`; otherwise the wrapper's `umask`/`cd` failed → `no-root-access`.
+ *
+ * The detail never quotes sudo's explicit deny, which quotes the command: it is named instead.
  *
  * @param result - what {@link runProbeArgv} returned.
  */
@@ -188,7 +202,9 @@ export function classifyRunProbe(result: ExecResult): RunProbeOutcome {
   const stderr = withoutSudoNoise(result.stderr).trim();
   const lines = result.stdout.split("\n");
   const mark = lines.findIndex((line) => line.trim() === RUN_PROBE_MARK);
-  const said = detailLine(stderr, result.exitCode);
+  const said = quotesSudoDenial(stderr)
+    ? SUDO_DENIED
+    : detailLine(stderr, result.exitCode);
   /**
    * A failed outcome.
    *
@@ -209,7 +225,11 @@ export function classifyRunProbe(result: ExecResult): RunProbeOutcome {
     return { kind: "ran", identity, sudoNoise };
   }
   if (UNKNOWN_ACCOUNT.test(stderr)) return failed("no-identity");
-  if (/^sudo: /m.test(stderr) || result.exitCode === 127) {
+  if (
+    /^sudo: /m.test(stderr) ||
+    quotesSudoDenial(stderr) ||
+    result.exitCode === 127
+  ) {
     return failed("no-sudo");
   }
   return failed("no-root-access");
@@ -232,6 +252,8 @@ export function runIdentityFrom(stdout: string): RunIdentity | undefined {
     group: group ?? String(parsed.gid),
     uid: parsed.uid,
     gid: parsed.gid,
+    groupIds: parsed.groupIds,
+    groupNames: parsed.groupNames,
   };
 }
 
@@ -294,14 +316,16 @@ interface Wanted {
  *
  * 1. not `ssh` → `same-user/mode` (no `runAs` there, never `disabled`);
  * 2. `runAs` false (or absent) → `disabled`;
- * 3. owner and transport identity unknown → probe them;
- * 4. the identity: the declared `user:group` (re-checked by `runAsIdentity`), or (`auto`) the owner —
- *    refused, unreadable or root → `fallback/no-identity`;
- * 5. `auto`: the verdict must say PHP runs as this owner → else `owner-not-web` or `unverified`, even
+ * 3. `auto` with no verdict → `fallback/unverified`, before any probe: none could change it (its fix,
+ *    running the pre-flight, also reports an owner that is root or unreadable);
+ * 4. owner and transport identity unknown → probe them;
+ * 5. the identity: the declared `user:group` (re-checked by `runAsIdentity`; needs no verdict), or
+ *    (`auto`) the owner — refused, unreadable or root → `fallback/no-identity`;
+ * 6. `auto`: the verdict must say PHP runs as this owner → else `owner-not-web` or `unverified`, even
  *    when the transport's user is that owner (a deployment account PHP reaches through its group);
- * 6. the transport's user already is it → `same-user/transport-user`;
- * 7. no run probe yet → run it;
- * 8. its failure → that fallback; ids other than wanted (or root) → `probe-mismatch`/`no-identity`;
+ * 7. the transport's user already is it → `same-user/transport-user`;
+ * 8. no run probe yet → run it;
+ * 9. its failure → that fallback; ids other than wanted (or root) → `probe-mismatch`/`no-identity`;
  *    else `site`.
  *
  * @param inputs - what is known.
@@ -318,11 +342,21 @@ export function decideIdentityState(
       reason: inputs.transportUserCopy ? "as-transport-user" : "config",
     };
   }
+  if (runAs === "auto" && inputs.verdict === undefined) {
+    return fallback(
+      "unverified",
+      "no pre-flight verdict for this site in this run",
+    );
+  }
   if (inputs.site === undefined) return { kind: "pending", probe: "site" };
   const wanted = wantedIdentity(runAs, inputs.site.owner);
   if ("kind" in wanted) return wanted;
-  // `auto` reached here with an owner: step 4 settles a missing one.
-  if (runAs === "auto" && inputs.site.owner !== undefined) {
+  // `auto` reached here with a verdict (step 3) and an owner (step 5 settles a missing one).
+  if (
+    runAs === "auto" &&
+    inputs.verdict !== undefined &&
+    inputs.site.owner !== undefined
+  ) {
     const refused = refuseByVerdict(inputs.verdict, inputs.site.owner);
     if (refused !== undefined) return refused;
   }
@@ -337,7 +371,7 @@ export function decideIdentityState(
 }
 
 /**
- * Step 4: who to run as.
+ * Step 5: who to run as.
  *
  * @param runAs - `"auto"` or a declared identity.
  * @param owner - the docroot's owner, if read.
@@ -378,22 +412,16 @@ function wantedIdentity(
 }
 
 /**
- * Step 5: `auto` without a verdict that this owner is PHP's identity.
+ * Step 6: `auto` whose verdict does not say this owner is PHP's identity.
  *
- * @param verdict - the pre-flight's, if any.
+ * @param verdict - the pre-flight's.
  * @param owner - the owner this process read (a verdict about another owner is not evidence).
  * @returns the fallback, or `undefined` to go on.
  */
 function refuseByVerdict(
-  verdict: SiteIdentityVerdict | undefined,
+  verdict: SiteIdentityVerdict,
   owner: SiteOwnership,
 ): IdentityState | undefined {
-  if (verdict === undefined) {
-    return fallback(
-      "unverified",
-      "no pre-flight verdict for this site in this run",
-    );
-  }
   if (verdict.verdict === "unverified") {
     return fallback(
       "unverified",
@@ -417,7 +445,7 @@ function refuseByVerdict(
 }
 
 /**
- * Step 8: the run probe's outcome.
+ * Step 9: the run probe's outcome.
  *
  * @param outcome - what it found.
  * @param wanted - who it was asked to run as.
@@ -663,17 +691,27 @@ export function registerSiteIdentityVerdicts(
  * resolution).
  *
  * @param transport - the site's transport.
- * @returns the state.
- * @throws Error if a probe could not run (the transport failed): rethrown, never answered, never
+ * @returns the state: for a probed one, the memoised promise itself (every caller gets the same
+ * object), which {@link forgetSiteIdentity} is handed to forget exactly that resolution.
+ * @throws Error if a probe could not run (the transport failed): rejected, never answered, never
  * cached — the next call asks again.
  */
-export async function resolveSiteIdentity(
+export function resolveSiteIdentity(
   transport: Transport,
 ): Promise<IdentityState> {
-  const base = baseInputs(transport);
-  const immediate = decideIdentityState(base);
+  let base: IdentityInputs;
+  let immediate: ReturnType<typeof decideIdentityState>;
+  try {
+    base = baseInputs(transport);
+    immediate = decideIdentityState(base);
+  } catch (error) {
+    // Rejected, never thrown: callers `await` it, or `.catch` it, as they would an async function.
+    return Promise.reject(
+      error instanceof Error ? error : new Error(String(error)),
+    );
+  }
   // `disabled` and `same-user/mode` need no probe, so they are neither cached nor shared.
-  if (immediate.kind !== "pending") return immediate;
+  if (immediate.kind !== "pending") return Promise.resolve(immediate);
   const key = memoKey(transport);
   const cached = resolved.get(key);
   if (cached !== undefined) return cached;
@@ -755,7 +793,9 @@ async function runRunProbe(
     await wpRootDir(transport),
   );
   const [file = "sudo", ...args] = argv;
-  return classifyRunProbe(await exec(transport, file, args, { cwd: "/" }));
+  return classifyRunProbe(
+    await execAsTransport(transport, file, args, { cwd: "/" }),
+  );
 }
 
 /**
@@ -768,8 +808,25 @@ async function runRunProbe(
 async function probeTransportUser(
   transport: Transport,
 ): Promise<RunIdentity | undefined> {
-  const { exitCode, stdout } = await exec(transport, "id", []);
+  const { exitCode, stdout } = await execAsTransport(transport, "id", []);
   return exitCode === 0 ? runIdentityFrom(stdout) : undefined;
+}
+
+/**
+ * Forgets the state resolved for this transport (its install, `runAs` and umask), so the next command
+ * resolves it again: `exec` calls it when `sudo` refuses an identity it had verified. Only `resolution`
+ * is forgotten: a refusal arriving late, from a command started on an older resolution, leaves a newer
+ * one alone (else every command in flight would resolve again). Verdicts stay.
+ *
+ * @param transport - the site's transport.
+ * @param resolution - the promise {@link resolveSiteIdentity} gave the refused command.
+ */
+export function forgetSiteIdentity(
+  transport: Transport,
+  resolution: Promise<IdentityState>,
+): void {
+  const key = memoKey(transport);
+  if (resolved.get(key) === resolution) resolved.delete(key);
 }
 
 /** Forgets every resolved state and verdict. For specs; a run never changes its mind. */

@@ -5,18 +5,18 @@ import { join, posix } from "node:path";
 import {
   assertAllResolvedInsideRoot,
   elevationSupport,
-  exec,
+  execAsTransport,
   execElevated,
   wpRootDir,
-} from "./exec";
+} from "./transport-exec";
 import { assertSafeElevatedTarget } from "./paths";
-import { probeSiteOwnership } from "./ownership";
+import { probeSiteOwnership } from "./owner-probe";
 import { MAX_ID } from "../config/run-as";
 import { errorMessage, isObject } from "../guards";
 import { printableLine } from "../text";
 import type { APIRequest } from "@playwright/test";
-import type { ExecResult } from "./exec";
-import type { SiteOwnership } from "./ownership";
+import type { ExecResult } from "./transport-exec";
+import type { SiteOwnership } from "./owner-probe";
 import type { Transport } from "../config/types";
 
 /**
@@ -391,7 +391,7 @@ async function writeProbeFile(
   root: string,
   path: string,
 ): Promise<{ readonly writer: Writer } | { readonly refused: string }> {
-  const own = await exec(
+  const own = await execAsTransport(
     transport,
     "sh",
     ["-c", WRITE_SCRIPT, "sh", PROBE_PHP, path],
@@ -485,7 +485,7 @@ async function removeProbeFiles(
   if (paths.length === 0) return true;
   const argv = ["-f", "--", ...paths];
   if (writer !== "root") {
-    const own = await exec(transport, "rm", argv, { cwd: "/" });
+    const own = await execAsTransport(transport, "rm", argv, { cwd: "/" });
     if (own.exitCode === 0 || writer === "transport") return own.exitCode === 0;
   }
   if ((await elevationSupport(transport)) !== "available") return false;
@@ -558,7 +558,9 @@ export function sweptNames(stdout: string): string[] {
  */
 export async function sweepProbeFiles(transport: Transport): Promise<string[]> {
   const root = await wpRootDir(transport);
-  const listing = await exec(transport, "find", sweepArgv(root), { cwd: "/" });
+  const listing = await execAsTransport(transport, "find", sweepArgv(root), {
+    cwd: "/",
+  });
   // A listing cut short by an unreadable entry still names what it reached.
   const names = sweptNames(listing.stdout);
   if (names.length === 0) return [];

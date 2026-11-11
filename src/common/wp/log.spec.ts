@@ -13,6 +13,7 @@ import { join } from "node:path";
 
 import { clearDebugLog, readDebugLog, scanDebugLog } from "./log";
 import type { LocalTransport } from "../config/types";
+import { SKIP_SUDO_OPTIONS } from "../__fixtures__/fake-sudo";
 
 // Stub `wp`: `eval` echoes $WP_STUB_EVAL_OUT (exit 0), or simulates a broken WordPress bootstrap
 // (exit 255) when $WP_STUB_EVAL=fail, or a PHP crash (killed by SIGSEGV) when $WP_STUB_EVAL=crash. `cat`/`rm` are NOT stubbed — the fallback uses the real
@@ -271,8 +272,7 @@ test.describe("debug.log — `wp eval` exits 0 even when its PHP failed", () => 
 const FAKE_SUDO = `#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$FAKE_SUDO_LOG"
 if [ "$FAKE_SUDO_DENY" = "1" ]; then exit 1; fi
-[ "$1" = "-n" ] && shift
-[ "$1" = "--" ] && shift
+${SKIP_SUDO_OPTIONS}
 if [ "$1" = "true" ]; then exit 0; fi
 for arg in "$@"; do target="$arg"; done
 chmod u+rwx "$(dirname "$target")" 2>/dev/null

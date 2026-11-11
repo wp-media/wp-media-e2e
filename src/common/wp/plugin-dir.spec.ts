@@ -26,6 +26,7 @@ import {
 import { INSPECT_PLUGIN_DIR_BASH } from "../__fixtures__/plugin-dir-stub";
 import type { PresentPluginDir } from "./plugin-dir";
 import type { LocalTransport } from "../config/types";
+import { SKIP_SUDO_OPTIONS } from "../__fixtures__/fake-sudo";
 
 /**
  * The plugin-folder states and their removal, on the `local` transport against real folders: a stub
@@ -625,7 +626,7 @@ test.describe("removePluginDir — the privileged pass", () => {
     sudoDir = mkdtempSync(join(tmpdir(), "wp-plugin-dir-sudo-"));
     writeFileSync(
       join(sudoDir, "sudo"),
-      '#!/usr/bin/env bash\n[ "$1" = -n ] && shift\n[ "$1" = -- ] && shift\nexec "$@"\n',
+      `#!/usr/bin/env bash\n${SKIP_SUDO_OPTIONS}\nexec "$@"\n`,
     );
     chmodSync(join(sudoDir, "sudo"), 0o755);
     pathBefore = process.env.PATH ?? "";

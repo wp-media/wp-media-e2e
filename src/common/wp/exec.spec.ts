@@ -31,6 +31,7 @@ import type {
   LocalTransport,
   SshTransport,
 } from "../config/types";
+import { SKIP_SUDO_OPTIONS } from "../__fixtures__/fake-sudo";
 
 // The transfer primitive and the WP-root resolution are exercised on the `local` transport
 // (a real filesystem) and, for `docker`, through the pure argv builder — `docker cp` itself
@@ -356,8 +357,7 @@ test.describe("whyItDidNotExit", () => {
 /** Answers the `sudo -n true` probe, then runs the command; `FAKE_SUDO_DENY=1` refuses everything. */
 const FAKE_SUDO = `#!/usr/bin/env bash
 if [ "$FAKE_SUDO_DENY" = "1" ]; then exit 1; fi
-[ "$1" = "-n" ] && shift
-[ "$1" = "--" ] && shift
+${SKIP_SUDO_OPTIONS}
 if [ "$1" = "true" ]; then exit 0; fi
 exec "$@"
 `;

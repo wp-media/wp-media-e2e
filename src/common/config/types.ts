@@ -105,12 +105,11 @@ export interface SshTransport extends TransportBase {
   readonly username: string;
   readonly privateKeyPath: string;
   readonly rootDir: string;
-  /** Who site commands run as; see {@link RunAs}. No command reads it yet. */
+  /** Who site commands (`exec`/`wpCli`) run as; see {@link RunAs}. */
   readonly runAs?: RunAs;
   /**
    * The umask site commands get when they run as the site's identity: four octal digits keeping the
    * owner's read, write and search bits (e.g. `"0022"`). Absent means `DEFAULT_UMASK` (`run-as.ts`).
-   * No command reads it yet.
    */
   readonly umask?: string;
 }

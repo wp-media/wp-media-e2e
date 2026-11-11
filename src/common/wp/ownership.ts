@@ -3,17 +3,32 @@ import { posix } from "node:path";
 import {
   describeTarget,
   elevationSupport,
-  exec,
+  execAsTransport,
   execElevated,
   installKey,
   assertResolvedInsideRoot,
   resetElevationCaches,
   wpRootDir,
-} from "./exec";
+} from "./transport-exec";
+import {
+  probeIdentity,
+  probeOwnership,
+  probeSiteOwnership,
+} from "./owner-probe";
+import { resolveSiteIdentity } from "./site-identity";
+
+export {
+  parseIdentity,
+  parseStatOwnership,
+  probeSiteOwnership,
+} from "./owner-probe";
+export type { SiteOwnership, TransportIdentity } from "./owner-probe";
 import { assertSafeElevatedTarget, normaliseSitePath } from "./paths";
 import { parseOwnerSpec } from "../config/file-owner";
 import { errorMessage } from "../guards";
-import type { ExecResult } from "./exec";
+import type { ExecResult } from "./transport-exec";
+import type { SiteOwnership, TransportIdentity } from "./owner-probe";
+import type { IdentityState, RunIdentity } from "./site-identity";
 import type { OwnerSpec } from "../config/file-owner";
 import type { Transport } from "../config/types";
 
@@ -54,9 +69,14 @@ import type { Transport } from "../config/types";
  * — accepts the same *flags* but does **not** print the same thing when a name cannot be resolved:
  * measured on 1.37.0 (`wordpress:cli-php8.3`), `stat` answers `UNKNOWN:UNKNOWN:33:33` where GNU
  * answers with the ids, and `id` answers `uid=33 gid=33 groups=33` with no names at all. Both
- * parsers handle that — see {@link parseStatOwnership} and {@link parseIdentity} — so a `docker`
- * cell resolves to the same owner GNU would report. Both reads are confined to
- * {@link probeOwnership} and {@link probeIdentity} so a future BSD branch stays a local change.
+ * parsers handle that — see `parseStatOwnership` and `parseIdentity` — so a `docker`
+ * cell resolves to the same owner GNU would report. Both reads are confined to `./owner-probe.ts`
+ * (as the transport's user, whatever the site runs as) so a future BSD branch stays a local change.
+ *
+ * **Who "the site's commands" are.** In the `site` identity state (`./site-identity.ts`) commands
+ * run as the identity, so {@link planOwnership} compares the owner with **that** identity, read off
+ * the state's run probe, not with the transport's user; every other state runs them as the
+ * transport's user, as before.
  */
 
 /** What {@link normalizeOwnership} did. It never throws, so this is the whole result. */
@@ -79,38 +99,6 @@ export type OwnershipOutcome =
    */
   | "failed";
 
-/** The user and group a path belongs to, by name and by id. */
-export interface SiteOwnership {
-  readonly user: string;
-  readonly group: string;
-  readonly uid: number;
-  readonly gid: number;
-}
-
-/**
- * Who the transport's own commands run as, and every group they carry — **by id and by name**.
- *
- * Both spellings are kept because a target's ownership is not always known in both: a site that
- * declares `transport.fileOwner` names a user and group without ids, and resolving them would cost
- * two more round-trips for a value `id` already reported. Comparing on whichever the target has is
- * what keeps a declared override from being mistaken for "not a member of anything" — an error that
- * would silently make the tree world-writable.
- */
-export interface TransportIdentity {
-  readonly uid: number;
-  readonly gid: number;
-  /** Every group id in the process's group set, including the primary one. */
-  readonly groupIds: readonly number[];
-  /** The user's name, absent when the passwd database cannot map the uid. */
-  readonly user?: string;
-  /**
-   * The names of the groups in {@link groupIds} that the group database could map — so possibly
-   * fewer entries, and never positionally aligned with it. The primary group is included whenever
-   * `id` named it, even if `groups=` did not repeat it.
-   */
-  readonly groupNames: readonly string[];
-}
-
 // Every cache below is keyed per install (`installKey`), not per host: one machine can serve several
 // sites whose ownership differs, and a host-scoped key would let the first one probed answer for all
 // of them — a wrong report at best, and a privileged `chown` aimed at another site's owner at worst.
@@ -131,124 +119,6 @@ const warned = new Set<string>();
 const worldWriteNotices = new Set<string>();
 
 /**
- * Parses `stat -c '%U:%G:%u:%g'`.
- *
- * The name halves are whatever `stat` could look up, and the two implementations this suite meets
- * disagree about failure: GNU prints the numeric id, **BusyBox prints the literal `UNKNOWN`**
- * (measured on 1.37.0, the `wordpress:cli-php8.3` image — `wp-content` there reads
- * `UNKNOWN:UNKNOWN:33:33`). A name is only ever handed straight back to `chown`, and
- * `chown UNKNOWN:UNKNOWN` can never succeed, so an unmapped name is replaced by the id from the
- * same call — which is what the kernel stores anyway, and what {@link matches} verifies against.
- *
- * @param stdout - the raw output of `stat -c '%U:%G:%u:%g'`.
- * @returns the ownership, or `undefined` if the output is not the expected shape.
- */
-export function parseStatOwnership(stdout: string): SiteOwnership | undefined {
-  const [user, group, uid, gid, ...rest] = stdout.trim().split(":");
-  if (
-    user === undefined ||
-    group === undefined ||
-    uid === undefined ||
-    gid === undefined ||
-    rest.length > 0 ||
-    user === "" ||
-    group === ""
-  ) {
-    return undefined;
-  }
-  // Tested as digits rather than through `Number`, which reads "" as 0 (root) and "0x21" as 33.
-  if (!/^\d+$/.test(uid) || !/^\d+$/.test(gid)) return undefined;
-  return {
-    user: mappedName(user, uid),
-    group: mappedName(group, gid),
-    uid: Number(uid),
-    gid: Number(gid),
-  };
-}
-
-/**
- * The name to use for a `chown` argument: the one `stat` reported, or the id when it reported none.
- *
- * Substituting is safe even for a host with a real account called `UNKNOWN`: the id comes from the
- * same `stat` call, so it names the same owner either way.
- */
-function mappedName(name: string, id: string): string {
-  return name === "UNKNOWN" ? id : name;
-}
-
-/**
- * Parses bare `id` output: `uid=1000(ubuntu) gid=1000(ubuntu) groups=1000(ubuntu),33(www-data)`.
- *
- * One command answers every question needed to choose the mode grant — who we are, and every group
- * we carry, in both spellings — so the decision costs one round-trip rather than three. A name is
- * absent for an id the passwd/group database cannot map, which is why the ids are read
- * independently of the names rather than from them.
- *
- * @param stdout - the raw output of `id`, run with no arguments.
- * @returns the identity, or `undefined` if `uid=` or `gid=` is missing.
- */
-export function parseIdentity(stdout: string): TransportIdentity | undefined {
-  // The single line `id` printed, not the whole stream. A shell that greets on a non-interactive
-  // channel (a `.bashrc` echo, an MOTD) would otherwise let a banner containing `uid=0(root)` supply
-  // the uid while the real line supplies the gid — a chimera identity, and one that decides whether
-  // a tree is made world-writable.
-  const line = /^\s*uid=\d+.*$/m.exec(stdout)?.[0] ?? "";
-  const uid = /(?:^|\s)uid=(\d+)/.exec(line)?.[1];
-  const gid = /(?:^|\s)gid=(\d+)/.exec(line)?.[1];
-  if (uid === undefined || gid === undefined) return undefined;
-
-  // Captured to end of line, not as a run of non-spaces: a group name may contain a space
-  // (`513(domain users)` on a directory-joined host), and stopping at it would silently drop every
-  // group after it — including, potentially, the one that keeps the tree from being world-writable.
-  const groups = /(?:^|\s)groups=(.*)$/.exec(line)?.[1] ?? "";
-  const { ids, names } = parseGroupSet(groups);
-
-  const gidNumber = Number(gid);
-  const user = /(?:^|\s)uid=\d+\(([^)]*)\)/.exec(line)?.[1];
-  const primaryGroup = /(?:^|\s)gid=\d+\(([^)]*)\)/.exec(line)?.[1];
-  return {
-    uid: Number(uid),
-    gid: gidNumber,
-    // The primary group is not always repeated in `groups=`, and treating it as absent would push a
-    // correctly-configured host onto the world-writable branch. Both spellings are backfilled, not
-    // just the id: a site that declares `transport.fileOwner` by name is compared by name, so
-    // backfilling only the id would leave exactly that host world-writable for a false reason.
-    groupIds: ids.includes(gidNumber) ? ids : [...ids, gidNumber],
-    groupNames:
-      primaryGroup === undefined || names.includes(primaryGroup)
-        ? names
-        : [...names, primaryGroup],
-    ...(user !== undefined ? { user } : {}),
-  };
-}
-
-/**
- * Splits the `groups=` list into ids and names, accepting both spellings `id` is written in.
- *
- * GNU prints `1000(ubuntu),33(www-data)`; BusyBox prints bare ids (`33,1000`) when it cannot map
- * them. Each entry is anchored to the start of the list or to a comma, so digits *inside* a group
- * name are never read as an id, and a name containing a space keeps it. A name is optional per
- * entry, which is what stops a nameless host from losing its memberships altogether — every lost
- * membership is a step towards a world-writable grant.
- *
- * @param groups - the raw value of `groups=`, to end of line.
- * @returns the ids, and the names of those entries that carried one.
- */
-function parseGroupSet(groups: string): {
-  readonly ids: number[];
-  readonly names: string[];
-} {
-  const ids: number[] = [];
-  const names: string[] = [];
-  for (const match of groups.matchAll(/(?:^|,)\s*(\d+)(?:\(([^)]*)\))?/g)) {
-    const [, id, name] = match;
-    if (id !== undefined) ids.push(Number(id));
-    if (name !== undefined) names.push(name);
-  }
-  return { ids, names };
-}
-
-/**
  * The `chmod` mode that keeps everyone who needs this tree able to manage it.
  *
  * `ug+rwX` is always applied: after the chown, the owner and the group are exactly the pair the
@@ -262,7 +132,7 @@ function parseGroupSet(groups: string): {
  * `X` rather than `x` so directories become traversable without making PHP files executable, and
  * `+` throughout so a mode is only ever added — this can never tighten a host's permissions.
  *
- * @param identity - who the transport's commands run as, from {@link parseIdentity}.
+ * @param identity - who the site's commands run as, from `parseIdentity` (or {@link fromRunIdentity}).
  * @param target - the ownership the tree is being given, which may be known only by name.
  * @returns the mode argument for `chmod -R`, and whether it grants world-write.
  */
@@ -281,54 +151,6 @@ export function grantModeFor(
   return insider
     ? { mode: "ug+rwX", worldWritable: false }
     : { mode: "ug+rwX,o+rwX", worldWritable: true };
-}
-
-/**
- * Reads the ownership of one absolute path on the target.
- *
- * `undefined` means the command **ran** and the answer was unusable — the path does not exist, or
- * `stat` printed something unparseable. A transport that could not run it at all **throws**, which
- * is the distinction the memoising callers depend on: only a real answer is worth remembering.
- */
-async function probeOwnership(
-  transport: Transport,
-  path: string,
-): Promise<SiteOwnership | undefined> {
-  const { exitCode, stdout } = await exec(transport, "stat", [
-    "-c",
-    "%U:%G:%u:%g",
-    path,
-  ]);
-  return exitCode === 0 ? parseStatOwnership(stdout) : undefined;
-}
-
-/** Reads who the transport's commands run as. Throws if it could not be asked — see above. */
-async function probeIdentity(
-  transport: Transport,
-): Promise<TransportIdentity | undefined> {
-  const { exitCode, stdout } = await exec(transport, "id", []);
-  return exitCode === 0 ? parseIdentity(stdout) : undefined;
-}
-
-/**
- * The ownership this site's WordPress install uses, unmemoised: `wp-content`'s, else the root's (a
- * relocated `wp-content`).
- *
- * For a caller that must tell "could not answer" from "the transport failed", which
- * {@link detectSiteOwnership} folds together.
- *
- * @param transport - the target site's transport.
- * @returns the ownership, or `undefined` when neither path could be read.
- * @throws Error if the transport failed.
- */
-export async function probeSiteOwnership(
-  transport: Transport,
-): Promise<SiteOwnership | undefined> {
-  const root = await wpRootDir(transport);
-  return (
-    (await probeOwnership(transport, posix.join(root, "wp-content"))) ??
-    (await probeOwnership(transport, root))
-  );
 }
 
 /**
@@ -361,7 +183,7 @@ export async function detectSiteOwnership(
   return found;
 }
 
-/** {@link probeIdentity}, memoised per **install** — several installs on one host may differ. */
+/** `probeIdentity`, memoised per **install** — several installs on one host may differ. */
 async function transportIdentity(
   transport: Transport,
 ): Promise<TransportIdentity | undefined> {
@@ -378,6 +200,47 @@ async function transportIdentity(
   }
   detectedIdentity.set(key, found ?? null);
   return found;
+}
+
+/**
+ * Who this site's commands run as: the identity of the `site` state (the run probe's `id`), else the
+ * transport's own user. Two caches never mixed: the state's, keyed by install and `runAs`, and
+ * {@link transportIdentity}'s, which always means the transport's user.
+ *
+ * @param transport - the target site's transport.
+ * @returns the identity, or `undefined` when it could not be read (a transport failure resolving the
+ * state included: not cached, asked again next time).
+ */
+async function commandIdentity(
+  transport: Transport,
+): Promise<TransportIdentity | undefined> {
+  let state: IdentityState;
+  try {
+    state = await resolveSiteIdentity(transport);
+  } catch {
+    // Not an answer: see `detectSiteOwnership`.
+    return undefined;
+  }
+  return state.kind === "site"
+    ? fromRunIdentity(state.identity)
+    : transportIdentity(transport);
+}
+
+/**
+ * A run identity as {@link grantModeFor} reads one.
+ *
+ * @param identity - the `site` state's identity.
+ * @returns the same ids and groups; the user's name only when the host mapped it (a name of digits
+ * equal to the uid is the id standing in for one).
+ */
+export function fromRunIdentity(identity: RunIdentity): TransportIdentity {
+  return {
+    uid: identity.uid,
+    gid: identity.gid,
+    groupIds: identity.groupIds,
+    groupNames: identity.groupNames,
+    ...(identity.user !== String(identity.uid) ? { user: identity.user } : {}),
+  };
 }
 
 /**
@@ -524,8 +387,8 @@ async function resolveDeclaredIds(
     // No `--`: neither `id` nor `getent` accepts it, and `parseOwnerSpec` has already refused a
     // leading dash, so the name cannot be read as an option.
     const [user, group] = await Promise.all([
-      exec(transport, "id", ["-u", spec.user]),
-      exec(transport, "getent", ["group", spec.group]),
+      execAsTransport(transport, "id", ["-u", spec.user]),
+      execAsTransport(transport, "getent", ["group", spec.group]),
     ]);
     const uid = user.exitCode === 0 ? user.stdout.trim() : "";
     // `getent group` answers `name:x:gid:members`; the gid is the third field.
@@ -599,7 +462,7 @@ export async function planOwnership(
 
   const [detected, identity] = await Promise.all([
     detectSiteOwnership(transport),
-    transportIdentity(transport),
+    commandIdentity(transport),
   ]);
   let target = resolveTarget(declared, detected);
   if (target === undefined) return { kind: "unknown-ownership" };

@@ -26,6 +26,7 @@ import {
   resolveSiteResidue,
 } from "./residue";
 import type { DockerTransport, LocalTransport } from "../config/types";
+import { SKIP_SUDO_OPTIONS } from "../__fixtures__/fake-sudo";
 
 /**
  * Residue removal against a **real** WordPress-root-like directory over the `local` transport —
@@ -249,8 +250,7 @@ test.describe("removeSiteResidue", () => {
 const FAKE_SUDO = `#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE_SUDO_LOG"
 if [ "$FAKE_SUDO_DENY" = "1" ]; then exit 1; fi
-[ "$1" = "-n" ] && shift
-[ "$1" = "--" ] && shift
+${SKIP_SUDO_OPTIONS}
 if [ "$1" = "true" ]; then exit 0; fi
 [ "$1" = "rm" ] || exec "$@"
 for target in "$@"; do

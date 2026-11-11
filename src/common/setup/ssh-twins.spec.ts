@@ -6,6 +6,7 @@ import {
   TWIN_CELLS,
   sshTwinsEnabled,
   twinSite,
+  withTwin,
 } from "../__fixtures__/ssh-twins";
 import { disposeConnections } from "../wp/exec";
 
@@ -30,7 +31,8 @@ test.describe("SSH twins: the pre-flight", () => {
       const site = twinSite(twin);
       expect(site.transport.mode).toBe("ssh");
 
-      const result = await verifySite(site, 0);
+      // Held, so a spec resetting this twin to another variant never lands mid-check.
+      const result = await withTwin(twin.stack, () => verifySite(site, 0));
 
       // Each failed check with its detail, so a red run says why.
       expect(

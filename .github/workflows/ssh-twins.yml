@@ -34,7 +34,7 @@ jobs:
   twins:
     name: SSH twins (twin specs + healthcheck)
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v7
       # Chromium: the healthcheck logs in through the browser.
@@ -76,7 +76,8 @@ jobs:
           TWIN_WAIT_SECONDS: "780"
         run: npm run env:cells:up
       - name: Twin specs
-        timeout-minutes: 10
+        # Every variant on both stacks resets its twin (~6 s) and boots WordPress several times.
+        timeout-minutes: 20
         env:
           E2E_SSH_TWINS: "1"
         run: npx playwright test --config playwright.unit.config.ts --project=src ssh-twins

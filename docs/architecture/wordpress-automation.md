@@ -5,6 +5,21 @@ local, Docker or SSH site.
 
 ## Transport & exec ([`wp/exec.ts`](../../src/common/wp/exec.ts))
 
+Two modules, one API (`exec.ts` re-exports all of [`transport-exec.ts`](../../src/common/wp/transport-exec.ts)):
+- **`transport-exec.ts`** runs a command as its caller chooses (`ExecAs`): `execAsTransport` (the
+  transport's own user), `execAsSite` (`ssh` only: the site's identity through `sudo` and the wrapper
+  below), `execElevated` (root) — plus transfer, root and path resolution.
+- **`exec.ts`** adds `exec`/`wpCli`: they resolve the [site identity](#site-identity-wpsite-identityts)
+  state and run as the identity in `site`, as the transport's user in every other state — **byte for
+  byte the line sent before the identity existed** (`runAs` absent or `false`, `docker`/`local`,
+  every `fallback`; pinned in `exec.site.ssh.spec.ts`).
+- **Probes run as the transport's user**, never through `exec`: `stat`/`id`/`getent`/`id -u`
+  (`owner-probe.ts`), `sudo -n true` (`elevationSupport`), docker `pwd`, `readlink -f`
+  (`resolveOnTarget`), the identity's own probes, the web probe's write/sweep/removal, and the
+  pre-flight's "root accessible" check (its subject is the SSH user). The resolver and its probes never
+  load `exec.ts`/`ownership.ts` at run time (`layering.spec.ts`), so no probe recurses through the
+  resolver it feeds.
+
 A [`Transport`](../../src/common/config/types.ts), discriminated on `mode`:
 
 | Mode     | Fields                                                                                   | Dispatch                                        |
@@ -14,12 +29,12 @@ A [`Transport`](../../src/common/config/types.ts), discriminated on `mode`:
 | `ssh`    | `host`, `port?`, `username`, `privateKeyPath`, `rootDir`, `stagingDir?`, `elevate?`, `fileOwner?`, `runAs?`, `umask?` | `node-ssh` `execCommand`, one line we build (below). |
 
 Every loaded transport also carries `wpUser`, resolved-only (the site's `username`; a sites file may
-not set it). No command reads `runAs`/`umask`/`wpUser` yet: `runAs`/`umask` decide only the
-[site identity](#site-identity-wpsite-identityts) state, which no command uses yet
-([configuration.md](../guides/configuration.md#transport-modes-transport), Phase 12).
+not set it); no command reads it yet (`--user`, Phase 12). `runAs`/`umask` decide the
+[site identity](#site-identity-wpsite-identityts) state `exec`/`wpCli` follow
+([configuration.md](../guides/configuration.md#transport-modes-transport)).
 
 - A command is a **file + args array**, never a shell string: no interpolation, no injection.
-- `exec(transport, file, args, opts?)` returns [`ExecResult`](../../src/common/wp/exec.ts)
+- `exec(transport, file, args, opts?)` returns [`ExecResult`](../../src/common/wp/transport-exec.ts)
   `{ exitCode, stdout, stderr }`; callers branch on `exitCode`. Failing to _run_ at all (missing
   binary, unreachable host) **throws** — an environment fault, not an outcome. So does a command
   **killed by a signal**, on every transport: `CommandKilledError` (`.signal`), so the few callers with
@@ -34,7 +49,8 @@ not set it). No command reads `runAs`/`umask`/`wpUser` yet: `runAs`/`umask` deci
   a cipher). execa's messages quote the command line, so on `local`/`docker` the message is built from
   `isMaxBuffer` (checked first: endless output arrives killed by `SIGPIPE`), `signal` and `code`
   (`ENOENT` means a missing program or a missing working directory alike). The label is the program
-  only (`wp`, `sudo rm`, `docker exec <container> wp`; `docker cp`'s adds the suite's own paths). No
+  only (`wp`, `sudo rm`, `docker exec <container> wp`; `docker cp`'s adds the suite's own paths); a
+  command run as the site's identity is named by its program, never `sudo`. No
   execa error rides along as a `cause`; a call execa refuses outright is re-raised naming the program.
   A program or argument no program can be handed unchanged is refused before any transport sees it,
   by position: a NUL byte (execa's refusal quotes it; ssh2's is a bare `Unable to exec`) or a lone
@@ -56,8 +72,24 @@ not set it). No command reads `runAs`/`umask`/`wpUser` yet: `runAs`/`umask` deci
   `exec.ssh.spec.ts` against an in-process ssh2 server that **runs** each line with `sh -c`, with a
   recording fake `sudo` on its `PATH` and real SFTP writes
   ([`__fixtures__/ssh-server.ts`](../../src/common/__fixtures__/ssh-server.ts); ssh2's server caps a
-  line at ~34 KB, OpenSSH took 64 KiB). Not fixed: node-ssh decodes each output chunk alone, so a
-  multi-byte character split between two chunks arrives as `U+FFFD` (measured; phase-12 plan, 12.4).
+  line at ~34 KB, OpenSSH took 64 KiB). Output is collected as buffers and decoded once
+  (`decodeOutput`): node-ssh's own strings decode each chunk alone, turning a multi-byte character split
+  between two chunks into `U+FFFD` (measured with 200,000 × `é`).
+- **The `site` state's line** (`sshWrappedLine`): `exec 'sudo' '-n' '-u' <u> '-g' <g> '--' '/bin/sh'
+  '-c' <RUN_AS_SCRIPT> 'e2e-run-as' <umask> <cwd> <file> <args…>` (`runAsArgv`; numeric halves `#id`),
+  **no outer `cd`**: the wrapper sets the umask and enters `cwd` as the identity, so the SSH user needs
+  no access to it; a `cwd` it cannot enter runs nothing (`e2e-run-as: …: cd: can't cd …`). `wp` and
+  every program must be on sudo's `secure_path`. stderr loses sudo's **leading** `unable to resolve
+  host …` lines (a host missing its own name from `/etc/hosts`; stdout and exit unchanged; the same
+  line printed later is the program's and stays), which `parseCliNotices`, `describeExit` and
+  `evalPhp` errors would read as the command's. Root's line and stderr are unchanged. A refusal by
+  `sudo` itself after the state was verified (exit 1, stderr wholly sudo's: `sudo:` lines and/or its
+  explicit deny `Sorry, user … is not allowed to execute '<command>' …`, unprefixed and spanning as
+  many lines as the arguments hold newlines; a rule changed mid-run; `isSudoRefusal`) is no exit of
+  the program's — `wp plugin is-installed` would read "absent" — so `exec` throws
+  `SiteIdentityRefusedError` (program and site only: sudo's deny quotes the arguments) and forgets
+  the resolution it ran on (`forgetSiteIdentity(transport, promise)`: never a newer one, so commands
+  in flight cause one re-resolution, not one each), which the next command resolves again.
 - **No command is handed input.** node-ssh ends the channel's input, `local` passes
   `stdin: "ignore"`, `docker exec` without `-i` attaches none. A `[y/n]` prompt (WP-CLI's `confirm()`,
   shown by a destructive command without `--yes`) therefore reads end-of-input and declines at once,
@@ -96,9 +128,11 @@ Limits:
 
 - **Housekeeping only** — removing leftovers, clearing `debug.log`, copying `wp-content` around a
   command under test that rewrites it, writing and removing the pre-flight's identity probe in a root
-  the transport's user cannot write ([site identity](#site-identity-wpsite-identityts)). **Never `wp`**: WP-CLI refuses root without `--allow-root`, and
-  files it made as root would be unwritable by the web server. `wpCli` cannot request elevation, so
-  the rule is structural.
+  the transport's user cannot write ([site identity](#site-identity-wpsite-identityts)). **`wp` is
+  never root**: WP-CLI refuses root without `--allow-root`, and files it made as root would be
+  unwritable by the web server. `wpCli` cannot request elevation, so the rule is structural. (Running
+  as the site's identity is the web server's own user, not elevation.) Root's line is the same in
+  every identity state: `cd -- <cwd> && exec 'sudo' '-n' '--' …`, as the transport's user.
 - **Never on a path a scenario asserts against**: it cannot make a product pass, only removes what the product left, after the
   verdict.
 - **Second, never first**: callers try as themselves and escalate only what failed, so a
@@ -552,7 +586,7 @@ But a link in any **parent** is resolved by the kernel first: with `wp-content/u
 `rm -rf <root>/wp-content/uploads/backwpup` deleted `/out/backwpup` and `mkdir -p` created
 `/out/newdir` (measured), while every lexical guard agreed.
 
-So `assertResolvedInsideRoot` ([`wp/exec.ts`](../../src/common/wp/exec.ts)) asks **where the path really leads**: it resolves target and root with
+So `assertResolvedInsideRoot` ([`wp/transport-exec.ts`](../../src/common/wp/transport-exec.ts)) asks **where the path really leads**: it resolves target and root with
 `readlink -f` and requires the first inside the second. A path not yet there cannot be a link, so it
 walks up to the deepest existing ancestor (not relying on `readlink -f` tolerating one missing
 component, which GNU and BusyBox do and others do not). An unresolvable path is **refused**: unknown reads as no. It runs
@@ -593,8 +627,9 @@ function, so a BSD branch would stay local.
 
 ## Site identity ([`wp/site-identity.ts`](../../src/common/wp/site-identity.ts))
 
-Who a site's commands run as, once per install per process. Built, not wired yet: no command runs as
-another identity until the exec layer reads the state (Phase 12, [plan](../plans/phase-12-site-identity-plan.md)).
+Who a site's commands run as, once per install per process: `exec`/`wpCli` follow it
+([Transport & exec](#transport--exec-wpexects)). `auto` stays `unverified` until the
+pre-flight writes its verdict (Phase 12, [plan](../plans/phase-12-site-identity-plan.md), 12.9).
 
 | State       | When                                                                                   | Runs as                 |
 | ----------- | -------------------------------------------------------------------------------------- | ----------------------- |
@@ -614,18 +649,23 @@ another identity until the exec layer reads the state (Phase 12, [plan](../plans
   `$0` names the wrapper in the shell's errors) — running
   `echo e2e-run-probe && id && wp --info` in the root, from `/`. `classifyRunProbe` drops sudo's
   `unable to resolve host` lines (`withoutSudoNoise`), reads ids only after the mark, and maps: a
-  `sudo:` refusal or no sudo → `no-sudo`; `sudo: unknown user|group` → `no-identity`; no mark
+  `sudo:` refusal, sudo's explicit deny (detail `SUDO_DENIED`, never its text: it quotes the
+  command) or no sudo → `no-sudo`; `sudo: unknown user|group` → `no-identity`; no mark
   otherwise (the wrapper's `cd`) → `no-root-access`; exit 92 → `no-wp`; other ids → `probe-mismatch`;
   uid/gid 0 → `no-identity`. `sudoNoise` (on the outcome, and on the `site`/`fallback` state it
   decides) records the noise line for a report's `/etc/hosts` fix.
 - `auto` needs the pre-flight's verdict, given to the process with `registerSiteIdentityVerdicts`
-  (forgets states already resolved for those installs): `owner-is-web` for the owner read now, else
+  (forgets states already resolved for those installs). With none, `unverified` at once, before any
+  probe (no `stat`/`id`: none could change it); else `owner-is-web` for the owner read now, or
   `owner-not-web` / `unverified` — checked **before** "the transport's user already is it", so an SSH
   user owning a docroot PHP reaches through its group falls back. The owner root (uid or gid 0) or
   unreadable → `no-identity`. A declared `runAs` is re-checked by `runAsIdentity` (a hand-built
   `root:root` → `no-identity`, no sudo call).
 - `asTransportUser(transport)`: a frozen copy without `wpUser`, `runAs: false` over `ssh`;
   idempotent; its state is `disabled/as-transport-user` and never reads the original's cache.
+- `planOwnership` compares the owner with **who commands run as**: the `site` state's identity (the
+  run probe's `id`, groups included: `RunIdentity.groupIds`/`groupNames`, `fromRunIdentity`), else
+  the transport's user (`probeIdentity`'s cache, which always means that user).
 
 **The web probe** ([`wp/web-identity.ts`](../../src/common/wp/web-identity.ts)) asks the web server
 who PHP runs as: `probeWebIdentity(site, request)` sweeps leftovers, writes
