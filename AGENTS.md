@@ -46,7 +46,7 @@ src/
 │   ├── pages/              # cross-product page objects (plugins, site-health) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm + warm-lines.ts its output, pin)
-│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/), raw Allure results, a stub Allure CLI and a stop at a chosen check (allure.ts), a web server serving the identity probe (probe-web-server.ts), a FIFO's blocked reader released, or fed chunk by chunk, within a deadline, or a FIFO tapped to prove nothing was written through a path (fifo.ts), a `dd` taking `conv=excl` where the runner's (BSD) lacks it (excl-dd.ts), a `.tar.gz` listed from its raw headers (tar-listing.ts), an in-process SSH server that runs what it is sent, with a recording fake `sudo` (ssh-server.ts), a shell command that dies with its spawner even on SIGKILL (tether.ts; `php -S` and the SSH server's commands)
+│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/), raw Allure results, a stub Allure CLI and a stop at a chosen check (allure.ts), a web server serving the identity probe (probe-web-server.ts), a FIFO's blocked reader released, or fed chunk by chunk, within a deadline, or a FIFO tapped to prove nothing was written through a path (fifo.ts), a `dd` taking `conv=excl` where the runner's (BSD) lacks it (excl-dd.ts), a `.tar.gz` listed from its raw headers (tar-listing.ts), an in-process SSH server that runs what it is sent, with a recording fake `sudo` (ssh-server.ts), the SSH twins' gate and sites (ssh-twins.ts: `E2E_SSH_TWINS=1`), a shell command that dies with its spawner even on SIGKILL (tether.ts; `php -S` and the SSH server's commands)
 │   └── wp/                 # WordPress over WP-CLI (exec, php, staging, plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors; site-identity + web-identity + run-as-argv: who site commands run as, not wired yet)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
@@ -70,6 +70,7 @@ orchestrator/               # runs cells in loops. Layout and design: docs/plans
 │                           # soak.spec.ts (hundreds of runs over the fake suite; ORCHESTRATOR_SOAK=1, npm run orchestrator:soak)
 docker/                     # local WordPress for the `docker` transport
 docker/ssh-cells/           # SSH twins of the cells (Ubuntu 24.04, apache/nginx, sudo): Dockerfile.<stack>, site.sh <variant> resets, check.sh proves (Phase 12)
+                            # docker-compose.yml (own project, wpme-ssh) + cells.sh (env:cells:*: per-user key, sites.twins.json overlays)
 docs/                       # architecture & guides (linked below)
 playwright*.config.ts       # entry configs (default, per-product, unit)
 ```
@@ -172,6 +173,9 @@ npm run report:prune -- --apply                     # remove (--keep, --older-th
 npm run env:up                                      # Apache(:8100) & Nginx(:8101) sites
 npm run env:down                                    # stop & remove, volumes included
 npm run env:logs
+npm run env:cells:up                                # SSH twins (one set per machine): key, build, wait, overlays
+npm run env:cells:reset -- nginx site               # reset one twin to a variant (apache|nginx; lists variants)
+npm run env:cells:down                              # overlays + twins (-- --force: another checkout's; -- --purge-key)
 
 # Browsers
 npm run setup                                       # playwright install chromium (also on postinstall)
@@ -184,7 +188,8 @@ Schema: **[configuration.md](docs/guides/configuration.md)**.
 - **Sites files** (per product, **git-ignored**, hold credentials) define cells and pools: `sites.json`
   plus `sites.<name>.json` overlays, merged alphabetically, each owning disjoint cells. With none, the
   committed `sites.example.json` (placeholders) is used, so a fresh checkout passes the `@noauth`
-  smoke. Credentials live only there and never enter reports.
+  smoke; an overlay alone (e.g. the SSH twins' `sites.twins.json`) replaces the example. Credentials
+  live only there and never enter reports. `transport.port` (`ssh` only, default 22).
 - **Site identity fields** ([`run-as.ts`](src/common/config/run-as.ts)), no effect until Phase 12's
   rollout: `transport.runAs` (`ssh` only; `"auto"`, `"user:group"` never root, or `false`, the default
   `DEFAULT_SSH_RUN_AS`) and `transport.umask` (`ssh` only; 3–4 octal digits keeping the owner's bits,

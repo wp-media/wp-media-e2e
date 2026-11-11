@@ -17,6 +17,7 @@ import {
   elevationSupport,
   exec,
   execElevated,
+  describeTarget,
   installKey,
   resetElevationCaches,
   sudoArgv,
@@ -563,6 +564,15 @@ test.describe("targetKey vs installKey", () => {
     );
   });
 
+  // The SSH twins: one host, one root, told apart by their port alone.
+  test("ssh: one host and root on two ports — different targets and installs", () => {
+    const a = { ...ssh("/var/www/site/public"), port: 2210 };
+    const b = { ...ssh("/var/www/site/public"), port: 2211 };
+    expect(targetKey(a)).not.toBe(targetKey(b));
+    expect(installKey(a)).not.toBe(installKey(b));
+    expect(targetKey(a)).not.toBe(targetKey(ssh("/var/www/site/public")));
+  });
+
   // The same site must answer the same way every time, or nothing would ever cache.
   test("both are stable for the same transport", () => {
     expect(targetKey(ssh("/var/www/site"))).toBe(
@@ -635,5 +645,41 @@ test.describe("elevationSupport — a transport failure is not remembered", () =
     expect(await elevationSupport(site)).toBe("unavailable");
     expect(await elevationSupport(site)).toBe("unavailable");
     expect(readFileSync(log, "utf8").trim().split("\n")).toHaveLength(1);
+  });
+});
+
+/** How an ssh site is named in messages: its port only when it declares one. */
+test.describe("describeTarget — ssh", () => {
+  const ssh: SshTransport = {
+    mode: "ssh",
+    host: "127.0.0.1",
+    username: "ubuntu",
+    privateKeyPath: "/keys/id_ed25519",
+    rootDir: "/var/www/site/public",
+  };
+
+  test("user@host without a port, user@host:port with one", () => {
+    expect(describeTarget(ssh)).toBe("ubuntu@127.0.0.1");
+    expect(describeTarget({ ...ssh, port: 2210 })).toBe(
+      "ubuntu@127.0.0.1:2210",
+    );
+  });
+
+  // Unbracketed, `::1` on 2222 and a portless `::1:2222` would read, and key, the same.
+  test("an IPv6 host is bracketed, with or without a port", () => {
+    expect(describeTarget({ ...ssh, host: "::1" })).toBe("ubuntu@[::1]");
+    expect(describeTarget({ ...ssh, host: "::1", port: 2222 })).toBe(
+      "ubuntu@[::1]:2222",
+    );
+    expect(describeTarget({ ...ssh, host: "::1:2222" })).toBe(
+      "ubuntu@[::1:2222]",
+    );
+  });
+
+  test("an IPv6 host with a port and one whose address ends like it are different targets", () => {
+    const withPort = { ...ssh, host: "::1", port: 2222 };
+    const portless = { ...ssh, host: "::1:2222" };
+    expect(targetKey(withPort)).not.toBe(targetKey(portless));
+    expect(installKey(withPort)).not.toBe(installKey(portless));
   });
 });

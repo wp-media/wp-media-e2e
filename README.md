@@ -125,6 +125,10 @@ E2E_CELL=apache npm run test:wp-rocket    # or E2E_CELL=nginx
 The cells use `transport: { mode: "docker", container: "wpme-wpcli-apache" | "wpme-wpcli-nginx" }`
 (the compose `container_name`s). Sites are installed as `admin` / `admin_password`.
 
+**SSH twins** (Docker copies of the apache/nginx cells over the `ssh` transport):
+`npm run env:cells:up` / `env:cells:reset -- <apache|nginx> <variant>` / `env:cells:down` — see
+[configuration.md → SSH twins](docs/guides/configuration.md#ssh-twins).
+
 ## Reporting
 
 Each run writes `reports/<product>/<cell>/<RUN_ID>/`:

@@ -13,6 +13,7 @@ import { join } from "node:path";
 import {
   buildReport,
   settleSiteLeftovers,
+  transportLabel,
   verifyPool,
   verifySite,
   warnAboutElevation,
@@ -1034,5 +1035,35 @@ test.describe("the run-level warnings take the printer's palette", () => {
     const printed: string[] = [];
     warnAboutElevation([unavailable], (m) => printed.push(m), ascii);
     expect(printed[0]).toContain("  !  ELEVATION UNAVAILABLE");
+  });
+});
+
+/** How a report names a site's transport: an ssh site with its port when it declares one. */
+test.describe("transportLabel", () => {
+  const ssh = {
+    mode: "ssh",
+    host: "203.0.113.10",
+    username: "ubuntu",
+    privateKeyPath: "/keys/id",
+    rootDir: "/var/www/site",
+  } as const;
+
+  test("ssh: user@host, user@host:port with a port, an IPv6 host bracketed", () => {
+    expect(transportLabel(ssh)).toBe("ssh: ubuntu@203.0.113.10");
+    expect(transportLabel({ ...ssh, port: 2210 })).toBe(
+      "ssh: ubuntu@203.0.113.10:2210",
+    );
+    expect(transportLabel({ ...ssh, host: "::1", port: 2222 })).toBe(
+      "ssh: ubuntu@[::1]:2222",
+    );
+  });
+
+  test("docker names the container, local the root", () => {
+    expect(transportLabel({ mode: "docker", container: "wp" })).toBe(
+      "docker: wp",
+    );
+    expect(transportLabel({ mode: "local", rootDir: "/srv/wp" })).toBe(
+      "local: /srv/wp",
+    );
   });
 });

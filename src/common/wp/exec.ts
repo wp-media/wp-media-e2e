@@ -324,9 +324,37 @@ interface ErrorEmitter {
   on(event: "error", listener: (error: Error) => void): unknown;
 }
 
-/** Cache key for one SSH endpoint (host + user + key), so calls to the same site reuse a connection. */
+/**
+ * Cache key for one SSH endpoint (user + host + port + key), so calls to the same site reuse a
+ * connection and two sites on one host but different ports never share one.
+ */
 function connectionKey(transport: SshTransport): string {
-  return `${transport.username}@${transport.host}#${transport.privateKeyPath}`;
+  return `${sshEndpoint(transport)}#${transport.privateKeyPath}`;
+}
+
+/**
+ * A site's SSH endpoint as `user@host`, or `user@host:port` when it declares a port, for messages and
+ * the connection pool: the twins share `127.0.0.1` and differ by port alone. A host holding `:` (an
+ * IPv6 address) is always bracketed, so `::1` on port 2222 (`[::1]:2222`) never reads, or keys, as a
+ * portless host `::1:2222` (`[::1:2222]`).
+ *
+ * @param transport - the site's ssh transport.
+ * @returns the endpoint, never a secret.
+ */
+function sshEndpoint(transport: SshTransport): string {
+  const port = transport.port === undefined ? "" : `:${String(transport.port)}`;
+  return `${transport.username}@${scpHost(transport)}${port}`;
+}
+
+/**
+ * The site's host as `scp`/`ssh` URLs write it: an IPv6 address (it holds `:`) in brackets, any
+ * other host as is.
+ *
+ * @param transport - the site's ssh transport.
+ * @returns the host, bracketed when it holds `:`.
+ */
+function scpHost(transport: SshTransport): string {
+  return transport.host.includes(":") ? `[${transport.host}]` : transport.host;
 }
 
 /**
@@ -347,6 +375,7 @@ async function connection(transport: SshTransport): Promise<NodeSSH> {
   await ssh
     .connect({
       host: transport.host,
+      ...(transport.port !== undefined ? { port: transport.port } : {}),
       username: transport.username,
       privateKeyPath: transport.privateKeyPath,
       keepaliveInterval: SSH_KEEPALIVE.intervalMs,
@@ -497,7 +526,7 @@ async function runSsh(
       const lost = connectionLosses.get(ssh);
       if (lost !== undefined) {
         throw new Error(
-          `[wp/exec] the connection to ${transport.host} was lost (${lost.message}) while "${file}" was ` +
+          `[wp/exec] the connection to ${describeTarget(transport)} was lost (${lost.message}) while "${file}" was ` +
             "running, so how it ended is unknown.",
         );
       }
@@ -505,12 +534,12 @@ async function runSsh(
       // server gone) — not a kill, so not typed as one.
       if (result.signal === null) {
         throw new Error(
-          `[wp/exec] "${file}" on ${transport.host} ended with neither an exit status nor a signal ` +
+          `[wp/exec] "${file}" on ${describeTarget(transport)} ended with neither an exit status nor a signal ` +
             "(its channel closed), so how it ended is unknown.",
         );
       }
       throw new CommandKilledError(
-        `[wp/exec] "${file}" on ${transport.host} was terminated by signal ${result.signal} before exiting.`,
+        `[wp/exec] "${file}" on ${describeTarget(transport)} was terminated by signal ${result.signal} before exiting.`,
         result.signal,
       );
     }
@@ -708,7 +737,7 @@ export function installKey(transport: Transport): string {
 export function describeTarget(transport: Transport): string {
   switch (transport.mode) {
     case "ssh":
-      return `${transport.username}@${transport.host}`;
+      return sshEndpoint(transport);
     case "docker":
       return `container ${transport.container}`;
     case "local":
@@ -1065,7 +1094,7 @@ export async function copyIntoTarget(
         ssh.putFile(localAbs, targetAbs),
       ).catch((cause: unknown) => {
         throw new Error(
-          `[wp/exec] could not upload "${localAbs}" to ${transport.username}@${transport.host}:"${targetAbs}".`,
+          `[wp/exec] could not upload "${localAbs}" to ${transport.username}@${scpHost(transport)}:"${targetAbs}"${transport.port === undefined ? "" : ` (port ${String(transport.port)})`}.`,
           { cause },
         );
       });

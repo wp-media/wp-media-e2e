@@ -11,7 +11,7 @@ A [`Transport`](../../src/common/config/types.ts), discriminated on `mode`:
 | -------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------- |
 | `local`  | `rootDir`, `stagingDir?`, `elevate?`, `fileOwner?`                                       | `execa`, run in `rootDir`.                      |
 | `docker` | `container`, `rootDir?`, `stagingDir?`, `elevate?`, `fileOwner?`                         | `docker exec <container> …` (see `dockerArgv`). |
-| `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir`, `stagingDir?`, `elevate?`, `fileOwner?`, `runAs?`, `umask?` | `node-ssh` `execCommand`, one line we build (below). |
+| `ssh`    | `host`, `port?`, `username`, `privateKeyPath`, `rootDir`, `stagingDir?`, `elevate?`, `fileOwner?`, `runAs?`, `umask?` | `node-ssh` `execCommand`, one line we build (below). |
 
 Every loaded transport also carries `wpUser`, resolved-only (the site's `username`; a sites file may
 not set it). No command reads `runAs`/`umask`/`wpUser` yet: `runAs`/`umask` decide only the

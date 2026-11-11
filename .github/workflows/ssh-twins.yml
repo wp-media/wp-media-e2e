@@ -1,0 +1,99 @@
+name: SSH twins
+
+# Docker copies of the apache and nginx cells (docker/ssh-cells/), reached over the ssh transport:
+# the twin specs (E2E_SSH_TWINS=1) and the fleet healthcheck against both, as freshly started in
+# legacy-777. Separate from ci.yml, which never needs Docker: building both images takes minutes.
+on:
+  workflow_dispatch:
+  push:
+    # Branches only: a tag push would ignore `paths` and always run.
+    branches: ["**"]
+    paths:
+      - "src/common/wp/**"
+      - "src/common/setup/**"
+      - "src/common/config/**"
+      - "src/common/auth/**"
+      - "src/common/__fixtures__/ssh-twins*"
+      - "healthcheck.ts"
+      - "package.json"
+      - "package-lock.json"
+      - "playwright.unit.config.ts"
+      - "docker/ssh-cells/**"
+      - ".github/actions/setup-chromium/**"
+      - ".github/workflows/ssh-twins.yml"
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ssh-twins-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  twins:
+    name: SSH twins (twin specs + healthcheck)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      # Chromium: the healthcheck logs in through the browser.
+      - uses: ./.github/actions/setup-chromium
+        timeout-minutes: 5
+      - uses: docker/setup-buildx-action@v4
+      # Built here, not by compose, so each image's layers are cached in GitHub's cache: a run that
+      # changes no Dockerfile input rebuilds nothing. `load` hands the image to the Docker engine under
+      # the tag docker-compose.yml names, and env:cells:up skips its own build (TWIN_SKIP_BUILD). Only
+      # develop and manual runs write the cache; other branches read it, so they never evict develop's
+      # (or ci.yml's) entries from the repository's shared cache quota.
+      - name: Build the apache twin
+        uses: docker/build-push-action@v7
+        timeout-minutes: 20
+        with:
+          context: docker/ssh-cells
+          file: docker/ssh-cells/Dockerfile.apache
+          tags: wpme-ssh-apache:local
+          load: true
+          cache-from: type=gha,scope=ssh-twin-apache
+          cache-to: ${{ (github.ref == 'refs/heads/develop' || github.event_name == 'workflow_dispatch') && 'type=gha,mode=max,scope=ssh-twin-apache' || '' }}
+      - name: Build the nginx twin
+        uses: docker/build-push-action@v7
+        timeout-minutes: 20
+        with:
+          context: docker/ssh-cells
+          file: docker/ssh-cells/Dockerfile.nginx
+          tags: wpme-ssh-nginx:local
+          load: true
+          cache-from: type=gha,scope=ssh-twin-nginx
+          cache-to: ${{ (github.ref == 'refs/heads/develop' || github.event_name == 'workflow_dispatch') && 'type=gha,mode=max,scope=ssh-twin-nginx' || '' }}
+      # Waits for both twins to verify their sites, then writes the sites overlays (no sites.json
+      # here, so the overlays are all a run loads: only the twins' cells).
+      # The twins' wait (13 min) ends before the step's timeout, so a slow start prints its logs.
+      - name: Start the twins
+        timeout-minutes: 15
+        env:
+          TWIN_SKIP_BUILD: "1"
+          TWIN_WAIT_SECONDS: "780"
+        run: npm run env:cells:up
+      - name: Twin specs
+        timeout-minutes: 10
+        env:
+          E2E_SSH_TWINS: "1"
+        run: npx playwright test --config playwright.unit.config.ts --project=src ssh-twins
+      - name: Healthcheck on every twin cell
+        timeout-minutes: 10
+        run: npm run healthcheck
+      - name: Twin logs on failure
+        if: ${{ failure() }}
+        run: docker compose -f docker/ssh-cells/docker-compose.yml logs --no-color --tail 200
+      - name: Upload test results on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ssh-twins-results
+          path: test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+      - name: Remove the twins
+        if: ${{ always() }}
+        run: npm run env:cells:down -- --purge-key

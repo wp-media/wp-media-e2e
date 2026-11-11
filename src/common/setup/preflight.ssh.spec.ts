@@ -142,7 +142,7 @@ test("a failing WP-CLI's hint asks for an executable on the PATH, not a shell fu
   const { checks } = await verifySite(site(server.root), 0);
 
   expect(checks[0]?.hint).toBe(
-    "Ensure 'wp' is in PATH on site.test for user 'tester', as an executable file: a shell " +
+    "Ensure 'wp' is in the PATH of tester@site.test, as an executable file: a shell " +
       "function or alias named `wp` is never run.",
   );
 });
@@ -217,7 +217,7 @@ test("a WP-CLI that crashes is reported as WP-CLI's failure, and the root is sti
     { name: "rootDir accessible", ok: true },
   ]);
   expect(checks[0]?.detail).toBe(
-    '[wp/exec] "wp" on site.test was terminated by signal SIGSEGV before exiting.',
+    '[wp/exec] "wp" on tester@site.test was terminated by signal SIGSEGV before exiting.',
   );
   expect(checks[0]?.hint).toMatch(
     /^PHP was killed running WP-CLI itself \(`wp --info` loads no WordPress\)/,
@@ -233,7 +233,7 @@ test("a WordPress that crashes while booting is reported as one that could not b
     name: "WordPress installed",
     ok: false,
     detail:
-      'WordPress could not be evaluated: [wp/exec] "wp" on site.test was terminated by signal ' +
+      'WordPress could not be evaluated: [wp/exec] "wp" on tester@site.test was terminated by signal ' +
       "SIGSEGV before exiting.",
     hint:
       "PHP was killed while WordPress booted — a segfault, or the kernel's out-of-memory kill. Run " +
@@ -259,7 +259,7 @@ test("a WordPress that crashes reading the admin locale is reported as a crash, 
 test.describe("a WordPress that crashes booting, and the cell's plugin", () => {
   const SLUG = "backwpup-pro";
   const KILLED =
-    '[wp/exec] "wp" on site.test was terminated by signal SIGSEGV before exiting.';
+    '[wp/exec] "wp" on tester@site.test was terminated by signal SIGSEGV before exiting.';
   let healed: string[];
 
   /** A heal that removes the copy: WordPress boots again afterwards. */
@@ -318,4 +318,62 @@ test.describe("a WordPress that crashes booting, and the cell's plugin", () => {
     expect(locale?.detail).toBe(`Could not read the admin locale: ${KILLED}`);
     expect(locale?.hint).toMatch(/^PHP was killed while WordPress booted/);
   });
+});
+
+/**
+ * The commands a failed check tells an operator to paste: with the site's port when it declares one
+ * (the SSH twins share a host), and no `-p` when it does not.
+ */
+test.describe("a failed check's hint reaches the site on its own port", () => {
+  /**
+   * A site on the test server with `rootDir` and, when given, `port` (node-ssh is steered to the
+   * server whatever the port says).
+   *
+   * @param rootDir - the WordPress root it declares.
+   * @param port - the port it declares, or none.
+   * @param privateKeyPath - the key, when not the server's.
+   */
+  function siteOn(
+    rootDir: string,
+    port: number | undefined,
+    privateKeyPath?: string,
+  ): SiteInput {
+    const transport = server.transport({
+      rootDir,
+      elevate: false,
+      ...(port === undefined ? {} : { port }),
+      ...(privateKeyPath === undefined ? {} : { privateKeyPath }),
+    });
+    return { ...site(rootDir), transport };
+  }
+
+  for (const port of [undefined, 2210]) {
+    const p = port === undefined ? "" : `-p ${String(port)} `;
+
+    test(`a root that cannot be entered: the hint's ls command ${port === undefined ? "has no -p" : "passes -p 2210"}`, async () => {
+      installWp();
+      const missing = join(server.root, "absent");
+
+      const { checks } = await verifySite(siteOn(missing, port), 0);
+
+      const key = server.transport().privateKeyPath;
+      expect(checks[1]?.hint?.split("\n")[2]).toBe(
+        `  ssh ${p}-i "${key}" tester@site.test "ls -ld '${missing}'"`,
+      );
+    });
+
+    test(`a connection that cannot open: the hint names port ${String(port ?? 22)} and a matching ssh command`, async () => {
+      const key = join(server.home, "no-such-key");
+
+      const { checks } = await verifySite(siteOn(server.root, port, key), 0);
+
+      expect(checks.map(({ name, ok }) => ({ name, ok }))).toEqual([
+        { name: "SSH connection", ok: false },
+      ]);
+      expect(checks[0]?.hint).toBe(
+        `Verify host "site.test" is reachable on port ${String(port ?? 22)}.\n` +
+          `Test locally: ssh ${p}-i "${key}" tester@site.test "echo ok"`,
+      );
+    });
+  }
 });

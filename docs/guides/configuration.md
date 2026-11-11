@@ -75,7 +75,7 @@ Discriminated on `mode`; dispatch in [wordpress-automation.md](../architecture/w
 | -------- | ----------------------------------------------- | ----------------------------------------------------------------- |
 | `local`  | `rootDir`                                       | `stagingDir`, `elevate`, `fileOwner`                              |
 | `docker` | `container`                                     | `rootDir`, `stagingDir`, `elevate`, `fileOwner`                   |
-| `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir` | `stagingDir`, `elevate`, `fileOwner`, `runAs`, `umask`            |
+| `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir` | `port`, `stagingDir`, `elevate`, `fileOwner`, `runAs`, `umask`    |
 
 The loader adds `wpUser` to every transport, copied from the site's `username` (the WordPress login
 WP-CLI will act as, `--user`); a sites file that sets it is refused.
@@ -84,6 +84,11 @@ WP-CLI will act as, `--user`); a sites file that sets it is refused.
 which read `!` inside quotes), and `wp` as an **executable on that login's `PATH`** (a shell function or
 alias is never run) ([the ssh command line](../architecture/wordpress-automation.md#transport--exec-wpexects)).
 
+- **`port`** (`ssh` only, refused elsewhere; default `22`, and a declared `22` is dropped) — the SSH
+  server's port: a JSON whole number 1–65535 (a text, fraction or out-of-range value fails the load).
+  Part of the connection's identity, so two sites on one host and root (the [SSH twins](#ssh-twins))
+  never share a connection or cached fact; messages name the site `user@host:port` (an IPv6 host
+  bracketed: `user@[::1]:2222`).
 - **`rootDir`** — the WordPress root (holding `wp-load.php`) and every WP-CLI command's working
   directory; **absolute** (`/…`) on every transport, refused at load otherwise (a relative one would
   resolve from the SSH login's home). Optional for `docker` only because the container's `WORKDIR` is that root; declare it to
@@ -318,3 +323,53 @@ Read by [`backwpup.config.ts`](../../src/projects/backwpup/config/backwpup.confi
 [`docker/`](../../docker/) runs Apache (`:8100`) and Nginx (`:8101`) over one MariaDB for the `docker`
 transport. Copy [`docker/sites.example.json`](../../docker/sites.example.json) into a product's
 `sites.docker.json` (or `sites.json`); commands (`env:up` / `env:down` / `env:logs`) in the README's "Local WordPress (Docker)" section.
+
+## SSH twins
+
+[`docker/ssh-cells/`](../../docker/ssh-cells/) builds Docker copies of the apache and nginx cells
+(Ubuntu 24.04, sshd, sudo, WP-CLI; each script's header says what it does) for the `ssh` transport, so
+site-identity work runs against real hosts' rules without touching a cell. Its own compose project
+(`wpme-ssh`, `docker/ssh-cells/docker-compose.yml`), apart from the `docker` sites above: `env:down`
+never removes a twin, and no port is shared.
+
+| Command | Does |
+| --- | --- |
+| `npm run env:cells:up` | Removes this checkout's overlays, makes the shared key if absent, builds both images (cached; `TWIN_SKIP_BUILD=1` skips; never from another checkout than the twins' owner), refuses ports another program holds on `127.0.0.1` or `::1`, waits until both verified their site, proves each published port from the host (an `SSH-` banner; WordPress's `blank.gif` at `localhost` and `127.0.0.1`), writes and loads the overlays (a failed load removes them) |
+| `npm run env:cells:reset -- <apache\|nginx> <variant>` | Resets one running twin to a variant and proves it (`check.sh`); refuses others, listing the variants |
+| `npm run env:cells:down [-- --force] [-- --purge-key]` | Removes this checkout's overlays, then the containers and volumes (`--force`: even another checkout's); `--purge-key` also the shared key, its marker and (if then empty) its folder. With Docker stopped, the files still go (exit 1). The images stay |
+
+- **Containers** `wpme-ssh-apache` / `wpme-ssh-nginx`, published on `127.0.0.1` only: SSH
+  `TWIN_APACHE_SSH_PORT` / `TWIN_NGINX_SSH_PORT` (`2210` / `2211`), site `http://localhost:<port>` on
+  `TWIN_APACHE_HTTP_PORT` / `TWIN_NGINX_HTTP_PORT` (`8110` / `8111`). Login `TWIN_ADMIN_USER` /
+  `TWIN_ADMIN_PASSWORD` (`admin` / `twin-admin-password`; letters, digits, `._@%+=-`). A new container
+  starts in `TWIN_VARIANT` (`legacy-777`); a kept or restarted one keeps its site. Changing a port,
+  `TWIN_ADMIN_*`, `TWIN_VARIANT` or the image recreates the twin at the next `up`.
+- **One twin set per machine, shared by every checkout.** The key is per user, outside any checkout:
+  `TWIN_KEY_DIR` (absolute; default `~/.local/share/wp-media-e2e/ssh-twins/`, 0700, key 0600), so an
+  `up` from another checkout keeps the twins. `cells.sh` uses or purges only a folder it made (its
+  `.wpme-ssh-twins` marker) holding its own key (no passphrase, comment `wpme-ssh-twins`), and
+  never changes an existing folder's mode: name a folder that does not exist yet (never `~/.ssh`).
+- The containers are labelled with the checkout that created them (`wpme.ssh-twins.checkout`, its
+  physical path: a symlinked path is the same owner). An `up` from another checkout builds nothing
+  (the image tags are shared), uses them as they are, and refuses when compose would create or
+  recreate one: a missing twin, a `config-hash` label differing from `docker compose config --hash`
+  (settings, key), or a container image other than its tag's. A `down` from another checkout removes
+  only its overlays and refuses the rest without `--force`. A `down` in the owner leaves other
+  checkouts' overlays: run `down` there too.
+- **Overlays** (git-ignored, 0600), one per product: BackWPup `sites.twins.json` → `pro@twin-apache`,
+  `pro@twin-nginx` (`edition: "pro"`); WP Rocket → `twin-apache`, `twin-nginx`. Each: `ssh` to
+  `127.0.0.1:<ssh port>` as `ubuntu` with the twins' key, `rootDir` `/var/www/site/public`, no `runAs`.
+  They merge with a `sites.json` (disjoint cells; BackWPup's editions all-or-none hold, since every
+  real cell declares one). **Without a `sites.json` the overlays are all that loads, never the
+  example**: every run, `@noauth` included, and the healthcheck see only the twins' cells, and their
+  setup needs the twins up — so `env:cells:down` removes the overlays with the twins.
+- **Twin specs**: `*.spec.ts` gated on `E2E_SSH_TWINS=1` (skipped by `npm run test:unit`); twin cells
+  and sites through [`__fixtures__/ssh-twins.ts`](../../src/common/__fixtures__/ssh-twins.ts). With
+  the twins up: `E2E_SSH_TWINS=1 npx playwright test --config playwright.unit.config.ts ssh-twins`.
+  CI: [`ssh-twins.yml`](../../.github/workflows/ssh-twins.yml) (manual, or a branch push touching
+  `src/common/{wp,setup,config,auth}/`, the twin fixtures, `healthcheck.ts`, `package*.json`,
+  `playwright.unit.config.ts`, `docker/ssh-cells/`, the Chromium action or the workflow) builds both
+  images with GitHub's layer cache (written only by `develop` and manual runs), then runs the twin
+  specs and `npm run healthcheck`.
+- What each variant models and must produce:
+  [Phase 12 plan → Twin variants](../plans/phase-12-site-identity-plan.md#twin-variants-120a-and-what-each-must-produce).

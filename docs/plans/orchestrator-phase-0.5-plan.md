@@ -977,6 +977,10 @@ idea, §4.7); on the runner, §6 end to end and V121/V122 there (§9, D4); the f
 and Datator posts (D5, D6). Terminal rendering and the live table are modernization Phase 7, not
 Phase 1's service (§4.11); both are done (7.3a the model, 7.3b the drawing).
 
+Flake to investigate: `orchestrator/start.spec.ts` "a loop stuck with no run recorded running says
+so" failed once under a full `npm run test:unit`'s load and passes alone (seen 2026-11-10, Phase
+12.0b's audit); likely a timing margin, not reproduced yet.
+
 ### 7.2 Traps
 
 Non-obvious failures the audits found, stated as the general rule a new module (Phase 1's included)

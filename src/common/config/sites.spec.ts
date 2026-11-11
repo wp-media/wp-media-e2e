@@ -480,6 +480,57 @@ test.describe("transport parsing — runAs numeric ids", () => {
   });
 });
 
+/** `port`: the SSH server's port, for hosts serving several sites (the SSH twins). */
+test.describe("transport parsing — port (ssh only)", () => {
+  test("a whole number from 1 to 65535 is kept", () => {
+    for (const port of [1, 21, 23, 2210, 65535]) {
+      expect(loadTransport({ ...SSH, port }).port, String(port)).toBe(port);
+    }
+  });
+
+  // An explicit 22 is the default: kept, it would key a second connection to the same server.
+  test("port 22 is dropped, so the site loads exactly as one declaring no port", () => {
+    const declared = loadTransport({ ...SSH, port: 22 });
+    expect("port" in declared).toBe(false);
+    expect(declared).toEqual(loadTransport(SSH));
+  });
+
+  test("an undeclared port is omitted entirely, not set to undefined", () => {
+    expect("port" in loadTransport(SSH)).toBe(false);
+  });
+
+  test("a port out of range or not whole is refused, quoting the number", () => {
+    for (const bad of [0, -22, 65536, 22.5]) {
+      expect(
+        failure(() => loadTransport({ ...SSH, port: bad })),
+        String(bad),
+      ).toMatch(
+        new RegExp(
+          `${SITE_PATH.source}port must be a whole number from 1 to 65535 — got ${String(bad).replace(".", "\\.")}\\.$`,
+        ),
+      );
+    }
+  });
+
+  // A text may hold anything an operator pasted, so it is described, never quoted.
+  test("a non-number port is refused by its kind", () => {
+    for (const [bad, kind] of [
+      ["2210", "a text of 4 characters"],
+      [null, "null"],
+      [true, "true"],
+    ] as const) {
+      expect(
+        failure(() => loadTransport({ ...SSH, port: bad })),
+        kind,
+      ).toMatch(
+        new RegExp(
+          `${SITE_PATH.source}port must be a whole number from 1 to 65535 — got ${kind}\\.$`,
+        ),
+      );
+    }
+  });
+});
+
 test.describe("transport parsing — umask (ssh only)", () => {
   test("three or four octal digits keeping the owner's bits, normalised to four", () => {
     for (const [declared, parsed] of [
@@ -583,15 +634,17 @@ test.describe("transport parsing — umask (ssh only)", () => {
   });
 });
 
-// docker and local have no second identity: a field that would be silently ignored is refused, so an
-// operator never believes a site runs as someone it does not.
-test.describe("transport parsing — runAs and umask are refused off ssh", () => {
+// docker and local have no second identity and no server to reach: a field that would be silently
+// ignored is refused, so an operator never believes a site runs as someone, or on a port, it does not.
+test.describe("transport parsing — port, runAs and umask are refused off ssh", () => {
   const transports = {
-    docker: [{ mode: "docker", container: "c" }, "the container's user"],
-    local: [{ mode: "local", rootDir: "/srv/wp" }, "the runner's user"],
+    docker: { mode: "docker", container: "c" },
+    local: { mode: "local", rootDir: "/srv/wp" },
   } as const;
-  for (const [mode, [transport, runsAs]] of Object.entries(transports)) {
+  for (const [mode, transport] of Object.entries(transports)) {
     for (const [field, value] of [
+      ["port", 2210],
+      ["port", 22], // even the default: the field means nothing here
       ["runAs", "auto"],
       ["runAs", false], // even the opt-out: the field means nothing here
       ["runAs", "www-data:www-data"],
@@ -603,8 +656,8 @@ test.describe("transport parsing — runAs and umask are refused off ssh", () =>
           failure(() => loadTransport({ ...transport, [field]: value })),
         ).toMatch(
           new RegExp(
-            `${SITE_PATH.source}${field} applies to "ssh" transports only, and this one is "${mode}": ` +
-              `its commands run as ${runsAs}\\. Remove the field\\.$`,
+            `${SITE_PATH.source}${field} applies to "ssh" transports only, and this one is "${mode}", ` +
+              "which would ignore it\\. Remove the field\\.$",
           ),
         );
       });
@@ -691,7 +744,7 @@ test.describe("transport parsing — wpUser is resolved, never declared", () => 
  */
 test.describe("unknown keys are refused, naming them and what is allowed", () => {
   const ALLOWED = {
-    ssh: "mode, stagingDir, elevate, fileOwner, host, username, privateKeyPath, rootDir, runAs, umask",
+    ssh: "mode, stagingDir, elevate, fileOwner, host, port, username, privateKeyPath, rootDir, runAs, umask",
     docker: "mode, stagingDir, elevate, fileOwner, container, rootDir",
     local: "mode, stagingDir, elevate, fileOwner, rootDir",
   } as const;

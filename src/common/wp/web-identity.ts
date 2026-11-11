@@ -794,7 +794,7 @@ const FILE_VERSION = 1;
  * Writes every verdict of a run's sites at once (one writer per cell: the auth setup), atomically: a
  * temporary file renamed over the old one, so a worker never reads half a file.
  *
- * Holds owners, web identities, umasks, SAPIs and reason lines, keyed by `installKey` (user, host,
+ * Holds owners, web identities, umasks, SAPIs and reason lines, keyed by `installKey` (user, host, port,
  * key path, root): no password, key or token.
  *
  * @param dir - the folder (the cell's auth folder); created if missing.

@@ -268,6 +268,7 @@ const TRANSPORT_FIELDS: Readonly<Record<ServerMode, readonly string[]>> = {
   ssh: [
     ...COMMON_TRANSPORT_FIELDS,
     "host",
+    "port",
     "username",
     "privateKeyPath",
     "rootDir",
@@ -376,10 +377,12 @@ function validateTransport(value: unknown, path: string): Transport {
     case "ssh": {
       const runAs = optionalRunAs(value.runAs, `${path}.runAs`);
       const umask = optionalUmask(value.umask, `${path}.umask`);
+      const port = optionalPort(value.port, `${path}.port`);
       return {
         ...base,
         mode: "ssh",
         host: requireString(value.host, `${path}.host`),
+        ...(port !== undefined ? { port } : {}),
         username: requireString(value.username, `${path}.username`),
         privateKeyPath: requireString(
           value.privateKeyPath,
@@ -503,12 +506,45 @@ function optionalUmask(value: unknown, path: string): string | undefined {
   return parseUmask(value, path);
 }
 
-/** The transport fields only `ssh` takes: the others have no second identity to run commands as. */
-const SSH_ONLY_FIELDS = ["runAs", "umask"] as const;
+/** The port an ssh site without `port` is reached on (node-ssh's default too). */
+const SSH_DEFAULT_PORT = 22;
+
+/**
+ * Validates an optional `port` (ssh only): a whole number from 1 to 65535. A port in a text, a
+ * fraction or one out of range is refused rather than coerced: node-ssh would otherwise connect to
+ * whatever it made of it.
+ *
+ * @param value - the value read from the file.
+ * @param path - where it sits, for the message.
+ * @returns the port, or `undefined` when absent or 22 (the default, so both key one connection).
+ * @throws Error naming `path`, describing the refused value by its kind.
+ */
+function optionalPort(value: unknown, path: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > 65535
+  ) {
+    throw new Error(
+      `[sites] ${path} must be a whole number from 1 to 65535 — got ` +
+        `${typeof value === "number" ? String(value) : describeValue(value)}.`,
+    );
+  }
+  // 22 is what an absent port means: one site, one connection key, however it is written.
+  return value === SSH_DEFAULT_PORT ? undefined : value;
+}
+
+/**
+ * The transport fields only `ssh` takes: who commands run as (`runAs`, `umask`) and where the server
+ * listens (`port`). `docker` and `local` have neither a second identity nor a server to reach.
+ */
+const SSH_ONLY_FIELDS = ["port", "runAs", "umask"] as const;
 
 /**
  * Refuses an `ssh`-only field on a `docker` or `local` transport rather than dropping it, so an
- * operator never believes a site runs as an identity it does not.
+ * operator never believes a site runs as an identity, or is reached on a port, it is not.
  *
  * @param transport - the transport object read from the file.
  * @param path - the transport's path, for the message.
@@ -523,9 +559,8 @@ function refuseSshOnly(
   for (const field of SSH_ONLY_FIELDS) {
     if (transport[field] !== undefined) {
       throw new Error(
-        `[sites] ${path}.${field} applies to "ssh" transports only, and this one is "${mode}": ` +
-          `its commands run as ${mode === "docker" ? "the container's user" : "the runner's user"}. ` +
-          "Remove the field.",
+        `[sites] ${path}.${field} applies to "ssh" transports only, and this one is "${mode}", ` +
+          "which would ignore it. Remove the field.",
       );
     }
   }
