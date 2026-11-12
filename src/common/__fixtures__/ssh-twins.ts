@@ -421,6 +421,10 @@ export function extendRunningTest(
  * Each stretch spent waiting for the lock is added to the running test's timeout as it passes (not
  * once at the end, by when a long wait would have timed the test out): another spec can hold a twin
  * for minutes, and that wait says nothing about this test, whose timeout budgets only its own work.
+ * A stretch runs from the end of the previous one (or the first look at the lock) to the end of
+ * the next poll, so looking again counts as waiting too — on a loaded host those looks (a handful of
+ * file-system calls each) add up to a good part of the wait — and the stretches sum to the whole
+ * wait, with no per-stretch rounding piling up.
  *
  * @param stack - which twin.
  * @param work - what to do with it.
@@ -444,7 +448,8 @@ export async function withTwin<T>(
   ensureLockBase(base);
   const dir = join(base, `wpme-ssh-twin-${stack}.lock`);
   const onWaited = options.onWaited ?? extendRunningTest;
-  const deadline = Date.now() + (options.timeoutMs ?? 600_000);
+  let since = Date.now();
+  const deadline = since + (options.timeoutMs ?? 600_000);
   while (!tryLock(dir)) {
     if (Date.now() > deadline) {
       throw new Error(
@@ -452,9 +457,10 @@ export async function withTwin<T>(
           "another user (or a reused pid) left; remove the folder once no twin spec runs.",
       );
     }
-    const before = Date.now();
     await sleep(options.pollMs ?? LOCK_POLL_MS);
-    onWaited(Date.now() - before);
+    const now = Date.now();
+    onWaited(now - since);
+    since = now;
   }
   try {
     return await work();

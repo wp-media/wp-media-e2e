@@ -286,8 +286,9 @@ lives in a sibling module, unit-testable without it.
   the install **created** (`normalizeOwnership`; in `site` only verified as the identity's, warned
   otherwise; one that existed — a shared parent — never touched; bounded at 30 s;
   `wp/install-outputs.ts`); create the declared data directories (`ProductConfig.siteResidue`, and `resolveSiteDataDirs` for
-  names the plugin picks at runtime, e.g. BackWPup's `uploads/backwpup-restore-<20 hex>`), open to
-  **both** WP-CLI's and the web server's user and handed to the site's ownership. The edition is
+  names the plugin picks at runtime, e.g. BackWPup's `uploads/backwpup-restore-<20 hex>`), opened
+  `0777` in **every** state (outside `site` WP-CLI and the web server may be two users, and so are a `site`
+  scenario opting back to the SSH user and the web server) and handed to the site's ownership. The edition is
   never named: the slug is `pluginArtifact("plugin").slug`. To reinstall part-way, a step calls
   `replacePluginUnderTest` (no log reset, so the teardown judges the whole log) with
   `declaredResidue`.
@@ -297,8 +298,8 @@ lives in a sibling module, unit-testable without it.
   failed uninstall still **fails the scenario** (`PluginUninstallBrokenError`); sweep its database
   footprint; clear the **files it left** (an uninstall keeps its data, and per-scenario reinstalls
   would fill the disk). All five always run, independently; the log verdict wins and other failures
-  are logged. Having to stop work is reported; work that _won't_ stop is a failure. Leftovers the
-  transport's user may not remove are reported, not failed
+  are logged. Having to stop work is reported; work that _won't_ stop is a failure. Leftovers neither
+  the site's commands nor root (no elevation, `elevate: false`) could remove are reported, not failed
   ([wordpress-automation.md](docs/architecture/wordpress-automation.md#left-over-plugin-data-wpresiduets)).
   A drained scenario gets neither hook.
 - The scenario timeout is extended **additively** for both hooks (remote WP-CLI + SFTP is slow),
@@ -517,17 +518,19 @@ automatically, and that verification **must not** be skipped. Mirrored as a comm
   one a scenario may never have made. Prove a transfer with `fileChecksum`, not size.
 - `wp/archive.ts`: tar's "absent" and "unreadable" share exit 2, so readability is proved by listing
   the whole archive. `.zip` is out of scope.
-- **MUST — code that writes into a docroot as the transport's user calls `normalizeOwnership` on what
-  it wrote; never `chown`/`chmod` directly, never elevate `wp`** (WP-CLI as root leaves files the web
-  server cannot write). `stageAndInstallPlugin` does it when given the `slug` — pass it. Override per
-  site with `transport.fileOwner` (`"user:group"`, or `false`). Call it in every identity state: in
-  `site` (commands run as the web server) it answers `unnecessary` and runs no privileged command.
+- **MUST — `wp` never runs as root; site commands run as the site's identity** (`exec`/`wpCli`,
+  never `execElevated`: WP-CLI as root leaves files the web server cannot write). **Code that writes
+  into a docroot calls `normalizeOwnership` on what it wrote; never `chown`/`chmod` directly.** It
+  hands the files over outside `site` (`same-user`, `fallback`, `disabled`: commands ran as the transport's user); in `site` they
+  are already the web server's, so it answers `unnecessary` and runs no privileged command — call it
+  anyway, never branch on the state. `stageAndInstallPlugin` does it when given the `slug` — pass it.
+  Override per site with `transport.fileOwner` (`"user:group"`, or `false`).
 - An elevated target built from `rootDir` passes the lexical guards in `wp/paths.ts` and
   `assertResolvedInsideRoot` (`wp/transport-exec.ts`), which refuses a path a symlink in any parent leads out of
   the docroot, or one it cannot resolve. A symlink **at** an ownership target (inside the root, so it
   passes) is refused by the grant's own root command (`GRANT_SCRIPT`): `chmod` follows an operand.
-- Leftovers: `ProductConfig.siteResidue` (files, `wp/residue.ts`; unprivileged first, then only what
-  survived elevated; `transport.elevate: false` refuses elevation) and `ProductConfig.siteDbResidue`
+- Leftovers: `ProductConfig.siteResidue` (files, `wp/residue.ts`; as the site's commands run first —
+  the identity in `site` —, then only what survived elevated; `transport.elevate: false` refuses elevation) and `ProductConfig.siteDbResidue`
   (options, tables, roles, capabilities, `wp/db-residue.ts`; never elevated, multisite refused). Both
   verified by re-reading.
 - **Site identity** ([`wp/site-identity.ts`](src/common/wp/site-identity.ts), routing `exec`/`wpCli`):
@@ -579,7 +582,8 @@ ErrorType}`, `{@link …}`, `@example` with ` ```ts `. **Never** JSDoc type anno
   back-reference (`…just the same`, `…too`, a dangling `it`); shared setup, and why scenarios
   resemble each other, go in `Feature`/`Background` ([authoring-tests.md → Naming
   scenarios](docs/guides/authoring-tests.md#naming-scenarios)).
-- **Never write to a docroot without restoring its ownership** — the
+- **Never leave what the suite wrote to a docroot owned by anyone but the site**: call
+  `normalizeOwnership` on it (a no-op in `site`) — the
   [MUST in the WordPress layer](#wordpress-automation-layer)
   ([details](docs/architecture/wordpress-automation.md#file-ownership-wpownershipts)).
 - **Layering:** UI in page objects, WP-CLI in `wp/`, shared code in `common/`, product specifics in
@@ -635,9 +639,10 @@ history:
   obligations).
 - [`phase-6-feature-porting-plan.md`](docs/plans/phase-6-feature-porting-plan.md) — feature porting
   (BackWPup first); supersedes the parent plan's Phase 6.
-- [`phase-12-site-identity-plan.md`](docs/plans/phase-12-site-identity-plan.md) — next: every site
-  command as the web server's identity (`sudo -u/-g`), `wp --user=<admin>`, warned fallbacks; Part B
-  readies WP Rocket's lifecycle.
+- [`phase-12-site-identity-plan.md`](docs/plans/phase-12-site-identity-plan.md) — every site command
+  as the web server's identity (`sudo -u/-g`), `wp --user=<admin>`, warned fallbacks: built and
+  twin-verified (12.1–12.10); left in 12.11: the per-cell rollout and the `"auto"` default (its
+  checklist is there). Part B readies WP Rocket's lifecycle.
 - [`orchestrator-plan.md`](docs/plans/orchestrator-plan.md) — the orchestrator, a long-running service
   running cells on a server (supersedes the parent plan's Phase 9); includes Phase 0 (done): the run
   contract and each suite change's decision.

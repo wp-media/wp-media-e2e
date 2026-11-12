@@ -1,6 +1,6 @@
 # Phase 12 — Run as the site: the web server's identity for every site command
 
-Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8 and 12.9 done 2026-11-12. Parent:
+Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8, 12.9 and 12.10 done 2026-11-12; 12.11's non-live part done 2026-11-12 (live rollout and default next). Parent:
 [e2e-modernization-plan.md](e2e-modernization-plan.md) (§3 phase table). Reverses that plan's §8.2
 rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of WP Rocket's port
 ([phase-6 plan §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket)).
@@ -268,7 +268,7 @@ Code never cites this plan; docs may.
 | 12.7 | Ownership, residue, log, files in the `site` state (done 2026-11-11) | 12.4 | 12.5, 12.6 | M / M |
 | 12.8 | Install outputs, handed over in fallback (done 2026-11-12) | 12.7 | 12.9, 12.10 | S / S |
 | 12.9 | Pre-flight and healthcheck reports, banner, sudoers checks (done 2026-11-12) | 12.3–12.6 | 12.8, 12.10 | M / M |
-| 12.10 | BackWPup on the new system; the two-user scenario opts back; private folder | 12.0b, 12.5–12.7; step 4 also 12.9 | 12.8, 12.9 (steps 1–3) | M / M |
+| 12.10 | BackWPup on the new system; the two-user scenario opts back; private folder (done 2026-11-12) | 12.0b, 12.5–12.7; step 4 also 12.9 | 12.8, 12.9 (steps 1–3) | M / M |
 | 12.11 | Docs, decision record, live verification, default `"auto"` | 12.0b–12.10 | — | M / M |
 | 12.12 | WP Rocket declarations and licence | 12.11 | 12.13 | S / M |
 | 12.13 | Settling admin request after install | 12.11 | 12.12 | S / M |
@@ -951,7 +951,7 @@ Documented in AGENTS.md ("Auth fixture / setup" step 1, healthcheck) and
   `owner-not-web` only, once for both products; with both overlays at `runAs: false`: no banner, each
   check line "Runs as the transport's user, as configured (`runAs` is false); nothing to fix."
 
-### 12.10 — BackWPup on the new system
+### 12.10 — BackWPup on the new system (done 2026-11-12)
 
 1. **Baseline**, before this phase's changes: the full BackWPup suite on both twins in `legacy-777`
    with `runAs: false` (`E2E_RETRIES=0`). Record each scenario's outcome (`results.jsonl`).
@@ -1127,6 +1127,74 @@ Documented in AGENTS.md ("Auth fixture / setup" step 1, healthcheck) and
 - Then the default becomes `"auto"` (`ssh` only). Revisit then whether an explicit `runAs: false`
   should be noted in the identity banner (12.9 keeps it out: an opt-out while `false` is the default).
 - Done: green on the twins and `pro@nginx`; the banner states what it should; docs merged.
+- **Progress 2026-11-12 (non-live part done; live rollout and default next):**
+  - Docs: AGENTS.md (the WordPress-layer MUST now "`wp` never runs as root; site commands run as the
+    site's identity", `normalizeOwnership` handing over outside `site`; the ownership convention;
+    `@plugin` data directories `0777` in every state and why; leftovers "neither the site's commands
+    nor root"; In-progress plans), wordpress-automation.md (MUST, residue's preparation and resolver
+    run as the site's commands, Elevated housekeeping's premise, staging example), configuration.md
+    (`fileOwner` in `site`; "Server checklist for `runAs`" and the cell switch), modernization §8.2
+    (reversal and how each old objection is answered) and §8.4 (obligation closed). The rest
+    (Transport & exec, staging in `site`, Site identity, log, authoring-tests' fixtures) was already
+    current from 12.1–12.10.
+  - **Twins, every variant × both stacks, `runAs: "auto"`, healthcheck exit 0 each (4/4 sites, 10/10
+    checks):**
+
+    | Variant | State (both stacks) | Identity banner |
+    | --- | --- | --- |
+    | `legacy-777` | `fallback/owner-not-web` | 2 sites: owner-not-web + chown fix |
+    | `site` | `site` (www-data:www-data, 0022) | silent |
+    | `site-775` | `site` | silent |
+    | `no-sudo` | `fallback/no-sudo` | 2 sites: no-sudo + sudoers fix (and the elevation banner) |
+    | `owner-mismatch` | `fallback/owner-not-web` | 2 sites: owner-not-web + `!log_allowed` warning each |
+    | `no-wp` | `fallback/no-wp` | 2 sites: no-wp + `secure_path` fix |
+    | `wpconfig-root` | `site` | silent |
+
+    All as the variant table; one install under both products listed once.
+  - Full BackWPup suite, `site` on both twins, `E2E_RETRIES=0`, concurrently: 70/70 apache (14.1 min),
+    70/70 nginx (15.1 min), none skipped; `site-identity.json` `owner-is-web` for this run on both.
+    Twin specs (`E2E_SSH_TWINS=1 … ssh-twins`): 96/96. Twins down afterwards.
+  - Fixed (pre-existing, not identity): `ssh-twins.spec.ts` "the wait for a held lock is added…" was
+    load-flaky (`added` 217–299 ms vs `>= 300`): `withTwin` counted only its sleeps, not its looks at
+    the lock between them (measured: up to 167 ms over 16 looks with 12 workers). Its stretches now
+    run poll end to poll end, and the spec's lower bound is exact (release time − call time).
+    12 workers: before 4/100 failed; after 600/600, and 100/100 beside 24 CPU hogs and file churn;
+    the old `withTwin` fails the new spec 100/100.
+  - **Default `"auto"`: ready-to-apply checklist** (measured by flipping it in an isolated copy:
+    `test:unit` 7 failures, 6 of them the specs below, the 7th the flake above, since fixed):
+    1. Before merging: every real `ssh` site not yet switched gets an explicit `"runAs": false` in its
+       git-ignored sites file (this checkout's and the orchestrator servers'), or the flip switches it
+       unchecked. Placeholder examples and the twin overlays (explicit `"auto"`) need nothing.
+    2. `src/common/config/run-as.ts`: `DEFAULT_SSH_RUN_AS = "auto"`; reword its TSDoc (no longer "moves
+       only after…": absent now asks for the identity, verified by the pre-flight, `false` opts out).
+       Other TSDoc calling `false` the default or absent `disabled`: `identity-verdicts.ts:15`
+       (module doc), `site-identity-report.ts:72` (`asksForIdentity`), `wp/site-identity.ts:318`
+       (`decideIdentityState` rule 2).
+    3. Specs pinning the old default (deliberate re-pins, explained in the commit, not loosened):
+       `run-as.spec.ts:27-29` (expect `"auto"`); `identity-verdicts.spec.ts:88` (absent now reads the
+       verdict file: move it from the "never read" case to the `auto` one);
+       `site-identity-report.spec.ts:512` (`asksForIdentity`: absent asks);
+       `exec.site.ssh.spec.ts:309` (its as-transport baseline is `server.transport()`: give it
+       `runAs: false`); `housekeeping.site.ssh.spec.ts:315/331` ("runAs absent" expects `disabled`:
+       now `fallback/unverified` with no verdict — keep the case, expect that, or declare `false`);
+       `site-identity.ssh.spec.ts:329-331` (comment and `disabled` → declare `false`). Still passing
+       but relabel: `staging.site.ssh.spec.ts:435/566` and `exec.site.ssh.spec.ts:164` "runAs absent"
+       (now `fallback/unverified`, still today's line).
+    4. Docs: AGENTS.md "Site identity fields" (drop "keep real sites at `false`…", default `"auto"`);
+       configuration.md `runAs` (absent = `"auto"`; `false` the opt-out; drop the "keep at `false`"
+       sentence); wordpress-automation.md Transport & exec ("`runAs` absent or `false`" → "`runAs:
+       false`"); modernization §8.2's last sentence; this plan's TL;DR and §2.1 `disabled` row.
+    5. Note the cost: with no verdict (`--no-deps` loops) every unswitched-by-config ssh site now warns
+       `fallback/unverified` once per worker and runs as the transport's user (as designed).
+  - **Banner for an explicit `runAs: false` once `"auto"` is the default — recommendation: keep it
+    out of the banner** (no code change). The banner lists what needs fixing on a host; `false` is the
+    operator's decision, and listing it would contradict the check's own ✓ line ("Runs as the
+    transport's user, as configured (`runAs` is false); nothing to fix"), and the elevation banner's
+    precedent (silent for `elevate: false`). After the flip `disabled/config` arises only from an
+    explicit `false`, so the check line already says, per site and every run, that it opted out. The
+    risk — a `false` forgotten after its server was fixed — is better met by the rollout (step 1
+    above lists each such site; remove each `false` as its cell switches) than by a permanent warning
+    every live run would carry. Revisit if an opted-out site is ever found forgotten.
 
 ### 12.12 — WP Rocket declarations and licence
 

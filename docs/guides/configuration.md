@@ -102,9 +102,10 @@ alias is never run) ([the ssh command line](../architecture/wordpress-automation
   top-level paths like `/var` are rejected
   ([staging](../architecture/wordpress-automation.md#site-staging--file-transfer-wpstagingts)).
 - **`elevate`** (default: allowed) — whether **cleanup** may re-run a command with privileges when the
-  transport's user cannot finish it. A plugin writes as the web-server user, some files in directories
-  only that user can write, so without it the site grows every run. Cleanup tries unprivileged first
-  and escalates only what survived; `wp` is never elevated. Needs passwordless `sudo` for the
+  site's commands (the identity in `site`, else the transport's user) cannot finish it. A plugin
+  writes as the web-server user, some files in directories only that user can write, so without it
+  the site grows every run. Cleanup tries as the site's commands first and escalates only what
+  survived; `wp` is never elevated. Needs passwordless `sudo` for the
   transport's user on `local`/`ssh` (nothing on `docker`). `false` where that user must stay
   unprivileged; cleanup then reports what it could not remove
   ([elevated housekeeping](../architecture/wordpress-automation.md#elevated-housekeeping)).
@@ -127,6 +128,9 @@ alias is never run) ([the ssh command line](../architecture/wordpress-automation
   - Normalisation needs privileges (`chown` always does): with `elevate: false` or no passwordless
     `sudo`, the site reports it cannot and carries on
     ([file ownership](../architecture/wordpress-automation.md#file-ownership-wpownershipts)).
+  - In the `site` identity state (`runAs`, below) files are already the web server's: only `false`
+    counts there (a malformed value still fails the load); a declared owner is neither resolved nor
+    enforced, and the pre-flight says so when it differs from the identity.
 - **`runAs`** (`ssh` only; absent = `false` until the
   [Phase 12](../plans/phase-12-site-identity-plan.md) rollout, then `"auto"`) — who site commands
   (`exec`/`wpCli`) run as: `"auto"` (the docroot's owner, once verified to be the web server's
@@ -135,14 +139,46 @@ alias is never run) ([the ssh command line](../architecture/wordpress-automation
   transport's user, as today). The pre-flight verifies it (the web probe: a short-lived
   `<root>/e2e-identity-<32 hex>.php`, only for `"auto"`/`"user:group"`) and reports the state in its
   "Site identity" check; `"auto"` without this run's verdict (`--no-deps`) runs as the transport's user.
-  **Keep real sites at `false` until Phase 12's rollout** (12.11); the host then needs passwordless
-  sudo and `Defaults:<ssh user> !log_allowed` (sudo otherwise logs `--key=` values), which the
-  pre-flight checks.
+  **Keep real sites at `false` until Phase 12's rollout** (12.11) switches each, once its server
+  passes the [checklist below](#server-checklist-for-runas).
 - **`umask`** (`ssh` only; default `0022`) — the umask of commands run as the site's identity (the
   `site` state only): a text of 3–4 octal digits (`"022"`, `"0022"`), stored as four. Its owner digit
   must be `0` (`"0177"` would make new directories `0600`, unusable by their owner); a JSON number is
   refused (`22` would read as decimal).
 - `runAs`/`umask` on `docker`/`local` fail the load: their commands have no second identity.
+
+#### Server checklist for `runAs`
+
+What an `ssh` site needs to reach the `site` state (`<ssh user>`: the transport's `username`). None
+fails a run (a fallback runs as the transport's user). The pre-flight's "Site identity" check names
+each one missing, with its fix; the run's banner lists only what keeps a site out of `site` (a
+fallback's reason, an unverified or different web identity) and sudo's logging.
+
+1. **Docroot owned by PHP's identity**: `chown -R <web user>:<web group> <docroot>`, and PHP (the
+   PHP-FPM pool's `user`/`group`) runs as that pair. `"auto"` takes the owner of `wp-content` only
+   once the web probe shows PHP runs as it, so a deployment account's docroot (`sftp_*:www-data`) stays
+   a fallback (`owner-not-web`). The probe needs the WordPress root served by PHP at `baseURL` (a
+   subdirectory install, another docroot or a cache answering for it leaves it unverified) and PHP's
+   `posix` extension; unverified, `"auto"` falls back (`unverified`).
+2. **Passwordless sudo** in `/etc/sudoers.d/`: `<ssh user> ALL=(ALL) NOPASSWD: ALL` — enough when
+   the group is one of the web user's (primary or supplementary); otherwise `(ALL:ALL)` (else
+   `no-sudo`). The SSH user needs no membership in the web group.
+3. **`Defaults:<ssh user> !log_allowed`** beside it: sudo otherwise writes every command line,
+   `--key=` values included, to the system log (warned from `sudo -n -l`).
+4. **The host's own name in `/etc/hosts`**: else every sudo call prints `unable to resolve host …`
+   (stripped from output, reported).
+5. **`wp` on sudo's `secure_path`** (e.g. `/usr/local/bin/wp`; `~/bin` is not on it): else `no-wp`.
+6. **The web user can traverse the root's parents** (search access on each): else `no-root-access`.
+7. **`transport.umask`** equal to the web server's (systemd's default `0022` unless the unit sets
+   another); the pre-flight warns when the web server reports a different one.
+
+In `site` the SSH user's `~/.wp-cli/config.yml` no longer applies (WP-CLI runs with the identity's
+home); move what the site needs to its `wp-cli.yml` (warned).
+
+Switching a live cell: drain the orchestrator running it (one Ctrl-C,
+[orchestrator.md](orchestrator.md)), apply the list, set `runAs: "auto"`, run `npm run healthcheck`
+(its "Site identity" check must read `Runs as <user>(<uid>):<group>(<gid>)`) and one full suite run, then start the orchestrator
+again.
 
 ## Editions (Free / Pro)
 
