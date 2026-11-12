@@ -61,6 +61,17 @@ test.afterEach(() => {
 });
 
 /**
+ * The umask a `php` started from here runs under (it inherits this process's), read from PHP itself.
+ *
+ * @returns the umask's permission bits.
+ */
+function phpUmask(): number {
+  const run = spawnSync("php", ["-r", "echo umask();"], { encoding: "utf8" });
+  expect(run.status, run.stderr).toBe(0);
+  return Number.parseInt(run.stdout, 10);
+}
+
+/**
  * Runs the snippet against `root`, with `contentDir` as `WP_CONTENT_DIR`.
  *
  * @param contentDir - where the log lives.
@@ -93,18 +104,19 @@ test("a log the identity may write is emptied in place: same file, same mode", (
 });
 
 // Another user's 0644 log stands in as one the identity may not write: unlinked, made again empty.
+// Replacement is told by the mode, not the inode: ext4 hands the freed inode straight to the new file.
+// 0555 carries execute bits no `fopen` create mode (0666 & ~umask) can, so the two never coincide.
 test("a log the identity may not write is replaced by an empty one it made", () => {
   test.skip(isRoot, "root writes any file");
   writeFileSync(log, "PHP Fatal error: old\n");
-  chmodSync(log, 0o444);
-  const before = statSync(log);
+  chmodSync(log, 0o555);
 
   expect(clear()).toEqual({
     state: "created",
     ours: true,
     path: "wp-content/debug.log",
   });
-  expect(statSync(log).ino).not.toBe(before.ino);
+  expect(statSync(log).mode & 0o777).toBe(0o666 & ~phpUmask());
   expect(readFileSync(log, "utf8")).toBe("");
 });
 
