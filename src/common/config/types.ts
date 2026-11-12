@@ -78,7 +78,8 @@ interface TransportBase {
   /**
    * The site's WordPress login, for WP-CLI's `--user`. **Resolved-only**: the loader copies it from
    * the site's `username` and refuses a sites file that sets it, so the two cannot disagree. Absent
-   * on a transport built by hand (unit specs): read it as "no `--user`". No command reads it yet.
+   * on a transport built by hand (unit specs): read it as "no `--user`". `wpCli` adds it, once checked
+   * (`wp/wp-user.ts`).
    */
   readonly wpUser?: string;
 }
