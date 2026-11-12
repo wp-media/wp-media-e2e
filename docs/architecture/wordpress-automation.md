@@ -149,7 +149,8 @@ passes its own).
 
 ### Elevated housekeeping
 
-Some cleanup cannot be done as the transport's user: a plugin writes as the **web-server** user, and
+Outside the `site` state some cleanup cannot be done as the transport's user: a plugin writes as the
+**web-server** user, and
 a directory only that user can write (BackWPup's restore area: `0755 www-data`, from Monolog's `mkdir`
 under the default umask) cannot be emptied by anyone else. An unprivileged `rm -rf` exits 1 and the
 site keeps a database dump from every scenario.
@@ -250,7 +251,7 @@ It sits at the WordPress root (already every transport's working directory) and 
 const artifact = pluginArtifact("plugin");
 const zip = await stageAndInstallPlugin(site.transport, artifact.zipPath, {
   activate: true,
-  // Without the slug the unpacked directory is unknown, and the plugin stays owned by the transport's user.
+  // Without the slug the unpacked directory is unknown: outside the `site` state the plugin then stays the transport user's.
   slug: artifact.slug,
 });
 ```
@@ -528,16 +529,17 @@ directories** on the QA cell before this existed.
 - `prepareSiteDataDirs(transport, paths)` is the other half, run by the **Before** hook on the same
   list: per path it creates the directory, opens it `0777` to every user sharing the docroot (in
   `site` too: a scenario opting back to the SSH user writes there as well), then
-  hands it to the site's ownership with `normalizeOwnership` (this too writes as the transport's
-  user). The mode is a floor that holds where ownership cannot be fixed; the correction adds the owner
+  hands it to the site's ownership with `normalizeOwnership` (`unnecessary` in `site`: the identity
+  created it, and what a root `mkdir` made is handed back to the identity first,
+  `handBackWhatRootMakes`). The mode is a floor that holds where ownership cannot be fixed; the correction adds the owner
   and, where it has anything to do, is **recursive**, reaching a subtree the mode cannot (one an earlier scenario wrote as the web
   server, or the plugin's activation just created via WP-CLI). Where the transport user already owns
-  the install (`docker`) it is `unnecessary` and only the mode applies; it is best-effort anyway, so a host refusing it still gets prepared directories. Preparation escalates when the transport's user is refused, so it runs the same root-plausibility guard as removal, and refuses a path
+  the install (`docker`) it is `unnecessary` and only the mode applies; it is best-effort anyway, so a host refusing it still gets prepared directories. Preparation escalates when the site's commands are refused, so it runs the same root-plausibility guard as removal, and refuses a path
   that is a symlink wherever it leads (`chmod` follows it: a data directory linked at the root once
   opened the root `0777`) — else a top-level `rootDir` would get world-writable root-owned directories
   at `/` that teardown then refuses to remove.
-  **Why**: on a real cell WP-CLI (`ubuntu` over SSH) and the web server (`www-data` under PHP-FPM)
-  differ, and the plugin creates these directories under whichever umask it runs with, so the first
+  **Why**: outside the `site` state WP-CLI (`ubuntu` over SSH) and the web server (`www-data` under
+  PHP-FPM) differ, and the plugin creates these directories under whichever umask it runs with, so the first
   writer locks the other out. Observed on the QA cell: `uploads/backwpup-restore` created
   `drwxrwxr-x ubuntu:ubuntu` by WP-CLI at 15:38:49, the next admin request dead at 15:38:50 on
   `Folder "…/backwpup-restore" is not writable` (`BackWPup_File::check_folder`). It stayed hidden while removal was failing, because a copy the web server made months earlier never went away. `0777` is what the plugin asks itself
@@ -547,7 +549,7 @@ directories** on the QA cell before this existed.
   product resolves after each install (`ProductConfig.resolveSiteDataDirs`) — names only the installed
   plugin knows. Each must be covered by a declaration (`isDeclaredResidue`), or it would never be
   removed: refused before anything is created. The resolver is asked before any directory is prepared, since asking boots
-  WordPress over WP-CLI as the transport's user. BackWPup's restore working directory is resolved this
+  WordPress over WP-CLI as the site's commands run (the transport's user outside `site`). BackWPup's restore working directory is resolved this
   way: since `214ad9d` it is `uploads/backwpup-restore-<20 hex>`, and a WP-CLI backup listing creates
   it `0775` as the transport's user, after which every admin page listing backups died with HTTP 500 on
   develop (measured).
@@ -723,10 +725,11 @@ the worker). Detection, identity and notices are cached **per install**, not per
 serves sites that disagree (apache cell: `sftp_backwpup:www-data` and `sftp_wprocket:www-data` under
 one `ubuntu@host`).
 
-> **MUST — code that writes into a site's docroot as the transport's user calls
-> `normalizeOwnership` on what it wrote.** Never `chown`/`chmod` directly, never elevate `wp` (root's
-> files would be unwritable by the web server). `stageAndInstallPlugin` does it given the `slug` —
-> pass it. Deliberately left alone: the staging area (only the user commands run as reads it), and a mode a
+> **MUST — `wp` never runs as root; site commands run as the site's identity. Code that writes into
+> a site's docroot calls `normalizeOwnership` on what it wrote.** Never `chown`/`chmod` directly (root's
+> files would be unwritable by the web server). It hands over outside `site` (`same-user`, `fallback`, `disabled`); in `site`
+> it answers `unnecessary`, so callers never branch on the state. `stageAndInstallPlugin` does it
+> given the `slug` — pass it. Deliberately left alone: the staging area (only the user commands run as reads it), and a mode a
 > scenario sets to test a refusal (`makeLogReadOnly` takes the write bits off a plugin log the scenario's run
 > wrote; handing it back would undo that; it runs unelevated and goes with the plugin's residue).
 

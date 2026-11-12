@@ -320,7 +320,7 @@ Open, for WP Rocket's port:
 | 9 Orchestrator | moved | orchestrator plan |
 | 10 Cleanup & validation | open | below |
 | 11 Shared SSH server profiles | after Phase 12 | below |
-| 12 Run as the site | next | [phase-12 plan](phase-12-site-identity-plan.md) |
+| 12 Run as the site | in progress (12.1–12.10 done) | [phase-12 plan](phase-12-site-identity-plan.md) |
 | WP Rocket port | after Phase 10 | phase-6 plan, "After Phase 10 — WP Rocket" |
 
 Phase 10 states no dependencies, effort or parallelism; Phase 11 states its own below.
@@ -985,13 +985,19 @@ server's next write into it fails — a raw `EACCES` inside `WP_Filesystem_Direc
   web-server process: `ps` says `www-data` on both cells, wrong on `pro@apache`, where
   `chown www-data:www-data` would strip `sftp_backwpup`, the host's SFTP deployment account, off the
   tree.
-- Rejected then, **reversed 2026-11-10** (operator: servers are ours, docroots chowned to the web
-  server's identity; the [phase-12 plan](phase-12-site-identity-plan.md) measures and builds it): running WP-CLI as the docroot owner. `sudo -n -u <owner> wp …` works, even for the
-  `nologin` `sftp_backwpup`, but there is no single correct user (on `pro@apache` that owner's
-  primary gid is 123 and its umask `0022`, so it would create `sftp_backwpup:sftp_backwpup 755`
-  files the web server cannot write); `sudo -u` sets the target's `HOME` — `/var/www` on nginx,
-  `/public` (absent) on apache — where WP-CLI puts its cache; and it changes every WP-CLI call to
-  fix file creation.
+- **Reversed 2026-11-10, built 2026-11-12** ([phase-12 plan](phase-12-site-identity-plan.md)
+  12.1–12.10): WP-CLI and every site command now run as the **site's identity** — the web server's
+  user and group (`sudo -n -u <u> -g <g>` + a `/bin/sh` wrapper setting the umask) wherever the host
+  allows it, and **never root**. Rejected at first because
+  (a) there is no single correct user (`sftp_backwpup`'s primary gid 123 and umask `0022` would
+  create `sftp_backwpup:sftp_backwpup 755` files the web server cannot write), (b) `sudo -u` sets the
+  target's `HOME`, where WP-CLI keeps its cache, (c) it changes every WP-CLI call to fix file
+  creation. Answered: (a) the operator chowns docroots to PHP's identity, and `"auto"` takes the
+  owner only once the pre-flight's web probe shows PHP runs as it — a deployment account's docroot
+  falls back, warned; (b) zip installs, `eval` and option calls write nothing to `HOME` (only
+  download installs warn and succeed: phase-12 F7); (c) accepted: what the suite does on a site now
+  looks as if the website did it. Every state but `site` keeps this section's handover (`same-user`, `fallback`, `disabled`).
+  Per-site switch `transport.runAs`; the default stays `false` until 12.11's rollout.
 - Rejected: a `www-data:www-data` fallback when detection fails. It is wrong on `pro@apache`, and a
   wrong owner applied as root is worse than none; detection cannot fail alone (pre-flight already
   asserts root access and a booting WordPress); and the real failure, missing elevation, leaves
@@ -1047,8 +1053,10 @@ server's next write into it fails — a raw `EACCES` inside `WP_Filesystem_Direc
   threefold. Deferred: it changes `normalizeOwnership`'s one-path contract and needs its own tests.
   Revisit when a product declares more than a handful of data paths, or the Before hook nears its
   budget. (Residue removal is already batched — wordpress-automation.md.)
-- Running WP-CLI as the docroot owner (§8.2): taken up as Phase 12, default on after its
-  verification ([phase-12 plan](phase-12-site-identity-plan.md)); this module becomes its fallback.
+- ~~Running WP-CLI as the docroot owner (§8.2)~~ — **closed 2026-11-12**: built as Phase 12
+  12.1–12.10, twin-verified; this module is now its fallback (`normalizeOwnership` answers
+  `unnecessary` in the `site` state). The default `"auto"` and the per-cell rollout are tracked in the
+  [phase-12 plan](phase-12-site-identity-plan.md) 12.11, no longer here.
 
 ## 9. References
 
