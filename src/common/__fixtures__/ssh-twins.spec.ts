@@ -161,15 +161,16 @@ test.describe("withTwin", () => {
     // A live holder (the runner), let go of after a while.
     mkdirSync(lock());
     writeFileSync(join(lock(), "pid"), String(process.ppid));
-    const HELD_MS = 400;
-    const release = sleep(HELD_MS).then(() => {
+    let releasedAt = Number.NaN;
+    const release = sleep(400).then(() => {
+      releasedAt = Date.now();
       rmSync(lock(), { recursive: true });
     });
     const before = test.info().timeout;
     const started = Date.now();
     const timeouts: number[] = [];
 
-    await withTwin(
+    const holding = withTwin(
       "nginx",
       () => {
         timeouts.push(test.info().timeout);
@@ -177,13 +178,18 @@ test.describe("withTwin", () => {
       },
       { lockDir, pollMs: 20 },
     );
+    // withTwin's first look at the lock, where its wait starts, ran synchronously before this line.
+    const entered = Date.now();
+    await holding;
     const elapsed = Date.now() - started;
     await release;
 
-    // Raised before the work runs, by about the wait: never less than most of it, never more.
+    // Raised before the work runs, by the whole wait: at least from `entered` to the release (the
+    // lock is taken only after it), never more than the call took. Exact bounds, so a loaded host
+    // (slow looks at the lock between polls) cannot fail it; a wait left uncounted still does.
     const added = test.info().timeout - before;
     expect(timeouts).toEqual([test.info().timeout]);
-    expect(added).toBeGreaterThanOrEqual(HELD_MS - 100);
+    expect(added).toBeGreaterThanOrEqual(releasedAt - entered);
     expect(added).toBeLessThanOrEqual(elapsed);
   });
 
