@@ -1,6 +1,7 @@
 import { posix } from "node:path";
 
 import { evalPhp, phpLiteral } from "./php";
+import type { EvalPhpOptions } from "./php";
 import { isObject } from "../guards";
 import type { Transport } from "../config/types";
 
@@ -27,6 +28,8 @@ const SHA256 = /^[0-9a-f]{64}$/;
  *
  * @param transport - the site holding the file.
  * @param path - absolute path to the file on that site.
+ * @param options - how WordPress boots for it; skipping plugins and theme keeps their output out of
+ * the reply when only the file matters (see {@link EvalPhpOptions}).
  * @returns the digest, lower-case hex.
  * @throws {@link Error} if the file is missing or unreadable, or if the reply is not a digest —
  * a notice printed ahead of the value would otherwise be compared as though it were one.
@@ -39,6 +42,7 @@ const SHA256 = /^[0-9a-f]{64}$/;
 export async function fileChecksum(
   transport: Transport,
   path: string,
+  options: EvalPhpOptions = {},
 ): Promise<string> {
   const php =
     `$path = ${phpLiteral(path)};\n` +
@@ -51,6 +55,7 @@ export async function fileChecksum(
     php,
     `checksumming "${path}"`,
     "wp/files",
+    options,
   );
   if (!SHA256.test(digest)) {
     throw new Error(

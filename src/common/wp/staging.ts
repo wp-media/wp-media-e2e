@@ -4,15 +4,25 @@ import { basename, isAbsolute, posix } from "node:path";
 import { env } from "../config/env";
 import { errorMessage } from "../guards";
 import {
+  assertResolvedInsideRoot,
   copyIntoTarget,
+  describeTarget,
   elevationSupport,
   exec,
+  execAsTransport,
   execElevated,
   wpRootDir,
 } from "./exec";
 import { normalizeOwnership } from "./ownership";
 import { isPathSegment, pluginSitePath } from "./paths";
 import { installPlugin } from "./plugin";
+import { resolveSiteIdentity } from "./site-identity";
+import {
+  DEFAULT_INBOX_ROOT,
+  siteStagingOps,
+  stageThroughInbox,
+  sweepStaleInboxes,
+} from "./site-staging";
 import type { InstallPluginOptions } from "./plugin";
 import type { Transport } from "../config/types";
 
@@ -43,10 +53,16 @@ import type { Transport } from "../config/types";
  * (beside `disposeConnections`) as best-effort cleanup, so a cleanup failure never fails a
  * passing scenario.
  *
- * **Staged files themselves are deliberately left with the transport user's ownership.** Only that
- * user ever reads them — `wp plugin install` runs as it — so there is nothing for the web server to
- * be locked out of. What the install *unpacks* is a different matter, and that is what
- * {@link stageAndInstallPlugin} normalises (see `./ownership.ts`).
+ * **Who writes the area follows who site commands run as.** Every state but `site` runs them as the
+ * transport's user, which creates the area and copies into it directly; staged files keep its
+ * ownership, since only it reads them (`wp plugin install` runs as it). What the install *unpacks* is
+ * a different matter, and that is what {@link stageAndInstallPlugin} normalises (see
+ * `./ownership.ts`). In the `site` state (ssh, commands as the web server's identity) the area is the
+ * identity's: SFTP still writes as the login, so the file goes through a private inbox in `/tmp` and
+ * the identity copies it in and checks its SHA-256; the site's own area made by another user is removed
+ * and made again, while under an absolute root (which other sites may share) it is refused, never
+ * removed (`./site-staging.ts`). {@link cleanSiteStaging} of the whole area also sweeps the login's
+ * inboxes a killed run left.
  */
 
 /** Staging directory name under the WordPress root, when nothing overrides it. */
@@ -67,6 +83,11 @@ export interface StageArtifactOptions {
   readonly category: string;
   /** Filename to use on the target. Defaults to the source file's basename. */
   readonly as?: string;
+  /**
+   * In the `site` state, the folder the upload inbox is made in (`/tmp` by default); specs point it at
+   * a folder of their own. Ignored in every other state.
+   */
+  readonly inboxRoot?: string;
 }
 
 /**
@@ -243,9 +264,45 @@ export async function stageArtifact(
   const categoryDir = stagingPath(root, options.category);
   const target = stagingPath(root, options.category, filename);
 
+  const shared = posix.isAbsolute(configuredStagingDir(transport));
+  if (transport.mode === "ssh" && (await runsAsSiteIdentity(transport))) {
+    await stageThroughInbox(siteStagingOps(transport), {
+      localPath,
+      target,
+      categoryDir,
+      // Only the site's own area is ever healed: an absolute root may hold other sites' files.
+      healDir: shared ? undefined : root,
+      inboxRoot: options.inboxRoot ?? DEFAULT_INBOX_ROOT,
+      pid: process.pid,
+      site: describeTarget(transport),
+    });
+    return target;
+  }
   await mkdirOnTarget(transport, categoryDir);
-  await copyIntoTarget(transport, localPath, target);
+  await copyIntoTarget(transport, localPath, target).catch((cause: unknown) => {
+    if (!shared) throw cause;
+    // The likeliest cause there: a site whose commands run as its identity made the category first.
+    throw new Error(
+      `${errorMessage(cause)} The staging root "${root}" is absolute, so other sites may share it ` +
+        "and own what is in it; give each site its own (the site's `transport.stagingDir`).",
+      { cause },
+    );
+  });
   return target;
+}
+
+/**
+ * Whether site commands run as the site's identity: ssh in the `site` state. Docker and local are
+ * never asked, so nothing they send changes.
+ *
+ * @param transport - the site's transport.
+ * @throws Error if the state could not be resolved (a probe's transport failed).
+ */
+async function runsAsSiteIdentity(transport: Transport): Promise<boolean> {
+  return (
+    transport.mode === "ssh" &&
+    (await resolveSiteIdentity(transport)).kind === "site"
+  );
 }
 
 /**
@@ -255,6 +312,9 @@ export async function stageArtifact(
  * A caller should remove no more than it put there: a staging root declared as an absolute path can
  * be shared by the sites on one host, so a category can hold another run's files too.
  *
+ * In the `site` state, removing the whole area also removes the transport user's upload inboxes over
+ * an hour old (what a killed run left; `./site-staging.ts`).
+ *
  * Throws on a genuine failure so a site left dirty is visible. A caller wiring this into a
  * teardown hook should treat it as **best-effort** (catch and log), so cleanup can never turn a
  * passing scenario red.
@@ -262,7 +322,9 @@ export async function stageArtifact(
  * @param transport - the target site's transport.
  * @param path - the category, then any entries below it, one segment each; omit to remove the whole
  * area. Each is validated as {@link stagingPath} validates it, so nothing outside the area is named.
- * @throws Error naming the path when the removal fails, or if a segment is not a single safe name.
+ * @throws Error naming the path when the removal fails, if a segment is not a single safe name, or
+ * when a removal needing root would follow a symbolic link out of the area (see
+ * {@link assertConfinedRemoval}).
  */
 export async function cleanSiteStaging(
   transport: Transport,
@@ -275,16 +337,63 @@ export async function cleanSiteStaging(
   // The area holds files this suite put there, so the transport's user normally owns them. A plugin
   // that unpacks into it as the web-server user is the exception, and escalating is what keeps that
   // from stranding the whole area — the same policy residue removal uses.
-  const { exitCode, stderr, stdout } =
-    first.exitCode === 0 || (await elevationSupport(transport)) !== "available"
-      ? first
-      : await execElevated(transport, "rm", ["-rf", target]);
+  const elevate =
+    first.exitCode !== 0 && (await elevationSupport(transport)) === "available";
+  if (elevate) await assertConfinedRemoval(transport, target, root);
+  const { exitCode, stderr, stdout } = elevate
+    ? await execElevated(transport, "rm", ["-rf", target])
+    : first;
   if (exitCode !== 0) {
     throw new Error(
       `[wp/staging] could not remove "${target}" on this ${transport.mode} site ` +
         `(exit ${String(exitCode)}): ${(stderr || stdout).trim() || "no output"}`,
     );
   }
+  // Inboxes exist only in the `site` state; a per-entry removal stays as narrow as it was asked.
+  if (
+    path.length === 0 &&
+    transport.mode === "ssh" &&
+    (await runsAsSiteIdentity(transport))
+  ) {
+    await sweepStaleInboxes(transport);
+  }
+}
+
+/**
+ * Refuses a root `rm -rf` of `target` that a symbolic link would carry out of the staging area: root
+ * follows a linked parent wherever it leads, e.g. into another site's `wp-content`.
+ *
+ * A root relative to the WordPress root must resolve inside it (the residue removal's own check). An
+ * absolute root may live anywhere, so it must not itself be a link, and `target` must resolve inside
+ * it. Checked just before the removal; a link swapped in between is not seen.
+ *
+ * @param transport - the target site's transport.
+ * @param target - the absolute path about to be removed as root.
+ * @param root - the resolved staging root (see {@link siteStagingDir}).
+ * @throws Error naming the path and the link's way out, or when it cannot be resolved.
+ */
+async function assertConfinedRemoval(
+  transport: Transport,
+  target: string,
+  root: string,
+): Promise<void> {
+  const absolute = posix.isAbsolute(configuredStagingDir(transport));
+  const anchor = absolute
+    ? root
+    : trimTrailingSlash(await wpRootDir(transport));
+  const describe = (reason: string): string =>
+    `[wp/staging] refusing to remove "${target}" as root on this ${transport.mode} site: it must ` +
+    `stay inside "${anchor}", and ${reason}. Remove the link, or set ${STAGING_DIR_ENV} (or the ` +
+    "site's `transport.stagingDir`) to a directory of the site's own.";
+  if (
+    absolute &&
+    (await execAsTransport(transport, "test", ["-L", root])).exitCode === 0
+  ) {
+    throw new Error(
+      describe(`the staging root "${root}" is itself a symbolic link`),
+    );
+  }
+  await assertResolvedInsideRoot(transport, target, anchor, describe);
 }
 
 /**
@@ -340,9 +449,10 @@ export async function stageAndInstallPlugin(
 }
 
 /**
- * Creates a directory (and parents) on the target. A non-zero exit here is almost always a
- * permission problem at the WordPress root, so the error names the override that fixes it
- * instead of leaving the operator with a bare `mkdir` failure.
+ * Creates a directory (and parents) on the target, in every state but `site` (which ensures its
+ * directory through `./site-staging.ts`). A non-zero exit here is almost always a permission problem
+ * at the WordPress root, so the error names the override that fixes it instead of leaving the
+ * operator with a bare `mkdir` failure.
  *
  * **Deliberately not elevated**, unlike the removal above. A privileged `mkdir` would leave the
  * directory owned by root, and the copy that follows runs as the transport's user over SFTP — so

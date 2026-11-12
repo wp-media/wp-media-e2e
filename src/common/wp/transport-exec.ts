@@ -1227,7 +1227,9 @@ export function dockerCpArgv(
  * Copies a file from the runner onto the target, overwriting `targetAbs` if it exists.
  *
  * Per transport: a same-filesystem copy (`local`), `docker cp` (`docker`), or SFTP over the
- * cached connection (`ssh`). The parent directory of `targetAbs` must already exist: `copyFile` and
+ * cached connection (`ssh`, always as the SSH login: in the `site` state staging uploads into an inbox
+ * of the login's and the identity copies it in, `./site-staging.ts`). The parent directory of
+ * `targetAbs` must already exist: `copyFile` and
  * `docker cp` do not create it, and SFTP only does so through node-ssh's retry after a failed
  * write — so callers create it first (see `staging.ts`, which does the `mkdir -p`).
  *
