@@ -979,7 +979,9 @@ Phase 1's service (§4.11); both are done (7.3a the model, 7.3b the drawing).
 
 Flake to investigate: `orchestrator/start.spec.ts` "a loop stuck with no run recorded running says
 so" failed once under a full `npm run test:unit`'s load and passes alone (seen 2026-11-10, Phase
-12.0b's audit); likely a timing margin, not reproduced yet.
+12.0b's audit); likely a timing margin, not reproduced yet. Also `orchestrator/cli.spec.ts:580`
+"a relative --config is from the folder npm was run in…": its npm child passed the 30 s test timeout
+once on a slow CI runner (run 43121841180, attempt 1); green on re-run and 15/15 locally.
 
 ### 7.2 Traps
 

@@ -47,7 +47,7 @@ src/
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm + warm-lines.ts its output, pin)
 │   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/), raw Allure results, a stub Allure CLI and a stop at a chosen check (allure.ts), a web server serving the identity probe (probe-web-server.ts), a FIFO's blocked reader released, or fed chunk by chunk, within a deadline, or a FIFO tapped to prove nothing was written through a path (fifo.ts), a `dd` taking `conv=excl` where the runner's (BSD) lacks it (excl-dd.ts), a `.tar.gz` listed from its raw headers (tar-listing.ts), an in-process SSH server that runs what it is sent, with a recording fake `sudo` (ssh-server.ts; `denySudo` all or one `-u` user), the option parsing every fake `sudo` shares (fake-sudo.ts), arguments that must survive every command line (hostile-arguments.ts), the SSH twins' gate, sites, variants, `resetTwin` and the cross-worker lock `withTwin` (ssh-twins.ts: `E2E_SSH_TWINS=1`), a shell command that dies with its spawner even on SIGKILL (tether.ts; `php -S` and the SSH server's commands)
-│   └── wp/                 # WordPress over WP-CLI (exec — exec/wpCli by identity state — over transport-exec, php, staging, plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership + owner-probe, paths, cache, db, teardown, errors; site-identity + web-identity + run-as-argv: who site commands run as)
+│   └── wp/                 # WordPress over WP-CLI (exec — exec/wpCli by identity state — over transport-exec, php, staging + site-staging (the `site` state's inbox), plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership + owner-probe, paths, cache, db, teardown, errors; site-identity + web-identity + run-as-argv: who site commands run as)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
     └── <product>/
@@ -467,7 +467,8 @@ automatically, and that verification **must not** be skipped. Mirrored as a comm
   no input, so a `[y/n]` prompt declines at once, exit 0, having done nothing.
 - **Files must reach the site before `wp` reads them**: stage with `stageArtifact` /
   `stageAndInstallPlugin` (`wp/staging.ts`, `.e2e_temp/<category>/`; `transport.stagingDir`,
-  `E2E_SITE_STAGING_DIR`).
+  `E2E_SITE_STAGING_DIR`). In the `site` state SFTP (always the login) lands in a private
+  `/tmp/e2e-inbox-*` and the identity copies it in and checks its SHA-256 (`wp/site-staging.ts`).
 - Idempotent cleanup (`ensurePluginAbsent`) and asserted removal under test (`uninstallPlugin`) both
   deactivate as their own call, then plain `wp plugin uninstall` — **never `uninstall --deactivate`**,
   which makes the plugin's cleanup skip itself. Typed errors in `wp/errors.ts`. **"Absent" means

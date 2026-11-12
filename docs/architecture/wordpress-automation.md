@@ -153,8 +153,8 @@ The module also owns **file transfer** (same dispatch, same cached SSH connectio
 - `wpRootDir(transport)` → the **absolute** WordPress root: declared for `local`/`ssh`; for `docker`
   the container `WORKDIR`, read once with `pwd` and cached (declare `rootDir` to skip it).
 - `copyIntoTarget(transport, localAbs, targetAbs)` → copies a runner file onto the target,
-  overwriting: `node:fs` (`local`), `docker cp` (`dockerCpArgv`), SFTP `putFile` (`ssh`). It does not
-  create the parent; staging does.
+  overwriting: `node:fs` (`local`), `docker cp` (`dockerCpArgv`), SFTP `putFile` (`ssh`, always as the
+  login). It does not create the parent; staging does.
 - `assertResolvedInsideRoot` — where a path really leads ([Symlinks](#symlinks)).
 
 ## Playwright ≥ 1.62 is a floor, not a preference
@@ -196,10 +196,10 @@ It sits at the WordPress root (already every transport's working directory) and 
 
 | Function                                                  | Purpose                                                                                                                         |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `stageArtifact(transport, localPath, { category, as? })`  | `mkdir -p` the category, copy the file in, return its **absolute target path**.                                                 |
+| `stageArtifact(transport, localPath, { category, as?, inboxRoot? })` | `mkdir -p` the category, copy the file in (in `site`: [through an inbox](#staging-in-the-site-state-wpsite-stagingts)), return its **absolute target path**. |
 | `stageAndInstallPlugin(transport, localZip, opts?)`       | Stage into `plugins` → `installPlugin`, then **restore the plugin's ownership** when `opts.slug` is given ([File ownership](#file-ownership-wpownershipts)). |
 | `siteStagingDir(transport)`                               | The site's absolute staging directory.                                                                                          |
-| `cleanSiteStaging(transport, ...path)`                    | `rm -rf` the whole area, or one category or entry in it.                                                                        |
+| `cleanSiteStaging(transport, ...path)`                    | `rm -rf` the whole area, or one category or entry in it; the whole area in `site` also sweeps the login's hour-old inboxes.      |
 | `stagingPath(root, ...segments)`                          | Pure POSIX path builder; validates each segment.                                                                                |
 
 ```ts
@@ -224,7 +224,10 @@ const zip = await stageAndInstallPlugin(site.transport, artifact.zipPath, {
 - On `local`, staging a file onto itself is detected (device + inode) and skipped: a self-copy can
   truncate it.
 - **Cleanup**: `cleanSiteStaging` throws on failure so a dirty site is visible; a teardown hook should call it
-  best-effort (catch + log).
+  best-effort (catch + log). Its root fallback (when the login's `rm` fails) first refuses a target a
+  link carries out of the area: a relative root must resolve inside the WP root
+  (`assertResolvedInsideRoot`); an absolute root must not itself be a link and the target must resolve
+  inside it. Checked just before the `rm` (a link swapped in between is not seen).
 - **Concurrency**: one worker per site per invocation, so no two workers share a staging area. Runs on
   one host can still meet in a shared _absolute_ staging root — tracked in the
   [orchestrator plan](../plans/orchestrator-plan.md) (Phase 0A.3).
@@ -232,6 +235,37 @@ const zip = await stageAndInstallPlugin(site.transport, artifact.zipPath, {
   nginx cells: a file there gets 200, one inside a folder only the transport's user may enter 404,
   directories 403 (not listed). For anything sensitive use such a folder (as BackWPup's private folder
   does) or stage outside the docroot (the Location override). Wiped in teardown.
+
+### Staging in the `site` state ([`wp/site-staging.ts`](../../src/common/wp/site-staging.ts))
+
+SFTP writes as the login, which cannot write the identity's area (`755 www-data`, login outside the
+group). Every other state, and `docker`/`local`, stage exactly as above. In `site`, `stageArtifact`:
+
+1. `mkdir -m 0711 -- /tmp/e2e-inbox-<runner pid>-<16 hex>` as the login — no `-p`: an existing path
+   (a planted symlink) fails;
+2. SFTP the file to `<inbox>/upload`, `chmod 0644` it (as the login);
+3. as the identity, one `sh -c`: exit 3 when the area (relative root) or the category exists but the
+   identity cannot write and enter it (another user made it: a fallback run, a killed run); else
+   `mkdir -p` the category and check it can write it. Exit 3 under a **relative** root: the area must
+   resolve inside the WP root (`assertResolvedInsideRoot`, else refused), is removed as the identity,
+   else as root where elevation is available, made again, then warned. Exit 3 under an **absolute**
+   root (other sites may share it): refused naming the override, nothing removed. Any other failure
+   (full disk, a parent it cannot write, a file in the way) fails naming the override, never heals;
+4. `cp -f --` the upload to the target as the identity (`www-data:www-data 644` under umask `0022`);
+5. `fileChecksum` (as the identity, `--skip-plugins --skip-themes`: nothing they print reaches the
+   digest) must equal the runner's SHA-256 — also what catches a directory at the target, into which
+   `cp` would copy;
+6. in `finally`, once the inbox exists, `rm -rf --` it as the login; a failure warns, never replaces
+   the step's error.
+
+`sweepStaleInboxes` (run by `cleanSiteStaging` of the whole area, in `site` only): as the login,
+`find -H /tmp -mindepth 1 -maxdepth 1 -type d -name 'e2e-inbox-*' -user "$(id -u)" -mmin +60 -exec
+rm -rf -- {} +` — `-H` follows the root itself when it is a link (macOS's `/tmp`), links below it
+never; younger inboxes (another run's) kept. `inboxRoot` (default `/tmp`) is a seam for the executing
+ssh server's spec. **Shared absolute root** (`E2E_SITE_STAGING_DIR` applies to every site): sites of
+different identities or states fail on a category another made — a `site` site with the refusal
+above, a fallback site's upload naming the shared root — and never delete it; give each site its own
+`transport.stagingDir`.
 
 ## Plugin lifecycle ([`wp/plugin.ts`](../../src/common/wp/plugin.ts))
 
@@ -617,7 +651,7 @@ one `ubuntu@host`).
 > **MUST — code that writes into a site's docroot as the transport's user calls
 > `normalizeOwnership` on what it wrote.** Never `chown`/`chmod` directly, never elevate `wp` (root's
 > files would be unwritable by the web server). `stageAndInstallPlugin` does it given the `slug` —
-> pass it. Deliberately left alone: the staging area (only the transport user reads it), and a mode a
+> pass it. Deliberately left alone: the staging area (only the user commands run as reads it), and a mode a
 > scenario sets to test a refusal (`makeLogReadOnly` takes the write bits off a plugin log the scenario's run
 > wrote; handing it back would undo that; it runs unelevated and goes with the plugin's residue).
 
@@ -815,9 +849,11 @@ will not load belong in the **PHP**, not in exit-code branching: `isJobRunning`'
 
 All computed on the site, so nothing large moves.
 
-- `fileChecksum(transport, path)` → SHA-256, lower-case hex: the honest proof a file arrived intact
-  (size misses in-place corruption or a padded truncation). A reply that is not a digest (a notice
-  first, empty, upper-case) throws rather than failing later as "the download differs".
+- `fileChecksum(transport, path, options?)` → SHA-256, lower-case hex: the honest proof a file arrived
+  intact (size misses in-place corruption or a padded truncation). A reply that is not a digest (a
+  notice first, empty, upper-case) throws rather than failing later as "the download differs".
+  `options` (`EvalPhpOptions`: `skipPlugins`, `skipThemes`) keeps their output out when only the file
+  matters.
 - `listFiles(transport, dir, { digests?, missingAsEmpty? })` → the regular files directly inside: name,
   size, mtime, whether the **transport's** user may write it (`is_writable()` inside WP-CLI, what a
   plugin command checks before deleting), and SHA-256 on request; links and subdirectories left out. A

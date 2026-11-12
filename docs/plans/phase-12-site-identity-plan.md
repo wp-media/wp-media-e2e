@@ -1,6 +1,6 @@
 # Phase 12 — Run as the site: the web server's identity for every site command
 
-Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4 done 2026-11-11. Parent:
+Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4 and 12.5 done 2026-11-11. Parent:
 [e2e-modernization-plan.md](e2e-modernization-plan.md) (§3 phase table). Reverses that plan's §8.2
 rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of WP Rocket's port
 ([phase-6 plan §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket)).
@@ -611,7 +611,7 @@ Documented in [wordpress-automation.md → Transport & exec](../architecture/wor
   `site`: staging is created as `www-data`, then the SFTP upload as `ubuntu` fails — 12.5's inbox.
 
 Left open (owners named):
-- **12.5:** staging in `site` (above, measured).
+- **12.5 (done):** staging in `site` (above, measured).
 - **12.7:** `ownership.ts`'s `warnOnce` dedupes per install + reason across states (an
   `asTransportUser` copy shares an install's warnings).
 - **12.9:** the `wp --info` gate's hint still names the SSH user's `PATH`; root's sudo lines keep
@@ -624,29 +624,55 @@ Left open (owners named):
   them from `/` — after making relative operands absolute (`log.ts`'s elevated `rm`/`cat` of
   `wp-content/debug.log` relies on the root as `cwd`) — or gate on it in the pre-flight.
 
-### 12.5 — Staging through an inbox
+### 12.5 — Staging through an inbox (done 2026-11-11)
 
-In the `site` state, `copyIntoTarget` (ssh) does:
-1. `execAsTransport mkdir -m 0711 /tmp/e2e-inbox-<pid>-<16 hex>`. No `-p`: an existing path, a
-   planted symlink included, fails.
-2. SFTP `putFile`, then `execAsTransport chmod 0644`.
-3. Ensure the staging directory, as the site.
-4. `cp --` from the inbox to the target, as the site.
-5. Compare `fileChecksum` (as the site) with the runner's `sha256`.
-6. In `finally`, `execAsTransport rm -rf --` the inbox.
-
-- **Staging made by another identity** (a fallback run, a killed run, an absolute
-  `stagingDir`/`E2E_SITE_STAGING_DIR`): if the run identity cannot write it, remove it the way
-  `cleanSiteStaging` already escalates, then recreate it. For an absolute shared root, remove only
-  this site's category folder.
-- `cleanSiteStaging` also removes the transport user's `/tmp/e2e-inbox-*` older than 1 h.
-- Update `staging.ts`'s header.
-- Tests: unit (sequence; cleanup after each failing step; the heal path); executing ssh server;
-  twin `site` variant (zip into a 755 docroot, `ubuntu` outside the group).
-  - The executing server runs as the runner's user with the runner's `/tmp`: make the inbox root a
-    parameter (default `/tmp`) and point it into the server's temp folder (`base`), so `close()`
-    removes it. Its SFTP OPEN ignores flags (every open truncates; no `O_EXCL`) and refuses every
-    other request (`OP_UNSUPPORTED`): extend it if the inbox relies on either.
+Documented in [wordpress-automation.md → Staging in the `site` state](../architecture/wordpress-automation.md#staging-in-the-site-state-wpsite-stagingts).
+- **Where:** `wp/site-staging.ts` (`stageThroughInbox`, `ensureSiteStagingDir`, `sweepStaleInboxes`,
+  `inboxPath`; every remote step behind `SiteStagingOps`). `stageArtifact` routes: ssh in `site` →
+  inbox; else `mkdir -p` + `copyIntoTarget`, unchanged. Not in `copyIntoTarget`: `transport-exec.ts`
+  is the probe layer and may not resolve the state nor reach `fileChecksum` (`layering.spec.ts`).
+- **Decisions:** runner SHA-256 first (a bad source makes nothing remote); inbox file named `upload`
+  (no caller name in a path); `chmod 0644 <abs>` without `--` (BSD `chmod` reads `--` after the mode
+  as a file); `cp -f` (replaces a target file it cannot open); the identity's ensure is one constant
+  `sh -c` exiting 3 only when the area or category exists unwritable (another user's), so a full disk
+  or an unwritable parent never heals; heal only the **relative** area, after
+  `assertResolvedInsideRoot` (a linked parent would carry the `rm -rf` out of the site), warned once
+  remade; an **absolute** root is never healed (it may be shared: refused naming the override);
+  `cleanSiteStaging`'s root `rm` refuses a target a link carries out (relative: inside the WP root;
+  absolute: the root no link, the target inside it); the site checksum `--skip-plugins
+  --skip-themes` (their output would break the digest; WP-CLI kept over `sha256sum`, as `files.ts`
+  chose); inbox removal never throws (warns); `inboxRoot` must be absolute; the sweep only on
+  whole-area cleanup in `site` (a per-entry clean stays narrow), `find -H` (a linked root such as
+  macOS's `/tmp` is followed, nothing below it), `-user "$(id -u)"` in a constant `sh -c` (no extra
+  probe), `-type d`.
+- **Known limits:** `cp` onto an existing **directory** copies into it (GNU and BSD; `-T` is GNU-only):
+  the checksum then refuses, leaving `<target>/upload` until teardown. A shared absolute root
+  (`E2E_SITE_STAGING_DIR` is global) used by sites of different identities or states fails on a
+  category another made — `site`: the refusal; fallback: the upload error, naming the shared root —
+  and never deletes; fix: a `transport.stagingDir` per site. The resolved-path checks precede their
+  `rm` (a link swapped in between is not seen).
+- **Specs:** `site-staging.spec.ts` (22: order and users; the inbox removed after each failing step,
+  never after its own `mkdir`; checksum mismatch; removal warn-only; heal only on exit 3, confined
+  first, as identity then root, warned only once remade; absolute refused; other failures never
+  healed); `staging.site.ssh.spec.ts` (26: the exact lines in `site`, missing inbox root, mismatch,
+  `cp` failure, directory target; relative heal (`readlink` before `rm`, the warning), a linked parent
+  refused with the outside kept, a file in the category's place never healed; absolute: refused with
+  another site's file kept, a fallback upload's hint; runAs absent/false/`asTransportUser`/`no-sudo`
+  send today's single `mkdir -p`, and their whole-area cleanup one `rm` and no sweep; the sweep
+  against old/young/wrongly-named/link entries and through a linked root, its full `find` argv;
+  `cleanSiteStaging`'s root `rm` refused for a linked parent and a linked absolute root, run for a
+  plain one; `siteStagingOps.asRoot` without and with elevation); `staging.ssh-twins.spec.ts` (8).
+  Mutants, all killed: 12 at implementation (routing, `-p`, `finally`, checksum, age, `-type d`,
+  `asSite` as transport, root escalation, …) and 12 from the audit: sweep gated on `runAs` (killed by
+  the no-sudo/as-today cleanup), no `-user`, `asRoot` always,
+  no confine before heal, absolute heals its category, heal on any failure, warn before remade,
+  checksum booting plugins, no `-H`, `cleanSiteStaging` unguarded / its root-link check off, the area
+  unchecked by ensure.
+- **Verified on the twins** (2026-11-11, both stacks): `site` — a plugin zip staged through `/tmp`
+  lands `www-data:www-data 644` with the runner's SHA-256 and `wp plugin install` takes it, no inbox
+  left; a fallback run's `ubuntu` 775 area is removed (root) and made `www-data 755`; cleanup sweeps a
+  2 h-old inbox and keeps a young one. `legacy-777` (`fallback/owner-not-web`): today's path, the file
+  `ubuntu:ubuntu`, no inbox.
 
 ### 12.6 — `--user=<login>`
 
