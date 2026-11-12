@@ -47,7 +47,7 @@ src/
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm + warm-lines.ts its output, pin)
 │   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/), raw Allure results, a stub Allure CLI and a stop at a chosen check (allure.ts), a web server serving the identity probe (probe-web-server.ts), a FIFO's blocked reader released, or fed chunk by chunk, within a deadline, or a FIFO tapped to prove nothing was written through a path (fifo.ts), a `dd` taking `conv=excl` where the runner's (BSD) lacks it (excl-dd.ts), a `.tar.gz` listed from its raw headers (tar-listing.ts), an in-process SSH server that runs what it is sent, with a recording fake `sudo` (ssh-server.ts; `denySudo` all or one `-u` user), the option parsing every fake `sudo` shares (fake-sudo.ts), arguments that must survive every command line (hostile-arguments.ts), the SSH twins' gate, sites, variants, `resetTwin` and the cross-worker lock `withTwin` (ssh-twins.ts: `E2E_SSH_TWINS=1`), a shell command that dies with its spawner even on SIGKILL (tether.ts; `php -S` and the SSH server's commands)
-│   └── wp/                 # WordPress over WP-CLI (exec — exec/wpCli by identity state, wpCli's `--user` in wp-user — over transport-exec, php + php-literal, staging + site-staging (the `site` state's inbox), plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership + owner-probe, paths, cache, db, teardown, errors; site-identity + web-identity + run-as-argv: who site commands run as)
+│   └── wp/                 # WordPress over WP-CLI (exec — exec/wpCli by identity state, wpCli's `--user` in wp-user — over transport-exec, php + php-literal, staging + site-staging (the `site` state's inbox), plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, install-outputs, ownership + owner-probe, paths, cache, db, teardown, errors; site-identity + web-identity + run-as-argv: who site commands run as)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
     └── <product>/
@@ -275,9 +275,13 @@ lives in a sibling module, unit-testable without it.
   attachment; after a failed uninstall `debug.log` is cleared again, that fatal is an earlier run's); sweep its leftover **database
   footprint** (`ProductConfig.siteDbResidue`: options, tables, roles, capabilities — keyed off what is
   on the site, never off whether the plugin is installed; activation's `add_role()` keeps a leftover
-  role as it is); stage and install the cell's artifact with `--activate`, its files handed to
-  the **site's** ownership; **re-assert the active state**, never inferred from the exit code;
-  create the declared data directories (`ProductConfig.siteResidue`, and `resolveSiteDataDirs` for
+  role as it is); note which **install outputs** exist (`ProductConfig.installOutputs`: what
+  activation writes outside the plugin's folder; one batched check, none when undeclared); stage
+  and install the cell's artifact with `--activate`, its files handed to the **site's** ownership;
+  **re-assert the active state**, never inferred from the exit code; hand over each install output
+  the install **created** (`normalizeOwnership`; in `site` only verified as the identity's, warned
+  otherwise; one that existed — a shared parent — never touched; bounded at 30 s;
+  `wp/install-outputs.ts`); create the declared data directories (`ProductConfig.siteResidue`, and `resolveSiteDataDirs` for
   names the plugin picks at runtime, e.g. BackWPup's `uploads/backwpup-restore-<20 hex>`), open to
   **both** WP-CLI's and the web server's user and handed to the site's ownership. The edition is
   never named: the slug is `pluginArtifact("plugin").slug`. To reinstall part-way, a step calls
@@ -500,7 +504,8 @@ automatically, and that verification **must not** be skipped. Mirrored as a comm
   `site` (commands run as the web server) it answers `unnecessary` and runs no privileged command.
 - An elevated target built from `rootDir` passes the lexical guards in `wp/paths.ts` and
   `assertResolvedInsideRoot` (`wp/transport-exec.ts`), which refuses a path a symlink in any parent leads out of
-  the docroot, or one it cannot resolve.
+  the docroot, or one it cannot resolve. A symlink **at** an ownership target (inside the root, so it
+  passes) is refused by the grant's own root command (`GRANT_SCRIPT`): `chmod` follows an operand.
 - Leftovers: `ProductConfig.siteResidue` (files, `wp/residue.ts`; unprivileged first, then only what
   survived elevated; `transport.elevate: false` refuses elevation) and `ProductConfig.siteDbResidue`
   (options, tables, roles, capabilities, `wp/db-residue.ts`; never elevated, multisite refused). Both
@@ -644,7 +649,8 @@ this file goes in the right `docs/` file, linked from the [Documentation map](#d
 - The config factory (`createProductConfig`) or its project pairs.
 - The metadata/credential registry (`registerPool`, `routingMetadata`) and the per-process policy
   registries (`registerDebugLogOptions`, `registerSiteResidue`, `registerSiteDbResidue`,
-  `registerSiteDataDirResolver`, `registerStopRunningWork`, `registerSettleLeftovers`).
+  `registerSiteDataDirResolver`, `registerInstallOutputs`, `registerStopRunningWork`,
+  `registerSettleLeftovers`).
 - Artifact directories, `RUN_ID`, the `*_ROOT` env vars.
 - The drain (`config/drain.ts`, `E2E_INTERNAL_STOP_FILE`, `drainGate`) and its escalation signals.
 - The run's reporters: `[cell]` notice, results stream (`results.jsonl`, schema, reader,
@@ -660,7 +666,8 @@ this file goes in the right `docs/` file, linked from the [Documentation map](#d
 - Plugin lifecycle functions and their error types; plugin-folder inspection/removal (`plugin-dir.ts`).
 - The debug-log API (`readDebugLog`, `clearDebugLog`, `scanDebugLog`, `ScanDebugLogOptions`).
 - Ownership (`ownership.ts`: `planOwnership`, `normalizeOwnership`, the grant rule,
-  `transport.fileOwner`) and path guards (`paths.ts`, `pathInsideRoot`).
+  `transport.fileOwner`), install outputs (`install-outputs.ts`: `recordInstallOutputs`,
+  `settleInstallOutputs`) and path guards (`paths.ts`, `pathInsideRoot`).
 - Site identity (`site-identity.ts`: states, `decideIdentityState`, `resolveSiteIdentity`,
   `asTransportUser`; `web-identity.ts`: the web probe, its sweep, `site-identity.json`;
   `run-as-argv.ts`: the sudo wrapper).

@@ -156,6 +156,31 @@ export function pluginSitePath(slug: string): string {
 }
 
 /**
+ * Validates a product's declared install outputs (`ProductConfig.installOutputs`): each by the
+ * guard every site path passes (relative, inside the root, never a directory WordPress owns),
+ * normalised, duplicates dropped. Here, beside that guard, so the config build that validates them
+ * loads no command-running module.
+ *
+ * @param declared - `ProductConfig.installOutputs`.
+ * @returns the normalised paths, in declared order.
+ * @throws Error naming the first unusable path and the rule it broke.
+ */
+export function normaliseInstallOutputs(
+  declared: readonly string[],
+): readonly string[] {
+  const paths = declared.map((path) =>
+    normaliseSitePath(
+      path,
+      (reason) =>
+        `[wp/install-outputs] "${path}" cannot be declared as an install output: ${reason}. ` +
+        "Declare a path relative to the WordPress root that the plugin's activation creates " +
+        'outside its own folder, e.g. "wp-content/advanced-cache.php".',
+    ),
+  );
+  return [...new Set(paths)];
+}
+
+/**
  * A path the site reported, made relative to its WordPress root — or `undefined` when it does not lie
  * strictly inside it.
  *

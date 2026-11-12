@@ -163,6 +163,29 @@ test("registers the product's leftover settling for the preflight, in the buildi
   expect(registered).toBe(true);
 });
 
+test("registers the product's install outputs validated, and refuses an unusable one as it builds", async () => {
+  const file = (path: string): string => importable(join(REPO_ROOT, path));
+  const outcome = (await runInChildNode(
+    `
+    const { createProductConfig } = await import(${file("src/common/config/project.ts")});
+    const { getInstallOutputs } = await import(${file("src/common/config/metadata.ts")});
+    createProductConfig({ ...${JSON.stringify(PRODUCT)}, installOutputs: ["wp-content/cache/"] });
+    let refused = "";
+    try {
+      createProductConfig({ ...${JSON.stringify(PRODUCT)}, name: "other", installOutputs: ["../x"] });
+    } catch (error) {
+      refused = error.message;
+    }
+    console.log(JSON.stringify({ outputs: getInstallOutputs("demo"), refused }));
+    `,
+    { cwd: elsewhere, env: { RUN_ID: "run-1" } },
+  )) as { outputs: string[]; refused: string };
+  expect(outcome.outputs).toEqual(["wp-content/cache"]);
+  expect(outcome.refused).toMatch(
+    /"\.\.\/x" cannot be declared as an install output: it escapes the WordPress root/,
+  );
+});
+
 test.describe("createProductConfig — output folders by selection", () => {
   test("a run targeting a cell gives all three of its projects the cell's folder", async () => {
     expect((await build(["--project=a"])).outputDirs).toEqual({

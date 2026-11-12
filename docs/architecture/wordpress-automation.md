@@ -640,9 +640,12 @@ with `transport.fileOwner` ([configuration.md](../guides/configuration.md#transp
    `docker exec -u 0:0`):
 
    ```
-   sudo -n -- chmod -R -- <mode> <abs>
+   sudo -n -- sh -c '[ -h "$2" ] && exit 90; exec chmod -R -- "$1" "$2"' e2e-ownership-grant <mode> <abs>
    sudo -n -- chown -Rh -- <user>:<group> <abs>
    ```
+
+   The grant (`GRANT_SCRIPT`) refuses a symbolic link at `<abs>` itself (exit 90: warned, `failed`,
+   no chown), since `chmod` follows an operand link — see [Symlinks](#symlinks).
 
    Chowning first would leave the tree owned by the site's user with no grant yet — locking the
    transport user out of `wp plugin uninstall`. Granting first means a failed chown leaves the tree as
@@ -685,7 +688,7 @@ before every privileged path: ownership normalisation (warns, returns `failed`),
 preparation and residue removal (both throw). Removal is guarded before **both** passes: the unprivileged pass still runs as root when the transport's user is root (a container, a root SSH login), and deleting elsewhere is wrong at any privilege. Verified on a live container: with a linked ancestor, preparation and removal both
 refused and the outside directory kept its contents and `0700` mode.
 
-It is check-then-act: the path could be swapped in between, and `chmod` has no "do not follow" flag, so the window cannot be closed here.
+It is check-then-act: the path could be swapped in between, and `chmod` has no "do not follow" flag. Ownership's grant narrows that for a **link at the path itself** (which resolves inside the root and so passes this check — measured on Ubuntu 24.04: a link to a `700` folder made it `777`): root's own `sh` tests `-h` and `exec`s `chmod` in one command, leaving only the shell's two steps between them.
 Winning that race needs write access to the docroot (on these cells, the plugin under test); before
 the check there was no race, only an open door. Because of the resolution check, a data directory relocated outside the
 root is refused, not followed: point `rootDir` at the real location, or declare a path within it.
@@ -715,6 +718,33 @@ one `ubuntu@host`).
 **Linux only.** `stat -c` and `id` are read in GNU form; BusyBox (`wordpress:cli`) differs on unmapped
 ids (`stat -c %U` prints `UNKNOWN`, `id` bare ids) and is handled. Each read is confined to one
 function, so a BSD branch would stay local.
+
+### Install outputs ([`wp/install-outputs.ts`](../../src/common/wp/install-outputs.ts))
+
+What a plugin's **activation** writes outside its folder (WP Rocket: `wp-content/advanced-cache.php`,
+its cache and config folders) is declared as `ProductConfig.installOutputs` (paths relative to the
+root, validated by `normaliseInstallOutputs` (`normaliseSitePath` per path) when the config is built,
+duplicates dropped). The `@plugin`
+install checks them twice, as whoever commands run as: `recordInstallOutputs` right before the
+install, `settleInstallOutputs` after the active-state re-assert. One `sh -c` per check, the absolute
+paths as its arguments (never in the script): each present path's index and owner (`stat -c`), or `L`
+for a symbolic link (`-h`, never followed; a dangling one counts as present). Then, for each output
+present after but not before:
+
+- `site` state: verified as the identity's (`matches` against `ownershipOf(identity)`); warned otherwise.
+- every other state: `normalizeOwnership` (recursive, so an output inside a new one it handed over is
+  only reported as `covered`, with that output's outcome: a failed handover reads as failed; only a
+  new output that is no link covers, the outermost one, whatever the declared order).
+- a symbolic link: left alone in every state, warned (`chmod` would follow it).
+- `transport.fileOwner: false` outside `site`: neither check runs (nothing would be handed over).
+
+An output that existed before — a shared parent such as `wp-content/cache`, an earlier run's — is never
+touched: declare its children too. Never throws; a failed check warns and hands nothing over; the
+settle step is bounded (`SETTLE_BUDGET_MS`, 30 s ≈ 7 handovers of ~5 round trips): past it the install
+goes on, warned, and the step ends on its own. Undeclared: no command at all. Validation
+(`normaliseInstallOutputs`) lives in `wp/paths.ts`, so the config build loads no command module. Nothing here creates or removes an output: removal is `siteResidue`'s. As for the
+plugin's own files, fallback's `o+rwX` grant (SSH user outside the group) makes handed-over PHP files
+world-writable.
 
 ## Site identity ([`wp/site-identity.ts`](../../src/common/wp/site-identity.ts))
 
@@ -804,6 +834,8 @@ because a copied guard drifts.
   own permissions as backstop.
 - `pluginSitePath(slug)` — `wp-content/plugins/<slug>`, slug a **single segment** (`posix.join` would
   resolve `..` into a WordPress directory). Throws its own fixed message.
+- `normaliseInstallOutputs(declared)` — `normaliseSitePath` per declared install output, duplicates
+  dropped; here so the config build validating them loads no command-running module.
 - `isPathSegment(name)` — the one-segment rule (not empty, `.` or `..`; no `/` or `\`), shared by
   `pluginSitePath`, staging categories and filenames, and products' joined names.
 - `pathInsideRoot(path, root)` — a site-reported absolute path (`WP_CONTENT_DIR`, uploads) as the

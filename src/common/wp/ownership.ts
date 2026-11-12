@@ -99,8 +99,9 @@ export type OwnershipOutcome =
   /** The site declares `transport.fileOwner: false`. */
   | "disabled"
   /**
-   * A command failed, verification disagreed with it, or the attempt was refused before any
-   * command ran (an unusable path, a malformed `fileOwner`, a symlink target). Warned; the run
+   * A command failed, verification disagreed with it, or the attempt was refused before anything
+   * changed (an unusable path, a malformed `fileOwner`, a target resolving out of the root, or a
+   * symbolic link at the path itself, which the grant's root command refuses). Warned; the run
    * continues.
    */
   | "failed";
@@ -640,8 +641,8 @@ async function applyOwnership(
       return "failed";
     }
   } catch (error) {
-    // Its own reason, not `chown-failed`: this catches the root guard, the symlink check and any
-    // transport error, none of which is a chown refusal. Sharing that key would let whichever
+    // Its own reason, not `chown-failed`: this catches the root guards (lexical and resolved) and
+    // any transport error, none of which is a chown refusal. Sharing that key would let whichever
     // happened first permanently silence the other — the precise thing per-reason dedupe exists to
     // stop.
     warnOnce(
@@ -682,6 +683,22 @@ async function elevatedTarget(
   return absolute;
 }
 
+/** `$0` of {@link GRANT_SCRIPT}'s shell, so a process listing (and `sudo`'s log) says what it is. */
+const GRANT_NAME = "e2e-ownership-grant";
+
+/** {@link GRANT_SCRIPT}'s exit status for a symbolic-link operand: `chmod` itself exits 1. */
+const SYMLINK_REFUSED = 90;
+
+/**
+ * The grant, run as root as `sh -c GRANT_SCRIPT e2e-ownership-grant <mode> <absolute path>`: refuses a
+ * symbolic link (exit {@link SYMLINK_REFUSED}, a dangling one included), else `exec`s `chmod -R`.
+ * Mode and path arrive as arguments, never in the script, so no shell parses them. One line, so a
+ * command log keeps one line per command. Narrows the check-to-act window to the shell's own two
+ * steps; only a user able to replace the path in its parent could use that window, and nothing here
+ * runs before the check.
+ */
+export const GRANT_SCRIPT = `[ -h "$2" ] && exit ${String(SYMLINK_REFUSED)}; exec chmod -R -- "$1" "$2"`;
+
 /**
  * Runs the two privileged commands, **grant first**.
  *
@@ -691,8 +708,11 @@ async function elevatedTarget(
  *
  * `-h` acts on a symlink itself rather than its target. Measured on GNU coreutils 9.4: neither
  * `chown -R` nor `chmod -R` *traverses* a symlink found during recursion, and `-h` additionally
- * stops `chown` dereferencing the **operand**. `chmod` has no such flag, which is why the operand is
- * refused by {@link refuseSymlink} rather than handled here.
+ * stops `chown` dereferencing the **operand**. `chmod` has no such flag and follows an operand that
+ * is a link (measured: a link to a `700` folder made it `777`), so the grant runs through
+ * {@link GRANT_SCRIPT}, which refuses a link operand in the same root command: the link check is
+ * never a separate round trip a link could appear after. A refused link is warned about and nothing
+ * more runs on it — the chown included.
  *
  * @param transport - the target site's transport.
  * @param absolute - the composed target on the site.
@@ -707,12 +727,23 @@ async function grantThenChown(
   plan: Extract<OwnershipPlan, { kind: "grant" }>,
 ): Promise<boolean> {
   const { mode, target } = plan;
-  const chmod = await execElevated(transport, "chmod", [
-    "-R",
-    "--",
+  const chmod = await execElevated(transport, "sh", [
+    "-c",
+    GRANT_SCRIPT,
+    GRANT_NAME,
     mode,
     absolute,
   ]);
+  if (chmod.exitCode === SYMLINK_REFUSED) {
+    warnOnce(
+      transport,
+      "bad-target",
+      `"${relative}" is a symbolic link, so its ownership was left alone: \`chmod\` would act on ` +
+        "what it points to.",
+      relative,
+    );
+    return false;
+  }
   if (chmod.exitCode !== 0) {
     warnOnce(
       transport,

@@ -1,6 +1,6 @@
 # Phase 12 — Run as the site: the web server's identity for every site command
 
-Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11. Parent:
+Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8 done 2026-11-12. Parent:
 [e2e-modernization-plan.md](e2e-modernization-plan.md) (§3 phase table). Reverses that plan's §8.2
 rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of WP Rocket's port
 ([phase-6 plan §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket)).
@@ -266,7 +266,7 @@ Code never cites this plan; docs may.
 | 12.5 | Staging through an inbox; staging owned by another identity (done 2026-11-11) | 12.4 | 12.6, 12.7 | S / M |
 | 12.6 | `--user=<login>` (done 2026-11-11) | 12.4 | 12.5, 12.7 | S / M |
 | 12.7 | Ownership, residue, log, files in the `site` state (done 2026-11-11) | 12.4 | 12.5, 12.6 | M / M |
-| 12.8 | Install outputs, handed over in fallback | 12.7 | 12.9, 12.10 | S / S |
+| 12.8 | Install outputs, handed over in fallback (done 2026-11-12) | 12.7 | 12.9, 12.10 | S / S |
 | 12.9 | Pre-flight and healthcheck reports, banner, sudoers checks | 12.3–12.6 | 12.8, 12.10 | M / M |
 | 12.10 | BackWPup on the new system; the two-user scenario opts back; private folder | 12.0b, 12.5–12.7; step 4 also 12.9 | 12.8, 12.9 (steps 1–3) | M / M |
 | 12.11 | Docs, decision record, live verification, default `"auto"` | 12.0b–12.10 | — | M / M |
@@ -798,24 +798,95 @@ and [Elevated housekeeping](../architecture/wordpress-automation.md#elevated-hou
   it can now be narrowed there safely (root-made data dirs are handed back to the identity, so the
   mode no longer hides a `root:root` owner). Decide with the private folder.
 
-### 12.8 — Install outputs
+### 12.8 — Install outputs (done 2026-11-12)
 
-- `ProductConfig.installOutputs?: readonly string[]`: paths, relative to the root, that the plugin's
-  **activation** may create outside its own folder.
-  - Validated by `normaliseSitePath`, registered via `registerInstallOutputs`. Never created by the
-    suite.
-- In `installFresh`:
-  1. before install, record which outputs exist (one `test -e` batch);
-  2. after the active-state re-assert, take the outputs that are **new**:
-     - fallback/disabled: `normalizeOwnership` on each;
-     - `site`: verify the identity owns each, warn otherwise.
-- A shared parent such as `wp-content/cache` may be declared: it is handed over only when the
-  install created it.
-- Removal stays `siteResidue` and 12.15.
-- Risk kept as today: fallback's `o+rwX` grant (`grantModeFor`, when the SSH user is outside the
-  group) makes handed-over PHP files world-writable, as it already does for plugin files. The
-  pre-flight already names the fix (group membership).
-- Tests: validation; new-only hand-over; hook order; a twin `no-sudo` run.
+Documented in [wordpress-automation.md → Install outputs](../architecture/wordpress-automation.md#install-outputs-wpinstall-outputsts).
+- **`ProductConfig.installOutputs?`**: validated by `normaliseInstallOutputs` (`wp/paths.ts`:
+  `normaliseSitePath` per path, deduplicated; there so `config/metadata.ts` loads no exec/ssh module,
+  pinned by `layering.spec.ts`) inside `registerInstallOutputs`, so a bad path fails the config build (the only registry that validates on
+  registration); `getInstallOutputs` → `undefined` when undeclared; carried by `declaredResidue`, so
+  `replacePluginUnderTest` checks too. Never created or removed by the suite.
+- **`installFresh`:** `recordInstallOutputs` right after the database sweep, right before
+  `stageAndInstallPlugin`; `settleInstallOutputs` right after the active-state re-assert (none if
+  activation fails), before the data directories. Undeclared or empty: no command at all; nor with
+  `fileOwner: false` outside `site` (nothing would be handed over; `site` still verifies). Settle is
+  bounded by `SETTLE_BUDGET_MS` (30 s: ≈ 4 s per handover, ~5 round trips; WP Rocket's fresh install
+  ≈ 3 top-level outputs; Before measured ≤ 73 s of 120 s): past it warned, the install goes on, the
+  step ends on its own.
+- **The check (one per side):** `exec` (as whoever commands run as, i.e. who wrote them) of
+  `sh -c <constant script> e2e-install-outputs <absolute paths…>` (absolute: docker's working directory
+  is its image's); prints `<index> <user:group:uid:gid>` (`stat -c`, empty when unreadable) or
+  `<index> L` for a symbolic link (`-h` first: never followed, a dangling one present). Exit ≠ 0 or a
+  throw → warned, nothing handed over (never "all new").
+- **New = present after, absent before.** `site` → `matches(owner, ownershipOf(identity))`, warned
+  otherwise; every other state → `normalizeOwnership` per new output, skipping one inside a new output
+  already handed over (`covered` by the outermost new non-link ancestor, whatever the declared order,
+  carrying its `outcome`: a failed parent reads as failed). Symbolic links: left alone and warned in
+  every state (`chmod` follows an operand).
+- **Ownership's grant refuses a link operand (audit fix, pre-existing since 916a724):** a comment
+  cited a `refuseSymlink` that never existed; `assertResolvedInsideRoot` accepts a link resolving
+  inside the root, and GNU `chmod -R` follows an operand link (re-measured, coreutils 9.4 in the
+  twin image: a link to a `700` folder → `777`). The grant now runs as `sudo -n -- sh -c GRANT_SCRIPT
+  e2e-ownership-grant <mode> <abs>` (`[ -h "$2" ] && exit 90; exec chmod -R -- "$1" "$2"`): exit 90
+  → warned (`bad-target`), `failed`, no chown, for every `normalizeOwnership` caller (plugin folder,
+  data dirs, install outputs). Residual window: the shell's two steps, needing write access to the
+  path's parent. Pre-12.8 argv expectations changed only in the grant's shape (`ownership.spec.ts`
+  ×2, `residue.spec.ts`, `housekeeping.site.ssh.spec.ts`): still root, grant before chown, same mode
+  and target; the recursion now lives in the script (its own spec runs it on this machine's `sh`). A pre-existing shared
+  parent is never touched: its new children are handed over one by one.
+- **Specs:** `install-outputs.spec.ts` (17: validation and dedupe, parse incl. an empty owner half — a
+  bug the spec caught —, `newOutputs`, `coveringPath` incl. a sibling sharing a prefix,
+  `outermostCovering`, the script on
+  this machine's `sh` with hostile names, links, dangling links); `install-outputs.ssh.spec.ts` (20,
+  fake server: none declared → zero commands; paths as their own quoted arguments; failed check before /
+  after → nothing as root; disabled: only new, a new parent covers its children; fallback/no-sudo same;
+  pre-existing parent never chowned, its new child is; nothing new → no root call; symlink left; `site`:
+  owned / not-owned warned, exactly two sudo `-u` calls, no root call; audit: a killed check before /
+  after → resolves, warned, no root call; past a 100 ms budget → resolves at once, warned, the step
+  ends; `fileOwner: false` → no command outside `site`, still verified in it; a covered child carries
+  a failed parent's outcome; child declared before parent; a linked new parent covers nothing; `site`:
+  a link, `www-data:other` and an unreadable owner are not owned); `ownership.spec.ts` +4 (a link
+  inside the root refused by the grant, no chown; `GRANT_SCRIPT` on this machine's `sh`: link and
+  dangling link → 90 with the pointee untouched, hostile path granted, chmod's own failure ≠ 90);
+  `housekeeping.site.ssh.spec.ts` +1 (fake server: root ran only `-n true` and the guarded grant);
+  `layering.spec.ts` +1 (`config/metadata.ts` reaches only `wp/paths.ts`);
+  `plugin-lifecycle.spec.ts` +5 (a recording `sh` in the stub log: the checks sit right before
+  `plugin install` and right after `plugin is-active`; none when undeclared or `[]`; the reinstall
+  checks; a failed activation checks once); `metadata.spec.ts` +3, `project.spec.ts` +1 (factory
+  registers, refuses `../x`). No pre-12.8 test changed but the grant's argv (above; the lifecycle stub gained an opt-in
+  `WP_STUB_ACTIVATION_OUTPUT`).
+- **Twins** (`hooks/install-outputs.ssh-twins.spec.ts`, 6: both stacks × `no-sudo`, `legacy-777`,
+  `site`): a probe plugin whose activation writes `wp-content/e2e-io-drop-in.php` and
+  `wp-content/e2e-io-cache/e2e-io-pages` under a pre-existing `root:root` parent, through
+  `replacePluginUnderTest`. `no-sudo` (`fallback/no-sudo`): green, outputs stay `ubuntu:ubuntu`, the
+  elevation warning; `legacy-777` (`fallback/owner-not-web`): both outputs `sftp_twin:www-data`;
+  `site`: both `www-data:www-data`, no install-outputs warning (the check ran through real sudo + dash
+  + GNU stat). The parent stays `root:root` everywhere. `wp/housekeeping.ssh-twins.spec.ts` +2 (both
+  stacks, `legacy-777`): a link at the plugin path to a `root:root 700` folder in uploads →
+  `failed`, the folder unchanged, sudo's log shows the `sh -c` grant and no `chmod`/`chown`. Run
+  2026-11-12: install-outputs + housekeeping + staging twin specs, 24 passed.
+- **Audit mutants (2026-11-12, 40, all killed in an isolated copy, baseline green):** the 21 unit ones
+  below again; auditor's 7 (record / settle rethrow, before-check via `execAsTransport`, `verifyOwned`'s
+  link branch removed, user-only compare, an unreadable owner as owned, covering over links); 12 new
+  (grant guard removed, bare `chmod` again, exit 90 not told apart, a refused link still chowned, `$1`
+  tested instead of `$2`, no budget, budget parameter ignored, `fileOwner: false` skip removed / taken
+  in `site` too, `metadata.ts` through `install-outputs.ts`, covered always `normalized`, nearest
+  instead of outermost). Twin: the guard removed → both stacks' link test fails (`normalized`).
+- **Mutants (22: 21 unit + 1 twin, all killed, in an isolated copy):** new-only filter dropped; check
+  before moved after the install; settle before the active re-assert; settle never called; state branch
+  inverted / always verify / always hand over; covered by any present (not only new) parent; covering
+  prefix without `/`; no covering; validation skipped in the registry; no dedupe; `-h` removed from the
+  script; symlinks handed over; parse requiring the owner half; empty list still checking; an unknown
+  "before" read as nothing existing; `site` always owned; relative paths in the check;
+  `declaredResidue` without outputs; factory never registering; twin (nginx `legacy-777`): new-only
+  filter dropped → the pre-existing parent handed to `sftp_twin`.
+- **Kept as before:** fallback's `o+rwX` grant (SSH user outside the group) makes handed-over PHP files
+  world-writable, as for plugin files; the pre-flight names the fix (group membership).
+- **Limits:** an output a plugin writes *inside* a pre-existing undeclared folder is not seen (declare
+  it); an output an earlier killed/failed run left counts as existing and is never handed over (the
+  Before sweeps only DB residue; 12.12 decides); handovers are one `normalizeOwnership` each (~5
+  round trips; batching is 12.12's); the `no-sudo` twin cannot tell the outputs' skipped handover from the plugin folder's (same
+  warning, deduplicated) — the fake-server specs prove the call.
 
 ### 12.9 — Pre-flight, healthcheck, reports
 
@@ -957,6 +1028,13 @@ and [Elevated housekeeping](../architecture/wordpress-automation.md#elevated-hou
   - `wp-config.php` is never edited for the licence.
   - Measure on a twin first that the filters license (`WP_CACHE` written, pages cached).
 - Tests: declarations; the mu-plugin's PHP through a stub; its removal.
+- Deferred from 12.8's audit:
+  - Outputs left by an earlier killed/failed run read as "existing" and are never handed over. WP
+    Rocket must also declare its outputs as `siteResidue`; decide here whether the Before removes
+    declared file residue before `recordInstallOutputs`, or pre-existing outputs owned by the
+    transport's user are handed over.
+  - Batch the handovers (one root `chmod`/`chown`/re-read for all new outputs) if WP Rocket's measured
+    settle approaches `SETTLE_BUDGET_MS`.
 - Done: a twin install in `site` shows outputs verified and caching; in `no-sudo`, new outputs
   handed over.
 

@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { SiteResidueRemovalFailedError } from "./errors";
-import { resetOwnershipCaches } from "./ownership";
+import { GRANT_SCRIPT, resetOwnershipCaches } from "./ownership";
 import {
   isDeclaredResidue,
   normaliseResiduePath,
@@ -628,7 +628,7 @@ test.describe("prepareSiteDataDirs", () => {
         const dir = join(wpRoot, "wp-content/uploads", path);
         // Recursive, and the grant precedes the chown — the ordering `ownership.ts` depends on.
         expect(elevated, path).toContain(
-          `sudo -n -- chmod -R -- ug+rwX ${dir}`,
+          `sudo -n -- sh -c ${GRANT_SCRIPT} e2e-ownership-grant ug+rwX ${dir}`,
         );
         expect(elevated, path).toContain(
           `sudo -n -- chown -Rh -- www-data:www-data ${dir}`,

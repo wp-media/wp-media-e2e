@@ -21,6 +21,7 @@ import {
 import { resetOwnershipCaches } from "../wp/ownership";
 import { DEFAULT_STAGING_DIR, PLUGINS_CATEGORY } from "../wp/staging";
 import {
+  registerInstallOutputs,
   registerSiteDataDirResolver,
   registerSiteDbResidue,
   registerSiteResidue,
@@ -86,6 +87,7 @@ const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
  *    one with `--skip-plugins…` runs.
  *  - `WP_STUB_SILENT_ACTIVATE_FAIL` — install succeeds and exits 0, but the plugin never becomes
  *    active: the failure mode an exit code alone would miss.
+ *  - `WP_STUB_ACTIVATION_OUTPUT` — an absolute folder activation creates outside the plugin's own.
  *  - a `db-residue` marker in the state dir — a leftover database footprint, which the sweep's own
  *    snippet reports until the snippet that deletes runs, exactly as a real site would.
  */
@@ -121,6 +123,7 @@ case "$1 $2" in
     echo "<?php" > "$P/$SLUG/main.php"
     if [[ "$*" == *--activate* ]] && [ -z "$WP_STUB_SILENT_ACTIVATE_FAIL" ]; then
       touch "$S/active"
+      if [ -n "$WP_STUB_ACTIVATION_OUTPUT" ]; then mkdir -p "$WP_STUB_ACTIVATION_OUTPUT"; fi
     fi
     exit 0 ;;
 esac
@@ -295,6 +298,7 @@ test.afterEach(() => {
     "WP_STUB_UNBOOTABLE",
     "WP_STUB_STUCK_ACTIVE",
     "WP_STUB_SILENT_ACTIVATE_FAIL",
+    "WP_STUB_ACTIVATION_OUTPUT",
   ] as const) {
     Reflect.deleteProperty(process.env, key);
   }
@@ -378,6 +382,16 @@ test.describe("declaredResidue", () => {
       files: [],
       db: {},
     });
+  });
+
+  test("carries the product's validated install outputs, and none for a product without", () => {
+    registerInstallOutputs("outputs-spec-product", ["wp-content/cache/"]);
+    expect(declaredResidue("outputs-spec-product").installOutputs).toEqual([
+      "wp-content/cache",
+    ]);
+    expect(
+      declaredResidue("residue-spec-unregistered").installOutputs,
+    ).toBeUndefined();
   });
 
   test("carries the product's resolver for its runtime-named directories", () => {
@@ -699,6 +713,82 @@ test.describe("installPluginUnderTest", () => {
     await expect(installPluginUnderTest(local, artifact())).rejects.toThrow(
       PluginActivationFailedError,
     );
+  });
+});
+
+// The order of the two checks around the install is what makes "new" mean "this install's": read
+// through a recording `sh` ahead of the system's, whose lines land in the stub `wp`'s log, interleaved.
+test.describe("installPluginUnderTest — install outputs", () => {
+  let shDir: string;
+  let pathBefore: string;
+
+  test.beforeEach(() => {
+    shDir = mkdtempSync(join(tmpdir(), "sh-stub-"));
+    writeFileSync(
+      join(shDir, "sh"),
+      `#!/bin/bash\nprintf 'sh %s\\n' "$3" >> "$WP_STUB_ARGV_FILE"\nexec /bin/sh "$@"\n`,
+    );
+    chmodSync(join(shDir, "sh"), 0o755);
+    pathBefore = process.env.PATH ?? "";
+    process.env.PATH = `${shDir}:${pathBefore}`;
+  });
+
+  test.afterEach(() => {
+    process.env.PATH = pathBefore;
+    rmSync(shDir, { recursive: true, force: true });
+  });
+
+  test("checks once right before the install and once after the active-state re-assert", async () => {
+    process.env.WP_STUB_ACTIVATION_OUTPUT = join(
+      wpRoot,
+      "wp-content/e2e-cache",
+    );
+    await installPluginUnderTest(local, artifact(), {
+      ...files(),
+      installOutputs: ["wp-content/e2e-cache"],
+    });
+
+    const calls = wpCalls();
+    const checks = calls.flatMap((c, i) =>
+      c === "sh e2e-install-outputs" ? [i] : [],
+    );
+    const installed = calls.findIndex((c) => c.startsWith("plugin install "));
+    const active = calls.indexOf("plugin is-active backwpup-pro");
+    expect(checks).toEqual([installed - 1, active + 1]);
+    expect(existsSync(join(wpRoot, "wp-content/e2e-cache"))).toBe(true);
+  });
+
+  test("a product that declares none runs no check, with or without an empty list", async () => {
+    await installPluginUnderTest(local, artifact());
+    await replacePluginUnderTest(local, artifact(), {
+      ...files(),
+      installOutputs: [],
+    });
+    expect(wpCalls().filter((c) => c.startsWith("sh "))).toEqual([]);
+  });
+
+  test("a reinstall part-way checks too", async () => {
+    await replacePluginUnderTest(local, artifact(), {
+      ...files(),
+      installOutputs: ["wp-content/e2e-cache"],
+    });
+    expect(wpCalls().filter((c) => c.startsWith("sh "))).toEqual([
+      "sh e2e-install-outputs",
+      "sh e2e-install-outputs",
+    ]);
+  });
+
+  test("no check runs when the plugin never becomes active: the install fails first", async () => {
+    process.env.WP_STUB_SILENT_ACTIVATE_FAIL = "1";
+    await expect(
+      installPluginUnderTest(local, artifact(), {
+        ...files(),
+        installOutputs: ["wp-content/e2e-cache"],
+      }),
+    ).rejects.toThrow(PluginActivationFailedError);
+    expect(wpCalls().filter((c) => c.startsWith("sh "))).toEqual([
+      "sh e2e-install-outputs",
+    ]);
   });
 });
 
