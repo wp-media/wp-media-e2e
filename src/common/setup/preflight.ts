@@ -11,7 +11,11 @@ import {
 } from "../wp/exec";
 import type { ElevationSupport, ExecResult } from "../wp/exec";
 import { planOwnership } from "../wp/ownership";
-import type { OwnershipPlan } from "../wp/ownership";
+import type {
+  OwnershipPlan,
+  SiteOwnership,
+  SiteStateOwnership,
+} from "../wp/ownership";
 import { firstError } from "../wp/plugin";
 import { describePluginDir, inspectPluginDirs } from "../wp/plugin-dir";
 import {
@@ -751,15 +755,89 @@ async function verifyLocal(transport: LocalTransport): Promise<CheckResult[]> {
  * @param plan - the decision `planOwnership` reached for this site, taken by the caller so the
  * elevation check can be told the same thing.
  * @param elevation - what the same site's elevation probe answered, already taken by the caller.
- * @returns a check describing what will and will not happen to this site's files. It fails only for
- * a `fileOwner` that cannot be parsed, which is a mistake in configuration rather than a property of
- * the host.
+ * In the `site` identity state the writer is the identity, so the check names it — and says so when
+ * the install's owner differs, plus an always-passing "File owner override" check when a declared
+ * `transport.fileOwner` differs, since that state does not enforce it.
+ *
+ * @returns the checks describing what will and will not happen to this site's files: one, plus the
+ * override note above. Only a `fileOwner` that cannot be parsed fails, which is a mistake in
+ * configuration rather than a property of the host.
  */
-function checkFileOwnership(
+export function checkFileOwnership(
+  plan: OwnershipPlan,
+  elevation: ElevationSupport,
+): CheckResult[] {
+  const name = "File ownership";
+  if (plan.kind === "unnecessary" && plan.site !== undefined) {
+    return siteStateOwnership(plan.target, plan.site);
+  }
+  return [fileOwnershipOutside(name, plan, elevation)];
+}
+
+/**
+ * {@link checkFileOwnership} in the `site` identity state.
+ *
+ * @param identity - the ownership the identity's files get.
+ * @param site - the install's owner and the declared `fileOwner`, as `planOwnership` read them.
+ * @returns the "File ownership" check, and the "File owner override" one when the declaration
+ * names someone else.
+ */
+function siteStateOwnership(
+  identity: SiteOwnership,
+  site: SiteStateOwnership,
+): CheckResult[] {
+  const writer = `${identity.user}:${identity.group}`;
+  const owner = site.installOwner;
+  const ownerDiffers =
+    owner !== undefined &&
+    (owner.uid !== identity.uid || owner.gid !== identity.gid);
+  const checks: CheckResult[] = [
+    {
+      name: "File ownership",
+      ok: true,
+      detail:
+        `Files are written as ${writer}, the web server's identity this site's commands run as ` +
+        "(the `site` identity state), so nothing is handed over." +
+        (ownerDiffers
+          ? ` The install itself is ${owner.user}:${owner.group}; what the suite writes is ${writer}'s, not its.`
+          : ""),
+    },
+  ];
+  const declared = site.declared;
+  // A declaration may name either half by id; either spelling of the identity's own is no conflict.
+  const names = (half: string, name: string, id: number): boolean =>
+    half === name || half === String(id);
+  if (
+    declared !== undefined &&
+    !(
+      names(declared.user, identity.user, identity.uid) &&
+      names(declared.group, identity.group, identity.gid)
+    )
+  ) {
+    checks.push({
+      name: "File owner override",
+      ok: true,
+      detail:
+        `\`transport.fileOwner\` (${declared.user}:${declared.group}) is not enforced in the \`site\` ` +
+        `identity state: files are written as ${writer}.`,
+    });
+  }
+  return checks;
+}
+
+/**
+ * {@link checkFileOwnership} in every state but `site`: the handover and what stands in its way.
+ *
+ * @param name - the check's name.
+ * @param plan - the decision.
+ * @param elevation - the site's elevation answer.
+ * @returns the one check.
+ */
+function fileOwnershipOutside(
+  name: string,
   plan: OwnershipPlan,
   elevation: ElevationSupport,
 ): CheckResult {
-  const name = "File ownership";
   switch (plan.kind) {
     case "disabled":
       return {
@@ -956,7 +1034,7 @@ export async function verifySite(
   // Taken once and shared: both checks describe the same decision, and computing it twice is how
   // two lines about one site come to disagree.
   const plan = await planOwnership(site.transport);
-  checks.push(checkFileOwnership(plan, elevation));
+  checks.push(...checkFileOwnership(plan, elevation));
   checks.push(elevationCheck(elevation, plan));
   const pluginDirs =
     slugs.length === 0

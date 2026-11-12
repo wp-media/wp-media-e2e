@@ -496,7 +496,8 @@ automatically, and that verification **must not** be skipped. Mirrored as a comm
 - **MUST — code that writes into a docroot as the transport's user calls `normalizeOwnership` on what
   it wrote; never `chown`/`chmod` directly, never elevate `wp`** (WP-CLI as root leaves files the web
   server cannot write). `stageAndInstallPlugin` does it when given the `slug` — pass it. Override per
-  site with `transport.fileOwner` (`"user:group"`, or `false`).
+  site with `transport.fileOwner` (`"user:group"`, or `false`). Call it in every identity state: in
+  `site` (commands run as the web server) it answers `unnecessary` and runs no privileged command.
 - An elevated target built from `rootDir` passes the lexical guards in `wp/paths.ts` and
   `assertResolvedInsideRoot` (`wp/transport-exec.ts`), which refuses a path a symlink in any parent leads out of
   the docroot, or one it cannot resolve.

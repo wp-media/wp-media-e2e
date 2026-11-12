@@ -35,8 +35,9 @@ export interface SiteElevation {
   readonly support: ElevationSupport;
   /**
    * Whether this site's files actually need handing to another owner. `false` when the transport's
-   * user already owns the install — the normal `docker` shape — where losing privileges costs
-   * cleanup but not ownership. Kept per site so the banner cannot assert a cost the pre-flight check
+   * user already owns the install — the normal `docker` shape — or the site is in the `site` identity
+   * state (commands write as the web server), where losing privileges costs cleanup but not
+   * ownership. Kept per site so the banner cannot assert a cost the pre-flight check
    * printed directly above it denies.
    */
   readonly ownershipPending: boolean;
@@ -56,9 +57,9 @@ const COSTS: readonly ((arrow: string) => string)[] = [
  * The cost that applies only where a handover was actually needed.
  *
  * Stated separately because it is the one an operator can check: pre-flight prints each site's
- * ownership decision, and a site whose transport user already owns the install is told there that
- * nothing will be changed. Listing this unconditionally would contradict that line one paragraph
- * later, which is how a banner stops being read.
+ * ownership decision, and a site whose transport user already owns the install (or in the `site`
+ * identity state) is told there that nothing will be changed. Listing this unconditionally would
+ * contradict that line one paragraph later, which is how a banner stops being read.
  */
 const ownershipCost = (arrow: string): string =>
   `plugin file ownership is NOT normalized ${arrow} the web server cannot write into the plugin it is testing`;

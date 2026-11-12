@@ -545,7 +545,11 @@ test("planOwnership compares the owner with who commands run as: the identity in
   const inSite = await planOwnership(site);
   const asTransport = await planOwnership(disabled);
 
-  expect(inSite).toEqual({ kind: "unnecessary", target: WWW_OWNER });
+  expect(inSite).toEqual({
+    kind: "unnecessary",
+    target: WWW_OWNER,
+    site: { installOwner: WWW_OWNER },
+  });
   expect(asTransport).toMatchObject({
     kind: "grant",
     target: WWW_OWNER,
@@ -572,6 +576,7 @@ test("planOwnership: a run probe whose transport fails is unknown-identity, not 
   await expect(planOwnership(transport)).resolves.toEqual({
     kind: "unnecessary",
     target: WWW_OWNER,
+    site: { installOwner: WWW_OWNER },
   });
 });
 

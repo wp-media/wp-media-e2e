@@ -16,10 +16,10 @@ import { join } from "node:path";
 
 import {
   detectSiteOwnership,
-  fromRunIdentity,
   grantModeFor,
   matches,
   normalizeOwnership,
+  ownershipOf,
   parseIdentity,
   planOwnership,
   parseStatOwnership,
@@ -346,46 +346,19 @@ test.describe("parseIdentity — a banner cannot supply half the identity", () =
   });
 });
 
-test.describe("fromRunIdentity", () => {
-  test("keeps ids and every group, so the grant tests membership as the identity", () => {
-    const identity = fromRunIdentity({
-      user: "www-data",
-      group: "www-data",
-      uid: 33,
-      gid: 33,
-      groupIds: [33, 1001],
-      groupNames: ["www-data", "deploy"],
-    });
-
-    expect(identity).toEqual({
-      user: "www-data",
-      uid: 33,
-      gid: 33,
-      groupIds: [33, 1001],
-      groupNames: ["www-data", "deploy"],
-    });
-    // A member of the target's group by a supplementary group: no world-write.
+test.describe("ownershipOf", () => {
+  test("takes the identity's user and primary group, each name and id from its own field", () => {
+    // Every value distinct, so a swap of any two shows.
     expect(
-      grantModeFor(identity, {
-        user: "sftp_x",
-        group: "deploy",
-        uid: 1002,
-        gid: 1001,
-      }).worldWritable,
-    ).toBe(false);
-  });
-
-  test("an unmapped user (its uid as digits) carries no name, as parseIdentity reads one", () => {
-    expect(
-      fromRunIdentity({
-        user: "33",
-        group: "33",
+      ownershipOf({
+        user: "www-data",
+        group: "web",
         uid: 33,
-        gid: 33,
-        groupIds: [33],
-        groupNames: [],
+        gid: 82,
+        groupIds: [82, 1001],
+        groupNames: ["web", "deploy"],
       }),
-    ).toEqual({ uid: 33, gid: 33, groupIds: [33], groupNames: [] });
+    ).toEqual({ user: "www-data", group: "web", uid: 33, gid: 82 });
   });
 });
 

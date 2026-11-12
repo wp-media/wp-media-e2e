@@ -74,7 +74,8 @@ export interface SiteFile {
   /** When it was last written, as a Unix timestamp — by the site's clock. */
   readonly modifiedAt: number;
   /**
-   * Whether the **transport's** user may write it: what PHP's `is_writable()` answers inside WP-CLI,
+   * Whether the identity site commands run as may write it — the web server's in the `site` identity
+   * state, the transport's user in every other: what PHP's `is_writable()` answers inside WP-CLI,
    * which is the check a plugin's own command makes before it deletes a file.
    */
   readonly writable: boolean;
@@ -220,8 +221,9 @@ function parseListing(
 
 /**
  * The regular files directly inside a directory only the site can name — one a plugin's settings
- * decide, say — each one's size, modification time, whether the transport's user may write it and,
- * when asked, its SHA-256. Located and listed in one request, so the answer is about one moment.
+ * decide, say — each one's size, modification time, whether the identity site commands run as may
+ * write it ({@link SiteFile.writable}) and, when asked, its SHA-256. Located and listed in one
+ * request, so the answer is about one moment.
  *
  * Read by the site's own PHP, so it is the site's view of the directory, and hashing happens there:
  * proving a large file is unchanged costs one small reply, not a transfer.
