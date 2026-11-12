@@ -35,7 +35,7 @@ src/
 │   ├── config/             # env, sites loading (+ run-as.ts: an ssh site's runAs/umask parsing and defaults), run-context, run-id.ts (RUN_ID, a run's report folder), run-env.ts (run-setting variable names), cell pin, drain, metadata, devices, file-owner rule, config factory, output.ts (palettes and printers for setup lines and scripts: `E2E_OUTPUT`-aware; a worker's never coloured)
 │   ├── reporting/          # the suite's reporters (cell notice, results stream, terminal + its sink/lines/worker-output/mode/live-block/live-session/failure-block, run facts, summary), their pure parts, report retention (retention, report-tree, run-pruning, prune-command), page-loads.ts (a failed scenario's lost requests), one run's Allure report (allure-report: temp output + rename, traces strip/keep, analytics loader removed by allure-analytics, one history line per run by allure-history; allure-results, allure-errors, allure-command for `report:allure`), one run's download bundle (report-bundle: `report/` and/or `report.tar.gz`, one `<name>/` inside; bundle-manifest, bundle-landing, bundle-errors), child-group.ts (Allure and `tar` in a process group of their own: only the caller's abort stops them — SIGTERM, then SIGKILL after 5 s —, never a Ctrl-C or SIGHUP to its group)
 │   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ends a saved login)
-│   ├── setup/              # the auth setup's preflight (+ cell-plugin.ts: a broken copy of the cell's plugin), elevation/ownership banner, site info, check-lines.ts (one ✓/✗/→ check list for preflight, artifacts and healthcheck), healthcheck-lines.ts (the healthcheck's output, pure)
+│   ├── setup/              # the auth setup's preflight (+ cell-plugin.ts: a broken copy of the cell's plugin; login-shell.ts: the POSIX login-shell gate; site-identity-report.ts: the "Site identity" check and banner issues, pure; sudo-listing.ts: `sudo -n -l`'s `log_allowed`, pure; identity-verdicts.ts: a worker's read of `site-identity.json`), elevation/ownership/identity banners, site info, check-lines.ts (one ✓/✗/→ check list for preflight, artifacts and healthcheck), healthcheck-lines.ts (the healthcheck's output, pure)
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
 │   ├── guards.ts           # type guards for narrowing `unknown`
 │   ├── text.ts             # string helpers: escapeRegExp, escapeHtml, redactSecrets/maskValues (credentials), maskSiteUrl (a baseURL shown safely), siteLabel (its host·port·path, for a progress row), withoutControls (well-formed, no escape or control), plain (one line: + no Cf, combining marks capped at 8), printableLine/printableLines (someone else's text to print: plain then masked, indent kept)
@@ -190,8 +190,8 @@ Schema: **[configuration.md](docs/guides/configuration.md)**.
   committed `sites.example.json` (placeholders) is used, so a fresh checkout passes the `@noauth`
   smoke; an overlay alone (e.g. the SSH twins' `sites.twins.json`) replaces the example. Credentials
   live only there and never enter reports. `transport.port` (`ssh` only, default 22).
-- **Site identity fields** ([`run-as.ts`](src/common/config/run-as.ts)), read by `exec`/`wpCli` (keep
-  real sites at `false` until Phase 12's rollout): `transport.runAs` (`ssh` only; `"auto"`,
+- **Site identity fields** ([`run-as.ts`](src/common/config/run-as.ts)), read by `exec`/`wpCli`, verified
+  by the pre-flight (keep real sites at `false` until Phase 12's rollout): `transport.runAs` (`ssh` only; `"auto"`,
   `"user:group"` never root, or `false`, the default `DEFAULT_SSH_RUN_AS`) and `transport.umask`
   (`ssh` only; 3–4 octal digits keeping the owner's bits, stored as four, default `0022`), both
   refused on `docker`/`local`; `transport.wpUser` is resolved-only, copied from the site's `username`
@@ -355,26 +355,41 @@ only with all four of its marks (`GRACEFUL_FS_PATCH`). Admit a module only once 
 before the scenarios, in three steps:
 
 1. **Pre-flight** (gating), per real site — after settling what the product's killed runs left
-   (`ProductConfig.settleLeftovers`; best-effort, a refusal is a warning; never in the healthcheck),
+   (`ProductConfig.settleLeftovers`; best-effort, a refusal is a warning; never in the healthcheck; on
+   `ssh` only once the login shell passed, below, which is checked first),
    since that damage can stop WordPress booting: the transport works (ssh: connection, WP-CLI, `rootDir`;
    docker: container up, WP-CLI inside; local: `rootDir`, WP-CLI on `PATH`) and `wp core
 is-installed` passes — a WordPress that cannot boot (old PHP, DB down, a fatal) is reported as
-   that, never as "not installed". Then the **admin UI is English** (`determine_locale()` for the
+   that, never as "not installed". Over `ssh` the **login shell** must pass a quoted string back
+   unchanged and alone (`printf '%s' <!, newline, \\, quotes>` as the SSH user; csh/tcsh/fish fail it,
+   `getent` names the shell; text a startup file prints around it fails too; a dropped connection is
+   "could not be checked"): a gate, run before settling and before anything the pre-flight writes,
+   reported after the transport's gates ([`setup/login-shell.ts`](src/common/setup/login-shell.ts)).
+   A site asking for an identity (`transport.runAs` `"auto"`/`"user:group"`) then has its **web server
+   asked who PHP runs as** (`checkWebIdentity`; the verdict registered in the setup process at once, so
+   what follows runs as scenarios will, and written to `site-identity.json` in the cell's auth folder,
+   which each worker's `boundSite` reads before any site command; `auto` without it runs
+   `fallback/unverified` and warns); a site with `runAs` false gets no probe. Then the **admin UI is English** (`determine_locale()` for the
    configured user, so per-user setting, site option, `WPLANG` and filters all count): page objects
    match English names, and a translated site would otherwise fail as many locator timeouts. When
    WordPress cannot boot for that check but boots with the cell's own slug skipped
    (`--skip-plugins=<slug>`), the cell's plugin is a broken copy every login would die on: the setup
    removes it (`ensurePluginAbsent`, as the `@plugin` hooks would) and says so, a **Plugin under test**
    line; the healthcheck only reports it ([`setup/cell-plugin.ts`](src/common/setup/cell-plugin.ts)). A
-   gate failure throws a formatted report and skips the scenarios. Three **reports, never gates**: **File
+   gate failure throws a formatted report and skips the scenarios. Four **reports, never gates**: **File
    ownership** (the same `planOwnership` decision `normalizeOwnership` acts on, so report and action
-   agree), **Elevation** (passwordless `sudo`?) and **Plugin folders** (a folder WordPress lists no
+   agree), **Elevation** (passwordless `sudo`?), **Site identity** (state, fallback reason + fix, the
+   web server's identity and umask vs the run's, the WordPress login's `--user` check, sudo's
+   unresolvable-host noise → `/etc/hosts`, `!log_allowed` from `sudo -n -l` where site commands do or
+   would go through sudo, the SSH user's `~/.wp-cli/config.yml` in `site`, a world-writable umask; ⚠
+   when any line warns) and **Plugin folders** (a folder WordPress lists no
    plugin in at the slug the cell installs, which its next `@plugin` scenario removes). No report fails a site for a property of
    the host; the one exception is an unparsable `transport.fileOwner` (our config, unreadable).
-   Reports fold into one banner per run
-   ([`setup/elevation-report.ts`](src/common/setup/elevation-report.ts)), silent when every site can
-   elevate or opted out, naming the ownership cost only where a handover was needed; a second names
-   each leftover plugin folder.
+   Reports fold into banners per run
+   ([`setup/elevation-report.ts`](src/common/setup/elevation-report.ts)): elevation, silent when every site can
+   elevate or opted out, naming the ownership cost only where a handover was needed; leftover plugin
+   folders; site identity, silent when every site is `site`/`same-user`, verified over HTTP, and its
+   sudo keeps command lines out of its log, or opted out (`runAs: false`: noted on its check line only).
 2. **Authentication** ([`authenticate.ts`](src/common/auth/authenticate.ts)), per real site: end the
    session the cell's previous run saved (`auth/session.ts`: that token only, that host only, via
    `WP_Session_Tokens`), log in once through the UI, save `storageState`. A failing or timed-out
@@ -412,8 +427,9 @@ is checked with `holdsSecret`, both in the page.
 **Fleet health check:** [`healthcheck.ts`](healthcheck.ts) runs the pre-flight and login standalone
 (no test run, no `storageState` written) on **every** product × cell × site. Products run one
 section at a time, their sites concurrently; each site prints as soon as it is done, with every
-check it ran (ownership and elevation reports included) and hints on failure; a summary per product
-ends it. The banner is the auth setup's renderer, printed to **stdout** so `healthcheck > fleet.log`
+check it ran (ownership, elevation and site identity reports included; the web probe's verdict stays
+in memory, no file) and hints on failure; a summary per product ends it. The banners are the auth
+setup's renderers, printed to **stdout** so `healthcheck > fleet.log`
 keeps it. Its lines (`setup/healthcheck-lines.ts`) are styled for stdout as a run's are: no escape
 when redirected unless `FORCE_COLOR`; `E2E_OUTPUT=plain`, `TERM=dumb` or a C locale spell its symbols in
 ASCII; a check's detail and hint, and the banners' site values, are printed plain and masked

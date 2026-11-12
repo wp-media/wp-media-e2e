@@ -1,3 +1,4 @@
+import { test, type TestInfo } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
@@ -390,14 +391,42 @@ function releaseLock(lock: string): void {
 }
 
 /**
+ * Adds `ms` to the running Playwright test's timeout; nothing outside one (a child process, a
+ * script), nothing for no wait, and nothing to a test with no timeout (`0`, which a sum would set).
+ *
+ * @param ms - the time to add.
+ * @param info - the running test's info (a parameter so a spec can hand a fake); Playwright's
+ * `test.info()` by default, which throws when no test runs.
+ */
+export function extendRunningTest(
+  ms: number,
+  info: () => Pick<TestInfo, "timeout" | "setTimeout"> = () => test.info(),
+): void {
+  if (ms <= 0) return;
+  let current: Pick<TestInfo, "timeout" | "setTimeout">;
+  try {
+    current = info();
+  } catch {
+    return; // No running test: `test.info()`'s one failure.
+  }
+  if (current.timeout === 0) return;
+  current.setTimeout(current.timeout + ms);
+}
+
+/**
  * Runs `work` holding a twin alone: specs in other workers (other processes) that touch the same
  * twin wait, so one spec's reset never lands under another's commands. Held across the whole of
  * `work`, released however it ends.
  *
+ * Each stretch spent waiting for the lock is added to the running test's timeout as it passes (not
+ * once at the end, by when a long wait would have timed the test out): another spec can hold a twin
+ * for minutes, and that wait says nothing about this test, whose timeout budgets only its own work.
+ *
  * @param stack - which twin.
  * @param work - what to do with it.
  * @param options - `lockDir` (default {@link TWIN_LOCK_DIR}), `timeoutMs` (default 10 min), `pollMs`
- * (how often a waiter looks again; default 200 ms).
+ * (how often a waiter looks again; default 200 ms), `onWaited` (given each stretch of waiting in ms,
+ * never called when the lock was free; default {@link extendRunningTest}).
  * @returns what `work` returned.
  * @throws Error when the lock is not free within the timeout, or what `work` threw.
  */
@@ -408,11 +437,13 @@ export async function withTwin<T>(
     readonly lockDir?: string;
     readonly timeoutMs?: number;
     readonly pollMs?: number;
+    readonly onWaited?: (ms: number) => void;
   } = {},
 ): Promise<T> {
   const base = options.lockDir ?? TWIN_LOCK_DIR;
   ensureLockBase(base);
   const dir = join(base, `wpme-ssh-twin-${stack}.lock`);
+  const onWaited = options.onWaited ?? extendRunningTest;
   const deadline = Date.now() + (options.timeoutMs ?? 600_000);
   while (!tryLock(dir)) {
     if (Date.now() > deadline) {
@@ -421,7 +452,9 @@ export async function withTwin<T>(
           "another user (or a reused pid) left; remove the folder once no twin spec runs.",
       );
     }
+    const before = Date.now();
     await sleep(options.pollMs ?? LOCK_POLL_MS);
+    onWaited(Date.now() - before);
   }
   try {
     return await work();

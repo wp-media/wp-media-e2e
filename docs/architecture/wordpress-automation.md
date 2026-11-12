@@ -749,8 +749,13 @@ world-writable.
 ## Site identity ([`wp/site-identity.ts`](../../src/common/wp/site-identity.ts))
 
 Who a site's commands run as, once per install per process: `exec`/`wpCli` follow it
-([Transport & exec](#transport--exec-wpexects)). `auto` stays `unverified` until the
-pre-flight writes its verdict (Phase 12, [plan](../plans/phase-12-site-identity-plan.md), 12.9).
+([Transport & exec](#transport--exec-wpexects)). `auto` needs the pre-flight's verdict: the auth
+setup probes each site asking for an identity, registers the verdict in its process and writes
+`site-identity.json` in the cell's auth folder; each worker's `boundSite` reads it before any site
+command (`setup/identity-verdicts.ts`: `auto` sites only; missing, stale, invalid or incomplete →
+`fallback/unverified`, warned once). The healthcheck keeps its verdicts in memory. The pre-flight's
+"Site identity" check and banner: [AGENTS.md](../../AGENTS.md#improvement-gate-lint)
+"Auth fixture / setup" step 1 ([Phase 12 plan](../plans/phase-12-site-identity-plan.md), 12.9).
 
 | State       | When                                                                                   | Runs as                 |
 | ----------- | -------------------------------------------------------------------------------------- | ----------------------- |

@@ -18,7 +18,8 @@ import type { CheckResult } from "./preflight";
 export type CheckLinesTarget = "report" | "printed";
 
 /**
- * The lines for a list of checks: `✓ name: detail` for a pass; `✗ name: detail` for a failure, its
+ * The lines for a list of checks: `✓ name: detail` for a pass (`⚠` when it carries a warning);
+ * `✗ name: detail` for a failure, its
  * name emphasised, then each line of its hint under it as `→ hint`, two columns further in.
  *
  * @param checks - the checks, in the order they ran.
@@ -46,9 +47,11 @@ export function checkLines(
     const [first = "", ...rest] = printed
       ? printableLines(check.detail)
       : [check.detail];
-    const mark = check.ok
-      ? paint("ok", symbol("check"))
-      : paint("fail", symbol("cross"));
+    const mark = !check.ok
+      ? paint("fail", symbol("cross"))
+      : check.warning === true
+        ? paint("warn", symbol("warning"))
+        : paint("ok", symbol("check"));
     const name = check.ok ? check.name : paint("emphasis", check.name);
     lines.push(`${indent}${mark} ${name}: ${first}`);
     lines.push(...rest.map((line) => `${indent}  ${line}`));

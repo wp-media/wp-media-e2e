@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 
 import {
@@ -41,6 +42,7 @@ import {
   type TwinStack,
   type TwinVariant,
 } from "../__fixtures__/ssh-twins";
+import { removeTempDir } from "../__fixtures__/temp-dir";
 import { escapeRegExp } from "../text";
 import type { Transport } from "../config/types";
 
@@ -81,8 +83,10 @@ const NO_BOOT_SECONDS = 120;
 const CELLS = TWIN_CELLS.filter((cell) => cell.product === "backwpup");
 
 /**
- * The fake plugin's zip, built in this test's output folder: removed after the test, and — should the
- * runner die first — by the next run, which empties the output folder before it starts.
+ * The fake plugin's zip, built in a temporary folder of its own and removed after the test. Never in
+ * the test's output folder: every Playwright run of this config empties that whole folder as it
+ * starts, so a second run in the checkout (another spec, a gate) would delete the zip while this test
+ * waits for its twin. A runner killed first leaves the folder to the system's temporary-file cleanup.
  *
  * @returns the zip's path, and its removal.
  */
@@ -90,8 +94,8 @@ function buildProbeZip(): {
   readonly path: string;
   readonly remove: () => void;
 } {
-  const dir = test.info().outputPath("probe-zip");
-  mkdirSync(join(dir, SLUG), { recursive: true });
+  const dir = mkdtempSync(join(tmpdir(), "e2e-housekeeping-zip-"));
+  mkdirSync(join(dir, SLUG));
   writeFileSync(
     join(dir, SLUG, `${SLUG}.php`),
     `<?php\n/**\n * Plugin Name: E2E housekeeping probe\n * Version: 1.0.0\n */\n`,
@@ -100,7 +104,7 @@ function buildProbeZip(): {
   return {
     path: join(dir, `${SLUG}.zip`),
     remove: () => {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempDir(dir);
     },
   };
 }

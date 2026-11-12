@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 
 import { test as base, createBdd } from "playwright-bdd";
 
@@ -6,7 +7,9 @@ import { readResolvedArtifact } from "./artifacts/consume";
 import type { ArtifactRole, ResolvedArtifact } from "./artifacts/types";
 import { deviceForTags } from "./config/devices";
 import { getPool, readRouting } from "./config/metadata";
+import { REPO_ROOT, RUN_ID, dirs } from "./config/run-context";
 import { isPlaceholderSite } from "./config/sites";
+import { registerRunVerdict } from "./setup/identity-verdicts";
 import {
   STOPPED_ANNOTATION,
   drainReason,
@@ -66,7 +69,9 @@ interface WorkerFixtures {
 
 export const test = base.extend<TestFixtures, WorkerFixtures>({
   boundSite: [
-    // Worker-scoped: pin this worker to one pooled site by its global parallelIndex.
+    // Worker-scoped: pin this worker to one pooled site by its global parallelIndex, and give this
+    // process the auth setup's site identity verdict for it before any site command (an `auto` site
+    // without one runs as the transport's user, and says so).
     // eslint-disable-next-line no-empty-pattern -- Playwright derives deps from this destructuring; this fixture has none.
     async ({}, use, workerInfo) => {
       const { product, cell } = readRouting(workerInfo.project.metadata);
@@ -80,6 +85,13 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
         throw new Error(
           `No site for parallelIndex ${String(workerInfo.parallelIndex)} in a pool of ${String(pool.length)}. ` +
             "Run one cell per invocation with workers = pool size.",
+        );
+      }
+      if (!isPlaceholderSite(site)) {
+        await registerRunVerdict(
+          site,
+          resolve(REPO_ROOT, dirs(product, cell).auth),
+          RUN_ID,
         );
       }
       await use(site);

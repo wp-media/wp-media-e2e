@@ -1,6 +1,6 @@
 # Phase 12 — Run as the site: the web server's identity for every site command
 
-Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8 done 2026-11-12. Parent:
+Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8 and 12.9 done 2026-11-12. Parent:
 [e2e-modernization-plan.md](e2e-modernization-plan.md) (§3 phase table). Reverses that plan's §8.2
 rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of WP Rocket's port
 ([phase-6 plan §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket)).
@@ -267,7 +267,7 @@ Code never cites this plan; docs may.
 | 12.6 | `--user=<login>` (done 2026-11-11) | 12.4 | 12.5, 12.7 | S / M |
 | 12.7 | Ownership, residue, log, files in the `site` state (done 2026-11-11) | 12.4 | 12.5, 12.6 | M / M |
 | 12.8 | Install outputs, handed over in fallback (done 2026-11-12) | 12.7 | 12.9, 12.10 | S / S |
-| 12.9 | Pre-flight and healthcheck reports, banner, sudoers checks | 12.3–12.6 | 12.8, 12.10 | M / M |
+| 12.9 | Pre-flight and healthcheck reports, banner, sudoers checks (done 2026-11-12) | 12.3–12.6 | 12.8, 12.10 | M / M |
 | 12.10 | BackWPup on the new system; the two-user scenario opts back; private folder | 12.0b, 12.5–12.7; step 4 also 12.9 | 12.8, 12.9 (steps 1–3) | M / M |
 | 12.11 | Docs, decision record, live verification, default `"auto"` | 12.0b–12.10 | — | M / M |
 | 12.12 | WP Rocket declarations and licence | 12.11 | 12.13 | S / M |
@@ -402,7 +402,7 @@ Audit fixes (2026-11-10, two audits; mutants re-run):
   blame the plugin only when WordPress boots with its slug skipped (a crash there too is not its).
 - `sites.ts` quotes a relative `rootDir` (JSON, ≤ 200 code points): a path is no secret.
 - Documented: `wp` must be an executable on the login's `PATH`; the login shell must be POSIX
-  (probe deferred to 12.9).
+  (probed since 12.9: the login-shell gate).
 
 **Test seam for 12.4/12.5** (`src/common/__fixtures__/ssh-server.ts`): `startSshServer()` runs each
 command line with `/bin/sh -c` as the runner's user, from a temp `home`, with `bin/` first on `PATH`.
@@ -525,21 +525,6 @@ found`). The sweep removed a 2 h-old root-owned probe (escalated) and kept a fre
 3/3 `not-writable` (`dd: … File exists`), 0 bytes through; the old `set -C` line, same plant, delivered
 its payload.
 
-Left for later sub-phases:
-- **12.9:** in the auth setup, after the gates: `checkWebIdentity(site, request)` per real site →
-  `writeSiteIdentityFile(dirs(product, cell).auth, RUN_ID, verdicts)` +
-  `registerSiteIdentityVerdicts`; workers (a worker fixture, before any site command) read it with
-  `readSiteIdentityFile` and register `read` verdicts, warning once on `missing`/`stale`/`invalid`;
-  the healthcheck registers its own in memory. Print identity names and details through
-  `printableLines` (names come from the host). The web-umask warning compares `verdict.web.umask` with
-  `effectiveUmask`.
-  - **Budget** `PROBE_TIMEOUT_MS` (15 s) plus the probe's write, sweep and removal into the setup's
-    timeout (additively, like `BEST_EFFORT_ALLOWANCE_PER_SITE_MS`): a setup timing out mid-GET skips
-    the `finally`, leaving the probe servable (uid/gid/names/umask/SAPI behind a 128-bit name) until
-    the next probe's hour-old sweep.
-  - The `/etc/hosts` fix reads `sudoNoise` off the `site`/`fallback` state (no re-probe).
-  - `not-writable` from a `dd` lacking `conv=excl` (BSD/BusyBox host; dd's line is in `detail`): say so.
-
 ### 12.4 — Exec wiring (done 2026-11-11)
 
 Documented in [wordpress-automation.md → Transport & exec](../architecture/wordpress-automation.md#transport--exec-wpexects).
@@ -565,8 +550,7 @@ Documented in [wordpress-automation.md → Transport & exec](../architecture/wor
 - **`planOwnership`** reads who commands run as: `site` → the state's identity (`RunIdentity` gained
   `groupIds`/`groupNames`); else `probeIdentity`'s cache (transport user only). A throw resolving the
   state → `unknown-identity`, not cached. (12.7 replaced the `site` comparison; see there.)
-- **Overlays:** `cells.sh` writes `"runAs": "auto"`. Without a verdict (no 12.9 yet) runs and the
-  healthcheck stay `fallback/unverified` = as today.
+- **Overlays:** `cells.sh` writes `"runAs": "auto"`; since 12.9 runs and the healthcheck verify it.
 - **Test seams:** `__fixtures__/fake-sudo.ts` `SKIP_SUDO_OPTIONS` (`-n`, `-u`/`-g` exported, `--` or
   first non-option; unknown option → exit 1), used by `ssh-server.ts` and the stubs in `exec.spec`,
   `log.spec`, `residue.spec`, `staging.spec`, `plugin-dir.spec`, `copy-host.ts` (its `sudo -n true`
@@ -619,15 +603,15 @@ Left open (owners named):
 - **12.7 (decided: kept):** `ownership.ts`'s `warnOnce` dedupes per install + reason across states
   (an `asTransportUser` copy shares an install's warnings). In `site` only `bad-input`/`bad-owner` can
   warn (state-independent text); every other state warns the same text and fix for the same reason.
-- **12.9:** the `wp --info` gate's hint still names the SSH user's `PATH`; root's sudo lines keep
+- **12.9 (done):** the `wp --info` gate's hint names the identity in `site`; root's sudo lines keep
   the hostname noise (only the wrapper strips it; the report's `/etc/hosts` fix covers both).
 - **Known limit:** a program run as the site that itself exits 1 printing only `sudo:` lines is read
   as sudo's refusal (none of the suite's does).
-- **12.9 (decide):** transport-level and root commands still start with `cd -- <cwd>` as the SSH
-  user (default `cwd` = the root): on a docroot the SSH user cannot enter (`750 www-data`), probes and
-  root's housekeeping fail although the identity works. Today's twins and cells are `o+x`. Either run
-  them from `/` — after making relative operands absolute (`log.ts`'s elevated `rm`/`cat` of
-  `wp-content/debug.log` relies on the root as `cwd`) — or gate on it in the pre-flight.
+- **12.9 (decided: gate, kept):** transport-level and root commands still start with `cd -- <cwd>` as
+  the SSH user (default `cwd` = the root). The pre-flight's existing "rootDir accessible" check
+  (`ls -d <root>/.` as the SSH user) already fails a docroot the SSH user cannot enter (`750 www-data`)
+  with its fix, so it stays the gate; running them from `/` (relative operands made absolute first,
+  `log.ts`'s elevated `rm`/`cat`) is left for a host that needs it.
 
 ### 12.5 — Staging through an inbox (done 2026-11-11)
 
@@ -723,8 +707,8 @@ Documented in [wordpress-automation.md → `--user`](../architecture/wordpress-a
 - **Verified on the twins** (2026-11-11): the twin specs above, and the existing twin specs (`exec`,
   `staging`, pre-flight) green with every loaded site carrying `--user=admin`. BackWPup on
   `pro@twin-{apache,nginx}`, with and without `--user`: in `legacy-777` the same 2 fail on both sides
-  ("After a backup has run…", "A job run in the background…"; 12.10); in `site` all 15 fail at the
-  `@plugin` hook's staging `mkdir`, with and without `--user` (12.9).
+  ("After a backup has run…", "A job run in the background…"; 12.10); in `site` all 15 failed at the
+  `@plugin` hook's staging `mkdir` (no verdict yet), and pass since 12.9.
 
 ### 12.7 — Ownership, residue, log and files in the `site` state (done 2026-11-11)
 
@@ -888,36 +872,80 @@ Documented in [wordpress-automation.md → Install outputs](../architecture/word
   round trips; batching is 12.12's); the `no-sudo` twin cannot tell the outputs' skipped handover from the plugin folder's (same
   warning, deduplicated) — the fake-server specs prove the call.
 
-### 12.9 — Pre-flight, healthcheck, reports
+### 12.9 — Pre-flight, healthcheck, reports (done 2026-11-12)
 
-- Run the web probe (12.3) and write the verdict, in the auth setup and the healthcheck. The
-  healthcheck writes no file and uses its own verdict in memory.
-- A "Site identity" check in `verifySite` beside "File ownership" and "Elevation":
-  - state, identity, umask;
-  - fallback reason and fix (§2.1);
-  - web identity and umask versus the run identity;
-  - the WordPress login result;
-  - F8 noise → the `/etc/hosts` fix;
-  - **`!log_allowed` missing** from `sudo -n -l` for the SSH user → warn (F19), in every state that
-    uses sudo;
-  - an existing `~/.wp-cli/config.yml` of the SSH user → "no longer applies in `site`";
-  - an effective umask leaving "other" write (`0000`, `0001`, `0004`…, `umask & 0o002 === 0`) → warn:
-    every file the identity creates is world-writable (the load accepts it on purpose).
-- `wp --info` gate (`preflight.ts:446`): its hint names the identity it ran as.
-- Probe that the SSH user's login shell is POSIX (`getent passwd` field 7 is not csh/tcsh/fish, or a
-  `printf '%s' 'a!b'` round-trip): sshd hands the command line to it, and csh/tcsh read `!` inside
-  single quotes (found in 12.1; documented as a requirement until then). A failure is a gate on that site.
-- Banner: one pure renderer (`setup/elevation-report.ts`) for both callers; fields on
-  `SitePreflightResult` and the healthcheck's `SiteResult`. Silent when every site is
-  `site`/`same-user`, verified, and `!log_allowed` is set.
-- Never a gate.
-- Tests: renderers for every state and reason; the `sudo -n -l` parser; twin runs of every variant.
-- **BackWPup in `site` depends on this verdict** (found in 12.6, read in `decideIdentityState` and
-  `staging.ts`): nothing writes `site-identity.json` yet, so a run with `runAs: "auto"` is
-  `fallback/unverified` and stages as the SSH user, today's `mkdir -p`; on the `site` variant's
-  `www-data` 755 docroot the `@plugin` hook's `mkdir <root>/.e2e_temp/plugins` is refused (all 15
-  `cli-reads` + `cli-runs` scenarios, both twins, with and without `--user`). Not a 12.5 bug: the
-  fallback is today's path, which needs a writable docroot. Done includes that run passing in `site`.
+Documented in AGENTS.md ("Auth fixture / setup" step 1, healthcheck) and
+[wordpress-automation.md → Site identity](../architecture/wordpress-automation.md#site-identity-wpsite-identityts).
+- **Order in `verifySite`** (ssh): today's gates (`wp --info` from `/`, `rootDir`, `core is-installed`)
+  → **login shell** (the one new gate) → web probe (only `asksForIdentity`: effective `runAs`
+  `"auto"`/`"user:group"`; verdict registered in-process at once) → boot/locale (+ heal) → ownership,
+  elevation → **Site identity** (never a gate) → plugin folders. The probe precedes the locale check so
+  it, a heal and the reports run as scenarios will; it follows the gates so a broken transport is
+  reported by them, not by a probe. `verifyPool` runs the login-shell check first (read-only, per ssh
+  site), then `settleLeftovers` only on sites that passed it (settling writes, as root on BackWPup),
+  then `verifySite`, which reuses that result (one probe per site). An `auto` site settles as the
+  transport's user (`unverified`), as before this phase. The healthcheck never settles.
+- **"Never a gate" vs "a gate on that site":** the identity report never fails a site (§2.1: a
+  fallback runs as today; §8: nothing here fails a run); the login-shell check does, because it
+  protects command integrity, not a host property. `setup/login-shell.ts`: `printf '%s' <probe>` as the
+  SSH user, from `/`, must come back byte for byte (`!`, newline, `\\`, `$`, backtick, both quotes:
+  csh/tcsh and fish fail it); `getent passwd` (exit 0 only) names the shell only when it changed or
+  refused the probe. The probe back whole with text around it is a startup file printing (fails,
+  never blamed on the shell); a round-trip that throws is "could not be checked" (fails, a gate like
+  the transport's: no `getent`, no blame).
+- **Verdict hand-off:** `verifyPool` writes `site-identity.json` (12.3's `writeSiteIdentityFile`) in
+  `dirs(product, cell).auth` whenever a site asks for an identity, with no entry when its probe threw
+  (so a worker says the probe failed, never "stale"; a write failure warns); `boundSite` reads
+  it per worker for `auto` sites only (`setup/identity-verdicts.ts`: missing/stale/invalid/no entry →
+  one warning, `fallback/unverified`). Healthcheck: in memory, no file. Setup timeout +
+  `SITE_IDENTITY_ALLOWANCE_PER_SITE_MS` (`PROBE_TIMEOUT_MS` + 45 s) per probed site.
+- **Check content** (`setup/site-identity-report.ts`, pure): state (`describeIdentityState`, fallback
+  with fix), web identity/umask/SAPI vs docroot, run-vs-web mismatch (declared `runAs`), web umask ≠
+  run umask, world-writable umask (`umask & 0o002 === 0`), the `--user` check (an unmemoised
+  `wp --skip-plugins --skip-themes eval` of `wpUserCheckArgs`), F8 noise → `/etc/hosts`, `sudo -n -l`
+  in `site`/`fallback` (§ variant table wants it in `owner-not-web`), `~/.wp-cli/config.yml` in `site`.
+  ⚠ (`CheckResult.warning`, rendered by `checkLines`) when a line warns; `disabled` is a note.
+- **`sudo -n -l` parser** (`setup/sudo-listing.ts`, `env LC_ALL=C`): `Matching Defaults` entries split on
+  unescaped commas, last `log_allowed`/`!log_allowed` wins; `Defaults>user` runas entries naming the
+  identity (or `ALL`) apply on top — sudo 1.9.15 prints several on one line (measured); `Defaults!cmd`
+  ignored. Exit 1 with only `sudo:`/`Sorry, user` lines → `refused`; else `unreadable`. Rules never kept.
+  Known limit (accepted, documented in its TSDoc): the listing prints global/host/user `Defaults` in
+  one unlabelled block, read in print order, while sudo applies them global → host → user; only a
+  sudoers setting `log_allowed` both ways is misread (a false "not logging" needs the user's
+  `log_allowed` before a global `!log_allowed`).
+- **Banner** (`renderIdentityWarning`, `elevation-report.ts`, both callers): per site the issues
+  (`identityIssues`): fallback reason + fix, unresolved state, `site`/`same-user` not verified or the
+  web server another identity, sudo logging or unknown. Silent otherwise. One install (same address
+  and transport) under two products' cells is listed once. **Deviation (audit):** `disabled/config`
+  (`runAs: false`) is never listed, though the literal design was "silent only when every site is
+  `site`/`same-user`": `false` is the documented setting for real sites until 12.11, so the banner
+  would print on every live run and healthcheck for months, contradicting its own ✓ line and the
+  elevation banner's "silent when opted out". The check line says it instead: "Runs as the
+  transport's user, as configured (`runAs` is false); nothing to fix."
+- **What a `runAs: false` site now receives** (pinned in `preflight.identity.ssh.spec.ts`): the
+  `printf` round-trip and the `--user` check `wp eval`, both read-only; no probe file, `sudo -n -l`,
+  `getent` (unless the shell check fails), or `.wp-cli` read.
+- Tests: `sudo-listing`, `login-shell`, `site-identity-report` (every state/reason), `identity-verdicts`,
+  `elevation-report`/`check-lines` additions, `preflight.identity.ssh` (argv, gate, verdict file,
+  hint); `preflight.ssh-twins` (every variant × both twins = the variant table's state, banner
+  issues, no failed check, no probe left; `runAs` false). 15 mutants, all killed (state→line,
+  disabled issue, unverified issue, banner filter, `!log_allowed` ×2, runas entries, umask predicate,
+  gate return, shell compare, no probe for `false`, worker read only for `auto`, in-process
+  registration, ⚠ mark); one equivalent (a redundant `asks` guard before `sudo -n -l`) removed.
+- **Audit fixes (2026-11-12):** D1 banner deviation (above); login shell before settle (L1); verdict file
+  written with no verdict (L2); `sudo -n -l` order limit documented (L3); a thrown round-trip
+  "could not be checked" (L4); startup-file output named as such (L5). New tests pin each, plus
+  auditor B's survivors: probe before the locale check (fake `wp` answering German unless run as the
+  identity), only-uid/only-gid web mismatch, `sudo -n -l` read with the identity's names (`Defaults>`),
+  WP-CLI config exit 1 ⇒ none, a refusal's words under exit 127, same address over two transports,
+  `getent` exit ≠ 0. Mutants in an isolated copy: 48/48 killed (the 7 fixes reverted, auditor B's 8
+  survivors, the implementer's 15, 20 more); one equivalent (`shellFromPasswd`'s field-count guard)
+  removed from code. Auditor B's own 44 were not on disk to re-run; their survivors are in the 48.
+- Verified: BackWPup `cli-reads` + `cli-runs` on `pro@twin-apache` and `pro@twin-nginx` in the `site`
+  variant, `runAs: "auto"`, `E2E_RETRIES=0`: 15/15 each (verdict `owner-is-web`, no unverified warning).
+  The healthcheck on the twins (nginx `site`, apache `legacy-777`): banner lists apache's
+  `owner-not-web` only, once for both products; with both overlays at `runAs: false`: no banner, each
+  check line "Runs as the transport's user, as configured (`runAs` is false); nothing to fix."
 
 ### 12.10 — BackWPup on the new system
 
@@ -952,8 +980,7 @@ Documented in [wordpress-automation.md → Install outputs](../architecture/word
      `footprint.ts` (above), the debug log's "Runs with user:" line wherever a step reads it, and
      KSES (WP-CLI removes its filters only without `--user`) for anything BackWPup saves through
      WP-CLI.
-   - Needs 12.9's verdict: without it `site`/`site-775` run `fallback/unverified` and fail at
-     staging (12.9's note).
+   - 12.9's verdict makes `auto` `site` in a full run (its `cli-reads` + `cli-runs` pass there).
    - **Twin limit to resolve first:** on `legacy-777` "After a backup has run…" and "A job run in the
      background…" fail with and without `--user`. Apache: the background job dies with `PHP Fatal
      error: Uncaught TypeError: ftp_fput(): Argument #1 ($ftp) must be of type FTP\Connection, null
@@ -1004,7 +1031,8 @@ Documented in [wordpress-automation.md → Install outputs](../architecture/word
   4. healthcheck, then one full suite run;
   5. start the orchestrator again (`npm run orchestrator -- start`).
   - Start with `pro@nginx`; the twins first, every variant.
-- Then the default becomes `"auto"` (`ssh` only).
+- Then the default becomes `"auto"` (`ssh` only). Revisit then whether an explicit `runAs: false`
+  should be noted in the identity banner (12.9 keeps it out: an opt-out while `false` is the default).
 - Done: green on the twins and `pro@nginx`; the banner states what it should; docs merged.
 
 ### 12.12 — WP Rocket declarations and licence

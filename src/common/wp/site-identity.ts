@@ -531,7 +531,7 @@ function isWanted(identity: RunIdentity, wanted: Wanted): boolean {
  * @param group - the name, if known.
  * @param gid - the id.
  */
-function idsOf(
+export function idsOf(
   user: string | undefined,
   uid: number,
   group: string | undefined,
@@ -636,7 +636,7 @@ export function describeIdentityState(state: IdentityState): string {
     }
     case "disabled":
       return state.reason === "config"
-        ? "runs as the transport's user (`runAs` is false)"
+        ? "runs as the transport's user, as configured (`runAs` is false); nothing to fix"
         : "runs as the transport's user, as this scenario asks";
     default: {
       const exhaustive: never = state;

@@ -94,3 +94,22 @@ test("a report keeps a detail and hint as written: its reader cleans them", () =
     `  → \t${TOKEN.slice(0, 8)}\u200b${TOKEN.slice(8)} leaked`,
   ]);
 });
+
+test("a passing check carrying a warning is marked as one, never as a failure; a failed one stays failed", () => {
+  const warned: CheckResult = {
+    name: "Site identity",
+    ok: true,
+    detail: "fallback",
+    warning: true,
+  };
+  expect(checkLines([warned], "  ", TEXT_PALETTE)).toEqual([
+    "  ⚠ Site identity: fallback",
+  ]);
+  expect(checkLines([{ ...FAIL, warning: true }], "  ", TEXT_PALETTE)[0]).toBe(
+    "  ✗ WP-CLI: not found",
+  );
+  const ascii = createPalette({ tty: false, color: false, unicode: false });
+  expect(checkLines([warned], "", ascii)).toEqual([
+    "! Site identity: fallback",
+  ]);
+});

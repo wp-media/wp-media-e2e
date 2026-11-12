@@ -5,6 +5,7 @@ import { printableLine } from "../text";
 import type { ElevationSupport } from "../wp/exec";
 import { checkLines } from "./check-lines";
 import type { CheckResult } from "./preflight";
+import type { IdentityIssue } from "./site-identity-report";
 import { transportLabel } from "./preflight";
 
 /**
@@ -61,6 +62,8 @@ export interface SiteResult {
   readonly ownershipPending?: boolean;
   /** Folders at the cell's slug that WordPress lists no plugin in, for the closing warning. */
   readonly leftoverPluginDirs?: readonly string[];
+  /** What the site identity banner lists for this site, for the closing warning. */
+  readonly identityIssues?: readonly IdentityIssue[];
 }
 
 /**
