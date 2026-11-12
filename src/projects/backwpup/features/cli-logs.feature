@@ -12,12 +12,18 @@ Feature: Reading and deleting BackWPup's job logs over WP-CLI
   proof: it reports success when it could not delete the log it found, and without `--yes` it stops
   at a question nobody answers and ends at exit 0.
 
-  The runs are made inside WP-CLI, so their logs belong to WP-CLI's user — which is what lets a
-  scenario make one look old, or make one read-only.
+  The runs are made inside WP-CLI, so their logs belong to WP-CLI's user — the web server's own where
+  the suite runs site commands as it — which is what lets a scenario make one look old, or make one
+  read-only.
+
+  Two runs made back to back can write their logs in the same second, and the plugin orders logs by
+  their modification time in whole seconds, so the oldest run's log is set a minute back: "newest"
+  then means one log.
 
   Background:
     Given BackWPup is set up to back up the "database" on a schedule
     And the scheduled job has made 2 backups inside WP-CLI
+    And the oldest run's log was last written 1 minute ago
 
   Scenario: Showing a log by its name prints that run's log as plain text
     When I run the BackWPup command "log-show {oldest log}"

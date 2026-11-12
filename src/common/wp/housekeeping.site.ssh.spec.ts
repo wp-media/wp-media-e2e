@@ -3,6 +3,7 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -145,21 +146,26 @@ function refuse(name: (typeof REFUSABLE)[number], pattern: string): void {
 }
 
 /**
- * The fake `wp`: `--info` answering; `eval` clearing the log as WordPress would (`cleared`), or a WordPress that cannot
- * boot (exit 255), so the log's direct fallbacks run. `probe-killed`: `--info` kills the run probe
+ * The fake `wp`: `--info` answering; `eval` clearing the log as the snippet would (`clears`: emptied in
+ * place; `creates`: made anew, the identity's), or a WordPress that cannot boot (exit 255), so the
+ * log's direct fallbacks run. `probe-killed`: `--info` kills the run probe
  * (its parent shell, the command the transport ran) with SIGKILL, so resolving the state throws.
  *
  * @param how - which.
  */
-function setWp(how: "clears" | "fails" | "probe-killed"): void {
+function setWp(how: "clears" | "creates" | "fails" | "probe-killed"): void {
+  const verdict = (state: string): string =>
+    `echo 'e2e-debug-log-clear {"state":"${state}","ours":true,"path":"wp-content/debug.log"}'`;
+  const evals = {
+    clears: `: > wp-content/debug.log; ${verdict("emptied")}`,
+    creates: `rm -f wp-content/debug.log; : > wp-content/debug.log; ${verdict("created")}`,
+    fails: "echo 'PHP Fatal error: simulated' >&2; exit 255",
+    "probe-killed": "echo 'PHP Fatal error: simulated' >&2; exit 255",
+  };
   // `--info` answers unless the probe is to die: the run probe needs it.
   server.addProgram(
     "wp",
-    `if [ "$1" = --info ]; then ${how === "probe-killed" ? "kill -9 $PPID; exit 1" : "echo 'WP-CLI 2.12.0'; exit 0"}; fi\n${
-      how === "clears"
-        ? "rm -f wp-content/debug.log; echo cleared"
-        : "echo 'PHP Fatal error: simulated' >&2; exit 255"
-    }`,
+    `if [ "$1" = --info ]; then ${how === "probe-killed" ? "kill -9 $PPID; exit 1" : "echo 'WP-CLI 2.12.0'; exit 0"}; fi\n${evals[how]}`,
   );
 }
 
@@ -549,10 +555,66 @@ test.describe("residue in the site state: as the site first, root only for what 
   });
 });
 
+/**
+ * Outside `site`, a log WP-CLI's user made would be one the web server cannot append to: it is handed
+ * to the install's owner like anything else this suite writes, or removed where it cannot be.
+ */
+test.describe("debug.log outside the site state: the transport user's log is handed over or removed", () => {
+  const log = (): string => join(server.root, "wp-content", "debug.log");
+
+  test("a log it made is handed to the install's owner by root", async () => {
+    setWp("creates");
+    const transport = server.transport({ runAs: false });
+    const from = await settled(transport, "disabled");
+    const realWarn = console.warn;
+    console.warn = (): void => undefined;
+    try {
+      await clearDebugLog(transport);
+    } finally {
+      console.warn = realWarn;
+    }
+
+    // The fake `chown` is the system's, refused for another user, so the verification reads `failed`
+    // and the log is removed after the attempt; on a host where root's chown works it is kept.
+    expect(existsSync(log())).toBe(false);
+    expect(rootCallsSince(from)).toEqual([
+      ["-n", "true"],
+      [
+        "-n",
+        "--",
+        "sh",
+        "-c",
+        GRANT_SCRIPT,
+        "e2e-ownership-grant",
+        "ug+rwX,o+rwX",
+        log(),
+      ],
+      ["-n", "--", "chown", "-Rh", "--", "www-data:web", log()],
+    ]);
+  });
+
+  test("a log it made that cannot be handed over (no sudo) is removed, as before", async () => {
+    setWp("creates");
+    server.denySudo(true);
+    const transport = server.transport({ runAs: false });
+    await settled(transport, "disabled");
+    const realWarn = console.warn;
+    console.warn = (): void => undefined;
+    try {
+      await clearDebugLog(transport);
+    } finally {
+      console.warn = realWarn;
+    }
+
+    expect(existsSync(log())).toBe(false);
+  });
+});
+
 test.describe("debug.log in the site state: root fallbacks only once the site was refused", () => {
   const log = (): string => join(server.root, "wp-content", "debug.log");
 
-  test("wp eval clears it as the site, with no root call", async () => {
+  // The identity is the web server: its own log needs no handing over.
+  test("wp eval empties it as the site, with no root call", async () => {
     setWp("clears");
     writeFileSync(log(), "old");
     const transport = siteTransport();
@@ -560,7 +622,7 @@ test.describe("debug.log in the site state: root fallbacks only once the site wa
 
     await clearDebugLog(transport);
 
-    expect(existsSync(log())).toBe(false);
+    expect(readFileSync(log(), "utf8")).toBe("");
     expect(siteProgramsSince(from)).toEqual(["wp"]);
     expect(rootCallsSince(from)).toEqual([]);
   });

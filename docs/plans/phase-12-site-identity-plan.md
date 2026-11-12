@@ -288,6 +288,10 @@ Code never cites this plan; docs may.
 | `no-wp` | as `site`, `wp` only in `~ubuntu/bin` | outside group | `(ALL)` + `!log_allowed` | `fallback/no-wp` | as `legacy` requirements; warns |
 | `wpconfig-root` | as `site`, `wp-config.php` `root:www-data 644` | outside group | `(ALL)` + `!log_allowed` | `site` | WP Rocket scenario green via 12.14 |
 
+`legacy-777` and `owner-mismatch` (docroot not the web server's) define `FS_METHOD` `direct`; every
+other variant leaves it undefined. `check.sh` proves both, and that a web request's
+`get_filesystem_method()` is `direct` in every variant (12.10).
+
 ### 12.0a — Twin images and variants (done 2026-11-10)
 
 `docker/ssh-cells/`; its scripts' headers say what each does. Build from that folder:
@@ -780,7 +784,7 @@ and [Elevated housekeeping](../architecture/wordpress-automation.md#elevated-hou
   failing, site branch ignored).
 - **Deferred to 12.10:** `DATA_DIR_MODE` `0777` is still applied in `site`, where one user writes;
   it can now be narrowed there safely (root-made data dirs are handed back to the identity, so the
-  mode no longer hides a `root:root` owner). Decide with the private folder.
+  mode no longer hides a `root:root` owner). Decide with the private folder. Decided there: kept.
 
 ### 12.8 — Install outputs (done 2026-11-12)
 
@@ -951,6 +955,10 @@ Documented in AGENTS.md ("Auth fixture / setup" step 1, healthcheck) and
 
 1. **Baseline**, before this phase's changes: the full BackWPup suite on both twins in `legacy-777`
    with `runAs: false` (`E2E_RETRIES=0`). Record each scenario's outcome (`results.jsonl`).
+   Done 2026-11-12, after the twin fix below: 70 scenarios per cell, none skipped; apache 68/2
+   (onboarding "Only the files…"/"Only the database…": `page.goto` interrupted by the first-backup
+   page's own navigation, likely a race), nginx 67/3 (the three backup-history restores: the
+   unwritable `debug.log` below).
 2. **The opt-back step.**
    - `CliSession.runAsSshUser()` (`support/cli-session.ts`) swaps the transport for
      `asTransportUser(...)` before any command; calling it later throws.
@@ -968,6 +976,10 @@ Documented in AGENTS.md ("Auth fixture / setup" step 1, healthcheck) and
    - Update its TSDoc and authoring-tests.md "BackWPup's fixtures".
    - Decide `residue.ts`'s `DATA_DIR_MODE` (`0777`, for two users) in `site`, where one user writes
      (from 12.7): safe to narrow there now, since every data dir in `site` ends the identity's.
+     **Decided 2026-11-12: kept `0777` in every state.** Measured: narrowed to the umask's `0755`
+     in `site`, the opt-back scenario failed on both twins (`site`, `site-775`): its `backup-delete`
+     as the SSH user died on "Restore working directory … is not writable"
+     (`WorkingDirectoryProtector.php:81`). An opt-back scenario makes two writers in `site` too.
 4. **Compare:** the suite with `runAs: "auto"` in `site` and `site-775`.
    - A scenario passing in the baseline that fails or skips is investigated: a two-user outcome gets
      the step; anything else is fixed in the shared layer.
@@ -981,13 +993,34 @@ Documented in AGENTS.md ("Auth fixture / setup" step 1, healthcheck) and
      KSES (WP-CLI removes its filters only without `--user`) for anything BackWPup saves through
      WP-CLI.
    - 12.9's verdict makes `auto` `site` in a full run (its `cli-reads` + `cli-runs` pass there).
-   - **Twin limit to resolve first:** on `legacy-777` "After a backup has run…" and "A job run in the
-     background…" fail with and without `--user`. Apache: the background job dies with `PHP Fatal
-     error: Uncaught TypeError: ftp_fput(): Argument #1 ($ftp) must be of type FTP\Connection, null
-     given` (`class-wp-filesystem-ftpext.php:266`): the docroot is not the web user's, so
-     `get_filesystem_method()` is not `direct`, the `ftp` extension is loaded and `wp-config.php` has
-     no `FS_METHOD`. Nginx: `runnow` answers 200 (31 bytes) and no backup starts. Fix in the twins
-     (e.g. `FS_METHOD` `direct` in `legacy-777`, or a variant) before judging background runs.
+   - **Twin limit (resolved 2026-11-12):** on `legacy-777` "After a backup has run…" and "A job run
+     in the background…" failed. One cause on both stacks: the docroot is `sftp_twin`'s, so in a web
+     request `get_filesystem_method()` is `ftpext` (the owner of `wp-admin/includes/file.php` ≠ that of a
+     temp file the worker writes in `WP_CONTENT_DIR`, `ftp` loaded, no `FS_METHOD`; read in the
+     twin's WordPress 7.1.4); `BackWPup_Job::start_http` writes `.backwpup_job_started` through
+     `WP_Filesystem` → `ftp_fput(null)` TypeError (`class-wp-filesystem-ftpext.php:266`). Nginx
+     looked different only because `wp-cron.php` answers before the work (`fastcgi_finish_request`)
+     and the fatal was lost: `debug.log` was `ubuntu:ubuntu 644` (see below). Fix: `site.sh` defines
+     `FS_METHOD` `direct` whenever the docroot is not `www-data`'s (`legacy-777`, `owner-mismatch`),
+     as a real site deployed by another account needs (F18; `simple` defines it); `check.sh` proves
+     the constant and a web request's method.
+   - **Lost web fatals on `legacy-777` nginx (suite, open):** `clearDebugLog` removes `debug.log`;
+     WP-CLI's PHP 8.5 `Deprecated:` lines then recreate it as `ubuntu:ubuntu 644` (umask 0022), so
+     PHP-FPM (`www-data`) cannot append and a web-side fatal never reaches the After scan. Apache's
+     PHP 8.3 CLI writes nothing first, so the web creates it. It also hangs BackWPup's `restore_dir`
+     stream (3 history restores failed in the baseline; the same scenario passed in 14 s with the
+     log kept writable). Gone in `site` (one identity); still the case in every fallback state.
+     **Fixed 2026-11-12** (`wp/log.ts`): the clear empties a writable log in place (owner and mode
+     kept), else replaces it with an empty one (`O_EXCL`, a link never followed); a log the identity
+     owns is then kept in `site` (it is the web server's), elsewhere only once handed over
+     (`normalizeOwnership` → `normalized`), else removed as before — `unnecessary` outside `site`
+     (WP-CLI's user owns the install; the web server may be another) and `disabled` included (audit
+     A1). Reproduced first (1/1 "A full restore from the backup history…"
+     failed, log `ubuntu:ubuntu 644`); after: the three history restores 3/3 on nginx `legacy-777`
+     with `runAs: false`, log `sftp_twin:www-data 664`. Twin spec: `housekeeping.ssh-twins.spec.ts`
+     "legacy-777: a debug.log WP-CLI's user made is handed over by a clear…" (fails without the fix).
+     Left: on `no-sudo` (fallback, no elevation) a log WP-CLI's user makes stays its own until the
+     next clear removes it, as before.
 5. **TSDoc premises** that name "the transport's user", reworded to "the identity commands run as"
    where that is now true: `makeLogReadOnly`, `backdateFile`, `content-copy.ts` `findLeftovers`,
    `restore-snapshots.ts:142`, `markers.ts:76`, `backups.ts:460`, `cli-restore.ts:29`; the Feature
@@ -1000,6 +1033,66 @@ Documented in AGENTS.md ("Auth fixture / setup" step 1, healthcheck) and
     scenario skipping in `site` with its reason;
   - the opt-back scenario runs in `site-775`;
   - private files never under the docroot in `site`.
+- **Progress 2026-11-12 (steps 2, 3, 5 done; step 4 next):**
+  - Step 2 as designed; `sshUserBoot` decides the skip: only a refusal to read the site
+    ("Permission denied", or WP-CLI not recognising a root it cannot read; measured on a twin) skips,
+    any other failure (database down, not installed, a fatal) fails the step (audit A3).
+    - Intended, behaviour-neutral (B6): the step changes the "Deleting a backup the web server made
+      is refused…" scenario in every state — one extra `wp core is-installed`, and no `--user` on its
+      BackWPup commands (`asTransportUser` drops `wpUser`), as before 12.6; 12.6 measured
+      `cli-reads`/`cli-runs` identical with and without `--user`. The opt-back scenario **runs** in `site`
+    too (not skipped): WordPress boots for `ubuntu` there (`wp-config.php` world-readable). Twins:
+    `cli-backups` 4/4 on nginx `site`, apache `site-775` and apache `legacy-777`.
+  - Step 3: `privateFolderHome` → `/tmp/e2e-private-<key>` in `site` (the key keeps the test id for
+    tracing, then 16 hex), strict `mkdir($dir, 0700)` (no parents, nothing reused), removed as the
+    identity, `staleDirSweepScript` (shared with the inbox sweep) removing the identity's own over
+    1 h. BackWPup accepts it: `backup-download`, `job-export`/`job-import`, the key files all pass on
+    nginx `site` (`{private folder}` = `../../../../tmp/e2e-private-…`); `legacy-777` keeps
+    `.e2e_temp/private/`. No folder left in `/tmp` after the runs.
+  - Same `site` run (nginx): `cli-backup-encryption`, `cli-job-transfer`, `cli-restore`, `restore`
+    and `cli-logs` all pass; "Showing a job's log…" failed once (two runs in one second: the plugin's
+    "newest" log is ambiguous; passed on rerun and on apache), a timing flake outside this phase.
+  - Step 5 reworded where true (plus `cli-logs.steps.ts`, `plugin-folders.ts`, `encryption-keys.ts`,
+    the private folder, `cli-backups` Feature text).
+  - **Step 4 measured 2026-11-12** (twins, `E2E_RETRIES=0`, both cells concurrently; state `site`
+    confirmed: `site-identity.json` `owner-is-web`). Passed/failed of 70, none skipped:
+    `site` apache 69/1, nginx 70/0; `site-775` 69/1 each; legacy-777 `runAs: false` re-run apache
+    69/1, nginx 68/2 (baseline 68/2, 67/3).
+    - nginx's 3 history restores pass in every mode (step 2's log fix; 2/2 alone in legacy).
+    - Onboarding "Only the files…"/"Only the database…": a suite race, identity-independent: the
+      first-backup screen redirects itself to `page=backwpup` as the job ends, and `I open the
+      BackWPup dashboard` navigates there at the same moment. Alone ×3 each: 3/6 fail with `runAs:
+      false` and 3/6 with `auto`; also once on nginx. **Fixed** (F1): `DashboardPage.goto` waits
+      for the page's own load when that navigation took over its own and goes to the dashboard
+      (Playwright says "interrupted by another navigation to …", or `net::ERR_ABORTED` before a
+      commit); anything else still throws.
+    - cli-logs "Showing a job's log…" failed in `site-775` (both) and nginx legacy: its Background's
+      2 runs land in one second, and `LogShow.php` keys logs by `filemtime` seconds, so "latest" is
+      arbitrary; 3/3 alone in `site`. **Fixed** (F2): the Background sets the oldest run's log a
+      minute back (`backdateFile`).
+    - Root, measured with root sudo logging: legacy ~680 commands per run (324 ownership
+      handovers), `site-775` 41 (`cliRestore`'s content copy + `sudo -n true`), `site` adds only the
+      web probe's write and `rm`; `wp` never root.
+    - Checklist: opt-back runs and passes in `site`/`site-775`; plugin-deletion passes, no user
+      meta left; `"wp-cli"` trigger passes; `isPristineActivation` only the known nginx cron race
+      (reinstalled); `kill` as www-data passes ("Aborting a running backup…"; `stopRunningWork`
+      never triggered); no step reads "Runs with user:"; KSES: admin has `unfiltered_html` and the
+      kses filter is off with `--user` as without. No leftovers, every docroot file www-data's.
+  - **Audit fixes 2026-11-12** (each verified first; twins, `E2E_RETRIES=0`): A1 log kept only in
+    `site` or once `normalized` (twin spec "legacy-777: with no handover…" fails with the old rule);
+    A2 `check.sh`'s web probe made by the docroot's owner (`dd conv=excl`, random name,
+    `--max-time`, removed on exit; shown failing with `FS_METHOD` deleted); A3 above; B4 above;
+    F1 onboarding pair 16/16 on apache `site` (failed 3/6 before), 2/2 on nginx `site`; F2
+    `cli-logs` 21/21 (×3) on nginx `site-775`; opt-back passes on nginx `site`; `restore` 5/5 on
+    nginx `legacy-777` `runAs: false` (log `sftp_twin:www-data 664`); `check.sh` green on all 7
+    variants of both stacks; housekeeping + staging twin specs 22/22.
+  - **Open from step 2** (not fixed; decide in 12.11 or later):
+    - In `site`, the opt-back scenario's WP-CLI runs as the SSH user, which cannot append to the
+      web server's `debug.log`: its PHP messages reach only the command's stderr, so the After scan
+      cannot see a fatal from that one command.
+    - `wp/log.ts`'s clear on a host without PHP's `posix` extension cannot tell an emptied log's
+      owner (`ours: null`), so a stale log the SSH user owns is left as is (no handover), and the
+      web server may still be unable to append to it.
 
 ### 12.11 — Docs, decision record, live verification, default `"auto"`
 

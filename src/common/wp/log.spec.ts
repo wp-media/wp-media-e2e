@@ -11,7 +11,15 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { clearDebugLog, readDebugLog, scanDebugLog } from "./log";
+import {
+  clearDebugLog,
+  keepLogWritable,
+  parseClearVerdict,
+  readDebugLog,
+  scanDebugLog,
+} from "./log";
+import type { ClearVerdict, KeepWritableOps } from "./log";
+import type { OwnershipOutcome } from "./ownership";
 import type { LocalTransport } from "../config/types";
 import { SKIP_SUDO_OPTIONS } from "../__fixtures__/fake-sudo";
 
@@ -43,6 +51,18 @@ if [ "$1" = "eval" ]; then
 fi
 exit 0
 `;
+
+/**
+ * What the clearing snippet prints as its last line, for the stub to answer with.
+ *
+ * @param state - what it did.
+ * @param ours - whether the identity owns the log left.
+ */
+const verdictLine = (
+  state: ClearVerdict["state"],
+  ours: boolean | null = false,
+): string =>
+  `e2e-debug-log-clear ${JSON.stringify({ state, ours, path: "wp-content/debug.log" })}`;
 
 let stubDir: string;
 let wpRoot: string;
@@ -212,7 +232,7 @@ test.describe("debug.log — direct-file fallback when `wp eval` fails", () => {
 test.describe("debug.log — `wp eval` exits 0 even when its PHP failed", () => {
   test("a snippet reporting success is believed, and nothing else runs", async () => {
     process.env.WP_STUB_EVAL = "ok";
-    process.env.WP_STUB_EVAL_OUT = "cleared";
+    process.env.WP_STUB_EVAL_OUT = `PHP Deprecated: noise\n${verdictLine("emptied")}`;
     writeFileSync(debugLogPath(), "left alone by the stub");
     await clearDebugLog(local);
     // The stub removes nothing, so the file surviving proves the fallback was skipped.
@@ -220,9 +240,24 @@ test.describe("debug.log — `wp eval` exits 0 even when its PHP failed", () => 
     rmSync(debugLogPath(), { force: true });
   });
 
+  // Only the snippet's own marked verdict counts: anything else at exit 0 is not believed.
+  test("a reply without the snippet's verdict falls back, despite the zero exit", async () => {
+    process.env.WP_STUB_EVAL = "ok";
+    process.env.WP_STUB_EVAL_OUT = "cleared";
+    writeFileSync(debugLogPath(), "stale contents");
+    const originalWarn = console.warn;
+    console.warn = (): void => undefined;
+    try {
+      await clearDebugLog(local);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(existsSync(debugLogPath())).toBe(false);
+  });
+
   test("a snippet reporting failure falls back, despite the zero exit", async () => {
     process.env.WP_STUB_EVAL = "ok";
-    process.env.WP_STUB_EVAL_OUT = "kept";
+    process.env.WP_STUB_EVAL_OUT = verdictLine("kept", null);
     writeFileSync(debugLogPath(), "stale contents");
     const warnings: string[] = [];
     const originalWarn = console.warn;
@@ -246,7 +281,7 @@ test.describe("debug.log — `wp eval` exits 0 even when its PHP failed", () => 
       "root ignores directory permissions, so the removal succeeds",
     );
     process.env.WP_STUB_EVAL = "ok";
-    process.env.WP_STUB_EVAL_OUT = "kept";
+    process.env.WP_STUB_EVAL_OUT = verdictLine("kept", null);
     const contentDir = join(wpRoot, "wp-content");
     writeFileSync(debugLogPath(), "stubborn");
     chmodSync(contentDir, 0o500);
@@ -301,7 +336,7 @@ test.describe("debug.log — escalating when the web-server user's permissions d
     process.env.FAKE_SUDO_LOG = join(sudoDir, "argv.log");
     // Force the direct-file fallback: `wp eval` reports it kept the log.
     process.env.WP_STUB_EVAL = "ok";
-    process.env.WP_STUB_EVAL_OUT = "kept";
+    process.env.WP_STUB_EVAL_OUT = verdictLine("kept", null);
   });
 
   test.afterEach(() => {
@@ -404,10 +439,166 @@ test.describe("debug.log — never through a WordPress that loads plugins or the
   });
 
   test("clearing it boots with plugins and themes skipped", async () => {
-    process.env.WP_STUB_EVAL_OUT = "cleared";
+    process.env.WP_STUB_EVAL_OUT = verdictLine("removed", null);
     await clearDebugLog(local);
 
     expect(evalCalls()).toHaveLength(1);
     expect(evalCalls()[0]).toMatch(/^--skip-plugins --skip-themes eval /);
+  });
+});
+
+test.describe("parseClearVerdict", () => {
+  test("reads the last marked line, whatever PHP printed before it", () => {
+    expect(
+      parseClearVerdict(
+        `${verdictLine("kept", null)}\nPHP Deprecated: x\n${verdictLine("created", true)}`,
+      ),
+    ).toEqual({ state: "created", ours: true, path: "wp-content/debug.log" });
+    expect(
+      parseClearVerdict(
+        'e2e-debug-log-clear {"state":"removed","ours":null,"path":null}',
+      ),
+    ).toEqual({ state: "removed", ours: null, path: null });
+  });
+
+  for (const [why, stdout] of [
+    ["no verdict", "cleared"],
+    ["not JSON", "e2e-debug-log-clear {"],
+    ["not an object", "e2e-debug-log-clear []"],
+    [
+      "an unknown state",
+      'e2e-debug-log-clear {"state":"gone","ours":null,"path":null}',
+    ],
+    [
+      "ours not a boolean",
+      'e2e-debug-log-clear {"state":"emptied","ours":1,"path":null}',
+    ],
+    [
+      "an empty path",
+      'e2e-debug-log-clear {"state":"emptied","ours":true,"path":""}',
+    ],
+    [
+      "a path not a string",
+      'e2e-debug-log-clear {"state":"emptied","ours":true,"path":7}',
+    ],
+    ["fields missing", 'e2e-debug-log-clear {"state":"emptied"}'],
+  ] as const) {
+    test(`is undefined for ${why}`, () => {
+      expect(parseClearVerdict(stdout)).toBeUndefined();
+    });
+  }
+});
+
+/**
+ * After a clear, the log WP-CLI's identity owns is handed to the site's ownership or removed; another
+ * user's is never touched.
+ */
+test.describe("keepLogWritable", () => {
+  /**
+   * Fake operations recording each call: `handOver` answers `outcome`, `remove` exits `removeExit`,
+   * `writesAsWebServer` answers `site` (whether commands run as the web server).
+   */
+  function fakeOps(
+    outcome: OwnershipOutcome,
+    removeExit = 0,
+    site = false,
+  ): KeepWritableOps & { calls: string[]; warnings: string[] } {
+    const calls: string[] = [];
+    const warnings: string[] = [];
+    return {
+      calls,
+      warnings,
+      writesAsWebServer: () => {
+        calls.push("writesAsWebServer");
+        return Promise.resolve(site);
+      },
+      handOver: (path) => {
+        calls.push(`handOver ${path}`);
+        return Promise.resolve(outcome);
+      },
+      remove: (path) => {
+        calls.push(`remove ${path}`);
+        return Promise.resolve({
+          exitCode: removeExit,
+          stdout: "",
+          stderr: "",
+        });
+      },
+      warn: (message) => warnings.push(message),
+    };
+  }
+  const verdict = (
+    ours: boolean | null,
+    path: string | null = "wp-content/debug.log",
+  ): ClearVerdict => ({ state: "emptied", ours, path });
+
+  test("another user's log, or one whose owner is unknown, is left untouched", async () => {
+    for (const ours of [false, null]) {
+      const ops = fakeOps("normalized");
+      await keepLogWritable(verdict(ours), ops);
+      expect(ops.calls).toEqual([]);
+    }
+  });
+
+  test("no log, nothing to do", async () => {
+    const ops = fakeOps("normalized");
+    await keepLogWritable({ state: "removed", ours: null, path: null }, ops);
+    expect(ops.calls).toEqual([]);
+  });
+
+  test("in the `site` state the identity's log is the web server's own: kept, nothing handed over", async () => {
+    for (const path of ["wp-content/debug.log", "/srv/logs/debug.log"]) {
+      const ops = fakeOps("failed", 0, true);
+      await keepLogWritable(verdict(true, path), ops);
+      expect(ops.calls).toEqual(["writesAsWebServer"]);
+    }
+  });
+
+  test("outside the `site` state the identity's log is kept once handed over", async () => {
+    const ops = fakeOps("normalized");
+    await keepLogWritable(verdict(true), ops);
+    expect(ops.calls).toEqual([
+      "writesAsWebServer",
+      "handOver wp-content/debug.log",
+    ]);
+  });
+
+  // Kept, it would be a log the web server cannot append to: removed, as before, is no worse.
+  // `unnecessary` outside `site` means WP-CLI's user owns the install, not that the web server is that
+  // user; `disabled` means nothing was handed over at all.
+  for (const outcome of [
+    "unnecessary",
+    "disabled",
+    "skipped",
+    "failed",
+  ] as const) {
+    test(`outside the \`site\` state the identity's log is removed when handing it over was ${outcome}`, async () => {
+      const ops = fakeOps(outcome);
+      await keepLogWritable(verdict(true), ops);
+      expect(ops.calls).toEqual([
+        "writesAsWebServer",
+        "handOver wp-content/debug.log",
+        "remove wp-content/debug.log",
+      ]);
+      expect(ops.warnings).toEqual([]);
+    });
+  }
+
+  test("outside the `site` state a log outside the WordPress root cannot be handed over: it is removed", async () => {
+    const ops = fakeOps("normalized");
+    await keepLogWritable(verdict(true, "/srv/logs/debug.log"), ops);
+    expect(ops.calls).toEqual([
+      "writesAsWebServer",
+      "remove /srv/logs/debug.log",
+    ]);
+  });
+
+  test("a removal that fails is warned about, never thrown", async () => {
+    const ops = fakeOps("skipped", 1);
+    await keepLogWritable(verdict(true), ops);
+    expect(ops.warnings).toEqual([
+      "[wp/log] debug.log could not be handed to the site's ownership, nor removed (exit 1); the " +
+        "web server may be unable to write it until the next clear.",
+    ]);
   });
 });

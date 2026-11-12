@@ -28,6 +28,43 @@ const SIDEBAR_OF: Readonly<
   Format: "format",
 };
 
+/** The dashboard's address, relative to the site. */
+const DASHBOARD_PATH = "/wp-admin/admin.php?page=backwpup";
+
+/** Any URL of the dashboard itself: `page=backwpup` exactly, never `page=backwpupfirstbackup`. */
+const DASHBOARD_URL = /[?&]page=backwpup(?:&|#|$)/;
+
+/** How long the page's own navigation to the dashboard may take to load once it took over ours. */
+const OWN_NAVIGATION_TIMEOUT_MS = 30_000;
+
+/**
+ * How a `page.goto` failed, read from Playwright's message: cut short by another navigation of the
+ * same page (`to` where, when Playwright saw it), or something else.
+ */
+export type GotoFailure =
+  /** Another navigation committed instead: "is interrupted by another navigation to …". */
+  | { readonly kind: "interrupted"; readonly to: string }
+  /** The browser cancelled it before anything committed (`net::ERR_ABORTED`); where to is unknown. */
+  | { readonly kind: "aborted" }
+  /** Anything else: the site, the network, a timeout. */
+  | { readonly kind: "other" };
+
+/**
+ * Classifies what `page.goto` threw.
+ *
+ * @param error - the thrown value.
+ */
+export function classifyGotoFailure(error: unknown): GotoFailure {
+  if (!(error instanceof Error)) return { kind: "other" };
+  const to = /is interrupted by another navigation to "([^"]*)"/.exec(
+    error.message,
+  )?.[1];
+  if (to !== undefined) return { kind: "interrupted", to };
+  return /\bnet::ERR_ABORTED\b/.test(error.message)
+    ? { kind: "aborted" }
+    : { kind: "other" };
+}
+
 /**
  * Page object for BackWPup's dashboard — `admin.php?page=backwpup` once onboarding is complete.
  *
@@ -42,11 +79,47 @@ const SIDEBAR_OF: Readonly<
  * message instead of silently driving onboarding.
  */
 export class DashboardPage {
-  constructor(private readonly page: Page) {}
+  /**
+   * @param page - the browser page.
+   * @param ownNavigationTimeoutMs - how long {@link goto} waits for a navigation that took over its
+   * own to land on the dashboard.
+   */
+  constructor(
+    private readonly page: Page,
+    private readonly ownNavigationTimeoutMs = OWN_NAVIGATION_TIMEOUT_MS,
+  ) {}
 
-  /** Navigate to the dashboard. */
+  /**
+   * Navigates to the dashboard.
+   *
+   * A screen may send itself there at the same moment — the first-backup screen does as its job ends
+   * (see `first-backup.page.ts`) — and Playwright then fails the `goto`: "interrupted by another
+   * navigation", or `net::ERR_ABORTED` when nothing had committed yet. When that other navigation
+   * goes to the dashboard, the page is going exactly where asked, so its load is awaited instead. A
+   * navigation elsewhere, a page that never reaches the dashboard, or any other failure throws what
+   * `goto` threw; what the page shows is still for {@link expectLoaded} and the steps after it.
+   *
+   * @throws Error from `goto`.
+   */
   async goto(): Promise<void> {
-    await this.page.goto("/wp-admin/admin.php?page=backwpup");
+    try {
+      await this.page.goto(DASHBOARD_PATH);
+    } catch (error) {
+      const failure = classifyGotoFailure(error);
+      if (
+        failure.kind === "other" ||
+        (failure.kind === "interrupted" && !DASHBOARD_URL.test(failure.to))
+      ) {
+        throw error;
+      }
+      try {
+        await this.page.waitForURL(DASHBOARD_URL, {
+          timeout: this.ownNavigationTimeoutMs,
+        });
+      } catch {
+        throw error;
+      }
+    }
   }
 
   /**

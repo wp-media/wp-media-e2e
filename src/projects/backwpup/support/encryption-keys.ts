@@ -14,7 +14,7 @@ import { promisify } from "node:util";
  *   bytes crashes `backup-encrypt`, a plugin bug no scenario steps on.
  * - **The RSA pair** is 2048-bit, its public half as SPKI PEM and its private half as PKCS#8 PEM — the
  *   forms measured to round-trip through both commands. Its files are placed in the scenario's
- *   private folder, which only the transport's user may enter, and go when it goes.
+ *   private folder, which only the identity site commands run as may enter, and go when it goes.
  *
  * Nothing is made until a placeholder asks, so a scenario naming none costs nothing.
  */

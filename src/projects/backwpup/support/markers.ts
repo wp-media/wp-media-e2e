@@ -73,8 +73,9 @@ export function newMarkerValue(): string {
  * WordPress root, so a relocated content directory fails here with an explanation instead of
  * silently producing a marker no backup would ever include.
  *
- * Ownership is handed back afterwards because the file was written as the transport's user and the
- * **web server** is what has to read it while the backup runs.
+ * Ownership is handed back afterwards because the file was written as the identity site commands run
+ * as — the transport's user outside the `site` state — and the **web server** is what has to read it
+ * while the backup runs (in `site` the handover is unnecessary).
  *
  * @param transport - the site to plant them in.
  * @returns the values planted, for the assertions to look for.

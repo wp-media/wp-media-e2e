@@ -5,6 +5,7 @@ import {
   ensureSiteStagingDir,
   inboxPath,
   stageThroughInbox,
+  staleDirSweepScript,
 } from "./site-staging";
 import type { ExecResult } from "./exec";
 import type { InboxStagingRequest, SiteStagingOps } from "./site-staging";
@@ -337,4 +338,22 @@ test.describe("ensureSiteStagingDir", () => {
     );
     expect(warnings).toEqual([]);
   });
+});
+
+test.describe("staleDirSweepScript", () => {
+  test("removes only the runner's own first-level directories of that prefix, past the age", () => {
+    expect(staleDirSweepScript("e2e-private-")).toBe(
+      `find -H "$1" -mindepth 1 -maxdepth 1 -type d -name 'e2e-private-*' ` +
+        `-user "$(id -u)" -mmin +"$2" -exec rm -rf -- {} +`,
+    );
+  });
+
+  // The prefix is embedded in the script: anything a shell or `find` would read is refused.
+  for (const prefix of ["", "e2e'*", "a b", "E2E-", "-name", "x/../"]) {
+    test(`refuses the prefix ${JSON.stringify(prefix)}`, () => {
+      expect(() => staleDirSweepScript(prefix)).toThrow(
+        /cannot prefix the directories a sweep removes/,
+      );
+    });
+  }
 });

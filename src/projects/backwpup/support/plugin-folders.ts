@@ -146,13 +146,14 @@ export async function readLogFolder(
 }
 
 /**
- * Takes the write permission away from one log, so the transport's user may no longer write it.
+ * Takes the write permission away from one log, so the identity site commands run as may no longer
+ * write it.
  *
  * The state a log is in on a host where the web server writes it under a stricter file mode than
  * this suite's cells use: BackWPup gives its logs WordPress's `FS_CHMOD_FILE`, which these cells
  * derive as `0777` from their docroot's `index.php`, so there no log is ever beyond WP-CLI's reach
  * on its own.
- * Arranged on a log the transport's user wrote, because only a file's owner may change its mode —
+ * Arranged on a log that identity wrote, because only a file's owner may change its mode —
  * and it is a scenario's own arrangement on a file its own run made, not ownership housekeeping:
  * nothing is handed to anyone, nothing runs elevated, and the plugin's data folders go with the rest
  * of its residue at the end of the scenario.
@@ -160,7 +161,7 @@ export async function readLogFolder(
  * @param transport - the site holding the log.
  * @param name - the log's filename.
  * @throws {@link Error} if there is no such log, if its mode could not be changed, or if the
- * transport's user may still write it afterwards — a user running with privileges that ignore file
+ * identity may still write it afterwards — a user running with privileges that ignore file
  * modes, for whom the premise cannot be arranged at all.
  */
 export async function makeLogReadOnly(
@@ -201,7 +202,7 @@ export async function makeLogReadOnly(
  *
  * It climbs to the filesystem root and back down, so it reaches the file wherever the two folders
  * sit relative to each other, and it is **proved on the site before it is used**: it must resolve to
- * the marker, the marker must be writable by the transport's user, and the log folder must not hold
+ * the marker, the marker must be writable by the identity site commands run as, and the log folder must not hold
  * a file of the marker's own name. Without those, a command refusing it would prove nothing — it
  * might have been handed a path to nowhere, a delete that got through could have been stopped by
  * permissions instead, and a command that kept only the last part of the path would have found a

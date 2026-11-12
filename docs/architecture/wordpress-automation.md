@@ -278,7 +278,10 @@ const zip = await stageAndInstallPlugin(site.transport, artifact.zipPath, {
 - **Exposure**: on our cells the WP root is the docroot, so `.e2e_temp/…` is served — measured on both
   nginx cells: a file there gets 200, one inside a folder only the transport's user may enter 404,
   directories 403 (not listed). For anything sensitive use such a folder (as BackWPup's private folder
-  does) or stage outside the docroot (the Location override). Wiped in teardown.
+  does outside the `site` state; in `site` the web server is that user, so it lives in `/tmp`) or stage
+  outside the docroot (the Location override). Wiped in teardown. `staleDirSweepScript(prefix)`
+  (`wp/site-staging.ts`) removes, as whoever runs it, its own first-level `<prefix>*` directories past
+  an age: the inbox sweep and the private folder's.
 
 ### Staging in the `site` state ([`wp/site-staging.ts`](../../src/common/wp/site-staging.ts))
 
@@ -424,12 +427,23 @@ Reads and categorises `wp-content/debug.log` to catch PHP errors a UI assertion 
   (`CommandKilledError`: a segfault, the OOM kill) — logs and **falls back** to a direct file
   read/removal; any other throw (the transport failed) propagates.
 - **`wp eval` exits 0 even when its PHP failed** (a denied write to the web server's `debug.log` is
-  only a warning), so each snippet reports its own outcome: the clear prints `cleared`/`kept`, and a
-  read that cannot open an existing log exits non-zero instead of returning `""`. A log that never
+  only a warning), so each snippet reports its own outcome: the clear prints a marked JSON verdict
+  (`parseClearVerdict`: `emptied`/`created`/`removed`/`kept`, whether the identity owns what is left,
+  its path), and a read that cannot open an existing log exits non-zero instead of returning `""`. A log that never
   clears would make one scenario's fatal fail every later one; a read quietly returning `""` would disable the fatal gate.
-- Clearing **removes** the file (needs write on the directory, usually the transport user's) rather
-  than truncating it (needs write on the file, the web server's); WordPress recreates it. If it
-  survives both routes, `clearDebugLog` throws.
+- **Clearing leaves a log the web server can append to.** Removing it is not enough: the next PHP
+  process to write makes it again under its own owner and umask, and WP-CLI's PHP 8.5 logs
+  deprecations on every call, so a fallback state got `ubuntu:ubuntu 644` and PHP-FPM's fatals were
+  lost (measured on the nginx twin, `legacy-777`: BackWPup's `restore_dir` stream hung, three restore
+  scenarios failed). So `CLEAR_DEBUG_LOG` empties a regular file the identity may write **in place**
+  (owner and mode kept), else unlinks it (write on the directory only) and makes an empty one with
+  `O_EXCL`; a link is replaced, never written through. `keepLogWritable` then keeps a log the identity
+  owns in `site` (it is the web server's), and elsewhere only once `normalizeOwnership` answers
+  `normalized` (a root grant + `chown`); any other outcome removes it, as before — `unnecessary`
+  outside `site` (WP-CLI's user owns the install, the web server may be another user), `disabled`,
+  no elevation, a failure, a log outside the root.
+  Another user's log is never handed over. The direct fallback (no WordPress) only removes, escalating
+  when the directory refuses; if the log survives both routes, `clearDebugLog` throws.
 - The direct read and removal try as the site's commands first and escalate to
   [root](#elevated-housekeeping) only when refused. In the `site` identity state the web server owns
   the log and its directory, so the root fallbacks are kept but not needed unless the identity is refused.
@@ -512,7 +526,8 @@ directories** on the QA cell before this existed.
   does not stop the other paths; it fails the teardown afterwards. `resolveSiteResidue` answers what
   the declarations name now. A family names nothing to create, so preparation skips it.
 - `prepareSiteDataDirs(transport, paths)` is the other half, run by the **Before** hook on the same
-  list: per path it creates the directory, opens it `0777` to every user sharing the docroot, then
+  list: per path it creates the directory, opens it `0777` to every user sharing the docroot (in
+  `site` too: a scenario opting back to the SSH user writes there as well), then
   hands it to the site's ownership with `normalizeOwnership` (this too writes as the transport's
   user). The mode is a floor that holds where ownership cannot be fixed; the correction adds the owner
   and, where it has anything to do, is **recursive**, reaching a subtree the mode cannot (one an earlier scenario wrote as the web

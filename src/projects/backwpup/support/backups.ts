@@ -457,8 +457,8 @@ export async function startJobInBackground(
  * Runs a configured job **inside WP-CLI**, and checks the plugin recorded the run as a clean one.
  *
  * The counterpart of {@link startJobInBackground}. Here the backup is made by the WP-CLI process, as
- * the transport's user, so the archive and the log it writes belong to that user — which is what a
- * scenario needs when the question is what WP-CLI may do to those files. The small database jobs
+ * the identity site commands run as, so the archive and the log it writes belong to that user — which
+ * is what a scenario needs when the question is what WP-CLI may do to those files. The small database jobs
  * the scenarios configure finish there in a couple of seconds on every cell measured.
  *
  * The command never reports how the run went: the job ends the WP-CLI process itself, at exit 0,

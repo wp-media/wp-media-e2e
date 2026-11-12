@@ -1,4 +1,7 @@
 import { backwpupArgv, backwpupCli, commandLine } from "./cli";
+import { asTransportUser } from "../../../common/wp/site-identity";
+import { printableLine } from "../../../common/text";
+import type { ExecResult } from "../../../common/wp/exec";
 import type { CliResult } from "./cli";
 import type { Transport } from "../../../common/config/types";
 
@@ -242,6 +245,63 @@ async function withinBudget<T>(
 }
 
 /**
+ * What `wp core is-installed`, run as the SSH user, says about running a scenario's commands as it.
+ */
+export type SshUserBoot =
+  /** WordPress booted and is installed: the SSH user can run them. */
+  | { readonly kind: "boots" }
+  /** The SSH user may not read the site's files: a skip, with `reason`. */
+  | { readonly kind: "refused"; readonly reason: string }
+  /** Anything else (a database down, a fatal, a site not installed): a failure, with `message`. */
+  | { readonly kind: "failed"; readonly message: string };
+
+/**
+ * How WP-CLI says the SSH user may not read the site (measured on a twin whose files only the web
+ * server may read): a PHP or shell "Permission denied" (an unreadable `wp-config.php`, a root it
+ * cannot enter), or WP-CLI not recognising a root whose core files it cannot read. The site commands
+ * already ran there as the site's identity, so the root itself is right.
+ */
+const READ_REFUSED =
+  /Permission denied|This does not seem to be a WordPress installation/;
+
+/**
+ * Classifies `wp core is-installed` run as the SSH user: only a refusal to read the site is a reason
+ * to skip; any other non-zero exit is a failure, never hidden as a skip.
+ *
+ * @param result - the run.
+ * @returns the verdict; a reason or message is one printable line (a credential masked) naming the
+ * exit and the line that explains it.
+ */
+export function sshUserBoot(result: ExecResult): SshUserBoot {
+  if (result.exitCode === 0) return { kind: "boots" };
+  const lines = `${result.stderr}\n${result.stdout}`
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  const refusal = lines.find((line) => READ_REFUSED.test(line));
+  const said = printableLine(
+    refusal ??
+      lines.find((line) => line.startsWith("Error:")) ??
+      lines[0] ??
+      "",
+  ).slice(0, 300);
+  const exit = `exit ${String(result.exitCode)}${said === "" ? "" : `: ${said}`}`;
+  return refusal === undefined
+    ? {
+        kind: "failed",
+        message:
+          `[backwpup/cli] \`wp core is-installed\` failed as the SSH user (${exit}), and not for ` +
+          "lack of read access, so the scenario cannot tell whether its premise holds.",
+      }
+    : {
+        kind: "refused",
+        reason:
+          `The SSH user may not read this site (\`wp core is-installed\`: ${exit}), so this ` +
+          "scenario's two-user premise cannot be set up on it.",
+      };
+}
+
+/**
  * The commands one scenario has run against its site, remembering the last of them.
  *
  * Deliberately keeps only the latest result: every assertion in this surface is about the command
@@ -249,14 +309,47 @@ async function withinBudget<T>(
  * are part of.
  */
 export class CliSession {
-  /** The site every command runs against — the scenario's own bound site. */
-  private readonly transport: Transport;
+  /** The site every command runs against: the scenario's bound site, or its as-the-SSH-user copy. */
+  private site: Transport;
 
   /** The most recent result, or `undefined` until the scenario has run something. */
   private result: CliResult | undefined;
 
+  /** Whether a command was started, after which who runs them may no longer change. */
+  private started = false;
+
+  /**
+   * @param transport - the scenario's bound site; commands run as its identity state decides.
+   */
   constructor(transport: Transport) {
-    this.transport = transport;
+    this.site = transport;
+  }
+
+  /**
+   * The transport commands run through — what a step asks to judge the site as the command under
+   * test sees it (e.g. whether WP-CLI's user may write a file).
+   */
+  get transport(): Transport {
+    return this.site;
+  }
+
+  /**
+   * Runs every command of this session as the SSH user, with no `--user`
+   * ({@link asTransportUser}): for a scenario whose premise is that WP-CLI and the web server are two
+   * users, which running as the site's identity (the web server's) would erase. Idempotent before the
+   * first command.
+   *
+   * @throws {@link Error} once a command has been started: a session must not change identity
+   * half-way, or two of its commands would act as different users.
+   */
+  runAsSshUser(): void {
+    if (this.started) {
+      throw new Error(
+        "[backwpup/cli] WP-CLI can only be switched to the SSH user before the scenario's first " +
+          "BackWPup command; move that step above it.",
+      );
+    }
+    this.site = asTransportUser(this.site);
   }
 
   /**
@@ -272,7 +365,8 @@ export class CliSession {
    */
   async run(args: readonly string[], budgetMs?: number): Promise<CliResult> {
     this.result = undefined;
-    const pending = backwpupCli(this.transport, args);
+    this.started = true;
+    const pending = backwpupCli(this.site, args);
     const result =
       budgetMs === undefined
         ? await pending

@@ -55,6 +55,8 @@ wp_root config set WP_DEBUG_LOG true --raw --quiet
 wp_root config set WP_DEBUG_DISPLAY false --raw --quiet
 # Without a finite limit every foreground `wp backwpup run` dies of the one it sets itself.
 wp_root config set WP_MAX_MEMORY_LIMIT 512M --quiet
+# A docroot another account owns: without it WordPress picks FTP for every web-side write.
+if ((V_FS_DIRECT)); then wp_root config set FS_METHOD direct --quiet; fi
 wp_root core install --url="$TWIN_SITE_URL" --title=twin --admin_user="$TWIN_ADMIN_USER" \
   --admin_password="$TWIN_ADMIN_PASSWORD" --admin_email=qa@example.test --skip-email --quiet
 

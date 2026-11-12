@@ -408,7 +408,11 @@ export async function resolveSiteResidue(
 type Runner = (file: string, args: string[]) => Promise<ExecResult>;
 
 /**
- * Mode the data directories are opened to. World-writable, and deliberately so.
+ * Mode the data directories are opened to. World-writable, and deliberately so — in every identity
+ * state, `site` included: a scenario whose premise is two users runs its BackWPup commands as the SSH
+ * user there (`asTransportUser`), into directories the web server's identity made. Measured on a twin
+ * in `site-775` with the umask's `0755`: that scenario's `backup-delete` died on "Restore working
+ * directory … is not writable".
  *
  * On a real cell **WP-CLI and the web server run as different users** — `ubuntu` over SSH, `www-data`
  * under PHP-FPM — sharing one docroot. Whichever of them creates one of these directories first does

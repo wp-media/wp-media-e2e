@@ -139,8 +139,8 @@ export async function snapshotHolds(
 }
 
 /**
- * Removes one snapshot the scenario's command made, and confirms it is gone. As the transport's user:
- * the command wrote it as that user, so nothing else can be reached this way. Teardown, so it never
+ * Removes one snapshot the scenario's command made, and confirms it is gone. As the identity site
+ * commands run as: the command wrote it as that identity, so nothing else can be reached this way. Teardown, so it never
  * throws; a snapshot left behind is reported with its path.
  *
  * @param transport - the scenario's site.

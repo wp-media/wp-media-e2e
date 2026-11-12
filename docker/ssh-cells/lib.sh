@@ -86,6 +86,11 @@ wp_web() {
 #                    owner-mismatch: every other variant isolates one condition.
 #   V_WP_HOME        1 when `wp` is only in ~ubuntu/bin (off sudo's secure_path)
 #   V_WPCONFIG_ROOT  1 when wp-config.php is root:www-data 644
+#   V_FS_DIRECT      1 when wp-config.php defines FS_METHOD 'direct': derived, set whenever the
+#                    docroot is not the web server's. WordPress's own check then answers `ftpext`
+#                    (the ftp extension is loaded), and every web-side write through WP_Filesystem
+#                    dies on an unconnected FTP handle (BackWPup's background start among them). A
+#                    real site deployed by another account needs it too (a QA site defines it).
 # Usage: variant_spec <name>
 variant_spec() {
   V_OWNER=www-data:www-data V_DIR_MODE=755 V_FILE_MODE=644 V_IN_GROUP=0 V_SUDO=1 V_LOG_ALLOWED=0
@@ -100,6 +105,8 @@ variant_spec() {
     wpconfig-root) V_WPCONFIG_ROOT=1 ;;
     *) die "Unknown variant '${1:-}'. One of: ${TWIN_VARIANTS}" ;;
   esac
+  V_FS_DIRECT=0
+  [[ "${V_OWNER%%:*}" == www-data ]] || V_FS_DIRECT=1
 }
 
 # Polls a command until it succeeds, or dies after <secs>. Usage: wait_for <what> <secs> <cmd…>
