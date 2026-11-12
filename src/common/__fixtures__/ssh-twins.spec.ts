@@ -25,6 +25,7 @@ import {
   TWIN_LOCK_DIR,
   TWIN_VARIANTS,
   ensureLockBase,
+  extendRunningTest,
   removeIfStale,
   sshTwinsEnabled,
   tryLock,
@@ -141,6 +142,49 @@ test.describe("withTwin", () => {
 
     expect(events).toEqual(["a in", "a out", "b in", "b out"]);
     expect(existsSync(lock())).toBe(false);
+  });
+
+  test("a free lock leaves the running test's timeout as it was", async () => {
+    const before = test.info().timeout;
+    const waits: number[] = [];
+    await withTwin("nginx", () => Promise.resolve(), {
+      lockDir,
+      onWaited: (ms) => waits.push(ms),
+    });
+    await withTwin("nginx", () => Promise.resolve(), { lockDir });
+
+    expect(waits).toEqual([]);
+    expect(test.info().timeout).toBe(before);
+  });
+
+  test("the wait for a held lock is added to the running test's timeout, as it passes", async () => {
+    // A live holder (the runner), let go of after a while.
+    mkdirSync(lock());
+    writeFileSync(join(lock(), "pid"), String(process.ppid));
+    const HELD_MS = 400;
+    const release = sleep(HELD_MS).then(() => {
+      rmSync(lock(), { recursive: true });
+    });
+    const before = test.info().timeout;
+    const started = Date.now();
+    const timeouts: number[] = [];
+
+    await withTwin(
+      "nginx",
+      () => {
+        timeouts.push(test.info().timeout);
+        return Promise.resolve();
+      },
+      { lockDir, pollMs: 20 },
+    );
+    const elapsed = Date.now() - started;
+    await release;
+
+    // Raised before the work runs, by about the wait: never less than most of it, never more.
+    const added = test.info().timeout - before;
+    expect(timeouts).toEqual([test.info().timeout]);
+    expect(added).toBeGreaterThanOrEqual(HELD_MS - 100);
+    expect(added).toBeLessThanOrEqual(elapsed);
   });
 
   test("a failing holder releases the lock and passes its error on", async () => {
@@ -435,5 +479,53 @@ test.describe("withTwin", () => {
     expect(
       readdirSync(lockDir).filter((name) => name.includes(".lock")),
     ).toEqual([]);
+  });
+});
+
+test.describe("extendRunningTest", () => {
+  /**
+   * A running test's timeout, as `test.info()` exposes it.
+   *
+   * @param timeout - its timeout in ms (`0`: none).
+   * @returns the fake, and the timeouts set on it.
+   */
+  function fakeTest(timeout: number): {
+    readonly info: () => { timeout: number; setTimeout: (ms: number) => void };
+    readonly set: number[];
+  } {
+    const set: number[] = [];
+    const current = {
+      timeout,
+      setTimeout: (ms: number): void => {
+        set.push(ms);
+        current.timeout = ms;
+      },
+    };
+    return { info: () => current, set };
+  }
+
+  test("adds the time to the running test's timeout", () => {
+    const fake = fakeTest(120_000);
+    extendRunningTest(1_500, fake.info);
+    extendRunningTest(500, fake.info);
+    expect(fake.set).toEqual([121_500, 122_000]);
+  });
+
+  test("no time, or a test without a timeout, changes nothing", () => {
+    const timed = fakeTest(120_000);
+    extendRunningTest(0, timed.info);
+    expect(timed.set).toEqual([]);
+
+    const untimed = fakeTest(0);
+    extendRunningTest(1_500, untimed.info);
+    expect(untimed.set).toEqual([]);
+  });
+
+  test("outside a running test it does nothing and never throws", () => {
+    expect(() => {
+      extendRunningTest(1_500, () => {
+        throw new Error("test.info() can only be called while test is running");
+      });
+    }).not.toThrow();
   });
 });

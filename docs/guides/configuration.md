@@ -83,7 +83,8 @@ The loader adds `wpUser` to every transport, copied from the site's `username` (
 a sites file that sets it is refused.
 
 `ssh` needs, on the site: a **POSIX login shell** for `username` (sh/dash/bash/zsh — never csh/tcsh,
-which read `!` inside quotes), and `wp` as an **executable on that login's `PATH`** (a shell function or
+which read `!` inside quotes, or fish, which reads `\\` inside them; the pre-flight fails a site whose
+shell changes a quoted string, or whose startup files print text around a command's output), and `wp` as an **executable on that login's `PATH`** (a shell function or
 alias is never run) ([the ssh command line](../architecture/wordpress-automation.md#transport--exec-wpexects)).
 
 - **`port`** (`ssh` only, refused elsewhere; default `22`, and a declared `22` is dropped) — the SSH
@@ -131,10 +132,12 @@ alias is never run) ([the ssh command line](../architecture/wordpress-automation
   (`exec`/`wpCli`) run as: `"auto"` (the docroot's owner, once verified to be the web server's
   identity), `"user:group"` (the `fileOwner` rule, trimmed; root by name or id `0`, or an id above
   4294967294, refused as user **and** group: the web server never runs with group 0) or `false` (the
-  transport's user, as today). **Phase 12 in progress — keep real sites at `false`:** `"auto"` stays
-  `unverified` (the transport's user) until the pre-flight writes its verdict, and a declared
-  `"user:group"` already runs commands as the identity while staging, `--user` and ownership do not
-  follow yet (a plugin upload then fails, measured on the twins).
+  transport's user, as today). The pre-flight verifies it (the web probe: a short-lived
+  `<root>/e2e-identity-<32 hex>.php`, only for `"auto"`/`"user:group"`) and reports the state in its
+  "Site identity" check; `"auto"` without this run's verdict (`--no-deps`) runs as the transport's user.
+  **Keep real sites at `false` until Phase 12's rollout** (12.11); the host then needs passwordless
+  sudo and `Defaults:<ssh user> !log_allowed` (sudo otherwise logs `--key=` values), which the
+  pre-flight checks.
 - **`umask`** (`ssh` only; default `0022`) — the umask of commands run as the site's identity (the
   `site` state only): a text of 3–4 octal digits (`"022"`, `"0022"`), stored as four. Its owner digit
   must be `0` (`"0177"` would make new directories `0600`, unusable by their owner); a JSON number is
@@ -365,8 +368,8 @@ never removes a twin, and no port is shared.
 - **Overlays** (git-ignored, 0600), one per product: BackWPup `sites.twins.json` → `pro@twin-apache`,
   `pro@twin-nginx` (`edition: "pro"`); WP Rocket → `twin-apache`, `twin-nginx`. Each: `ssh` to
   `127.0.0.1:<ssh port>` as `ubuntu` with the twins' key, `rootDir` `/var/www/site/public`,
-  `runAs: "auto"` (the transport's user until the pre-flight writes its verdict; twin specs register
-  their own, asked of the twin's web server).
+  `runAs: "auto"` (verified by each run's pre-flight; twin specs register their own, asked of the
+  twin's web server).
   They merge with a `sites.json` (disjoint cells; BackWPup's editions all-or-none hold, since every
   real cell declares one). **Without a `sites.json` the overlays are all that loads, never the
   example**: every run, `@noauth` included, and the healthcheck see only the twins' cells, and their

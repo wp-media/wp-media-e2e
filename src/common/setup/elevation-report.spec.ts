@@ -2,9 +2,10 @@ import { test, expect } from "@playwright/test";
 
 import {
   renderElevationWarning,
+  renderIdentityWarning,
   renderPluginDirWarning,
 } from "./elevation-report";
-import type { SiteElevation } from "./elevation-report";
+import type { SiteElevation, SiteIdentityIssues } from "./elevation-report";
 import { createPalette } from "../terminal/palette";
 
 /**
@@ -318,5 +319,99 @@ test.describe("site values are printed safe", () => {
       "       • /p/x: ***",
       "           owned by root",
     ]);
+  });
+});
+
+/**
+ * The site identity banner: silent without an issue, each affected site once (one install checked by
+ * two products' cells), each issue with its fix, site values made safe to print.
+ */
+test.describe("renderIdentityWarning", () => {
+  /** A site with `issues`. */
+  const identitySite = (
+    host: string,
+    issues: SiteIdentityIssues["issues"],
+  ): SiteIdentityIssues => ({
+    baseURL: `https://${host}`,
+    transport: `ssh: ubuntu@${host}`,
+    issues,
+  });
+  const ISSUE = {
+    what: "sudo refused to run as the site's identity (x)",
+    fix: "add the rule",
+  };
+
+  test("silent when no site has an issue, or there are no sites", () => {
+    expect(renderIdentityWarning([])).toBeUndefined();
+    expect(
+      renderIdentityWarning([
+        identitySite("a.test", []),
+        identitySite("b.test", []),
+      ]),
+    ).toBeUndefined();
+  });
+
+  test("names each affected site once, each issue and its fix, padded with blank lines", () => {
+    const banner = renderIdentityWarning([
+      identitySite("a.test", [ISSUE]),
+      identitySite("a.test", [ISSUE]),
+      identitySite("b.test", []),
+      identitySite("c.test", [ISSUE, { what: "two\nlines", fix: "f" }]),
+    ]);
+    expect(banner?.split("\n")).toEqual([
+      "",
+      "  ⚠  SITE IDENTITY — 2 site(s) need attention",
+      "",
+      "     https://a.test  [ssh: ubuntu@a.test]",
+      "       • sudo refused to run as the site's identity (x)",
+      "         → add the rule",
+      "     https://c.test  [ssh: ubuntu@c.test]",
+      "       • sudo refused to run as the site's identity (x)",
+      "         → add the rule",
+      "       • two",
+      "         lines",
+      "         → f",
+      "",
+      "     None of these fails a site — a fallback runs as the transport's user, handing files",
+      '     over as before; the rest run as their "Site identity" check says, which says more.',
+      "",
+    ]);
+  });
+
+  test("one address over two transports is two installs, each listed", () => {
+    const banner = renderIdentityWarning([
+      identitySite("a.test", [ISSUE]),
+      { ...identitySite("a.test", [ISSUE]), transport: "ssh: deploy@a.test" },
+    ]);
+    expect(banner).toContain("SITE IDENTITY — 2 site(s) need attention");
+    expect(banner).toContain("https://a.test  [ssh: ubuntu@a.test]");
+    expect(banner).toContain("https://a.test  [ssh: deploy@a.test]");
+  });
+
+  test("masks the address, strips escapes from what a host said, and spells ASCII when asked", () => {
+    const ascii = createPalette({ tty: false, color: false, unicode: false });
+    const banner =
+      renderIdentityWarning(
+        [
+          {
+            baseURL: "https://user:pass@d.test/",
+            transport: "ssh: ubuntu@d.test",
+            issues: [{ what: `PHP runs as evil\u001b[31m`, fix: "fix" }],
+          },
+        ],
+        ascii,
+      ) ?? "";
+    expect(banner).not.toContain("pass@");
+    expect(banner).not.toContain("\u001b");
+    expect(banner).toContain("  !  SITE IDENTITY - 1 site(s) need attention");
+    expect(banner).toContain("         -> fix");
+  });
+
+  test("a colour palette styles the headline and arrows only", () => {
+    const colour = createPalette({ tty: true, color: true, unicode: true });
+    const banner =
+      renderIdentityWarning([identitySite("a.test", [ISSUE])], colour) ?? "";
+    expect(banner).toContain("\u001b[");
+    expect(banner).toContain("https://a.test  [ssh: ubuntu@a.test]");
   });
 });

@@ -1,6 +1,6 @@
 import "./src/common/config/load-env";
 
-import { chromium } from "@playwright/test";
+import { chromium, request } from "@playwright/test";
 import type { Browser } from "@playwright/test";
 
 import { loginViaUi } from "./src/common/auth/login";
@@ -12,6 +12,7 @@ import type { ProductConfig, SiteInput } from "./src/common/config/types";
 import {
   verifySite,
   warnAboutElevation,
+  warnAboutIdentity,
   warnAboutPluginDirs,
 } from "./src/common/setup/preflight";
 import {
@@ -34,7 +35,8 @@ import { PRODUCTS } from "./src/projects/products";
 /**
  * Fleet-wide health check: for every product × cell × site, verifies the transport
  * (SSH/Docker/local reachable, WP-CLI works, WordPress is installed — see
- * `src/common/setup/preflight.ts`) and then exercises a real login through the
+ * `src/common/setup/preflight.ts`), reports who its commands run as (a site asking for an identity
+ * has its web server probed; the verdict stays in memory), and then exercises a real login through the
  * WordPress UI (`src/common/auth/login.ts`). No `storageState` is ever written —
  * this never touches `.auth/`, it only reports whether each site is reachable and
  * usable.
@@ -184,7 +186,16 @@ async function checkSite(
   task: SiteTask,
 ): Promise<SiteResult> {
   const start = Date.now();
-  const preflight = await verifySite(task.site, task.index, task.slugs);
+  // The web probe's verdict stays in this process: the healthcheck writes no file.
+  const preflight = await verifySite(
+    task.site,
+    task.index,
+    task.slugs,
+    undefined,
+    {
+      request,
+    },
+  );
   const checks: CheckResult[] = [...preflight.checks];
 
   if (checks.every((c) => c.ok)) {
@@ -214,6 +225,9 @@ async function checkSite(
       : {}),
     ...(preflight.leftoverPluginDirs !== undefined
       ? { leftoverPluginDirs: preflight.leftoverPluginDirs }
+      : {}),
+    ...(preflight.identityIssues !== undefined
+      ? { identityIssues: preflight.identityIssues }
       : {}),
   };
 }
@@ -339,6 +353,7 @@ async function main(): Promise<void> {
     // program's entire output is the report, and `healthcheck > fleet.log` must not drop it.
     warnAboutElevation(allResults, OUT.print, OUT.palette);
     warnAboutPluginDirs(allResults, OUT.print, OUT.palette);
+    warnAboutIdentity(allResults, OUT.print, OUT.palette);
   } finally {
     if (browser !== null) await browser.close();
     disposeConnections();

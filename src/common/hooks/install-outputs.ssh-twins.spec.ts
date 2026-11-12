@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { replacePluginUnderTest } from "./plugin-lifecycle";
@@ -29,6 +30,7 @@ import {
   type TwinStack,
   type TwinVariant,
 } from "../__fixtures__/ssh-twins";
+import { removeTempDir } from "../__fixtures__/temp-dir";
 import type { ResolvedArtifact } from "../artifacts/types";
 import type { FallbackReason, IdentityState } from "../wp/site-identity";
 import type { Transport } from "../config/types";
@@ -56,8 +58,10 @@ const PAGES = `${SHARED}/e2e-io-pages`;
 const CELLS = TWIN_CELLS.filter((cell) => cell.product === "backwpup");
 
 /**
- * The fake plugin's zip, built in this test's output folder (emptied by the next run should the
- * runner die first).
+ * The fake plugin's zip, built in a temporary folder of its own and removed after the test. Never in
+ * the test's output folder: every Playwright run of this config empties that whole folder as it
+ * starts, so a second run in the checkout (another spec, a gate) would delete the zip while this test
+ * waits for its twin. A runner killed first leaves the folder to the system's temporary-file cleanup.
  *
  * @returns the artifact, and its removal.
  */
@@ -65,8 +69,8 @@ function buildProbe(): {
   readonly artifact: ResolvedArtifact;
   readonly remove: () => void;
 } {
-  const dir = test.info().outputPath("probe-zip");
-  mkdirSync(join(dir, SLUG), { recursive: true });
+  const dir = mkdtempSync(join(tmpdir(), "e2e-install-outputs-zip-"));
+  mkdirSync(join(dir, SLUG));
   writeFileSync(
     join(dir, SLUG, `${SLUG}.php`),
     `<?php
@@ -93,7 +97,7 @@ register_activation_hook(__FILE__, function () {
       resolvedAt: "2026-11-12T00:00:00.000Z",
     },
     remove: () => {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempDir(dir);
     },
   };
 }

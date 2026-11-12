@@ -1,10 +1,18 @@
+import { resolve } from "node:path";
+
 import { test as setup } from "@playwright/test";
 
 import { resolveIdentity } from "../artifacts/manifest";
 import { getManifest } from "../artifacts/registry";
 import { getPool, getSettleLeftovers, readRouting } from "../config/metadata";
+import { REPO_ROOT, RUN_ID, dirs } from "../config/run-context";
 import { isPlaceholderSite } from "../config/sites";
-import { SETTLE_LEFTOVERS_ALLOWANCE_MS, verifyPool } from "../setup/preflight";
+import {
+  SETTLE_LEFTOVERS_ALLOWANCE_MS,
+  SITE_IDENTITY_ALLOWANCE_PER_SITE_MS,
+  verifyPool,
+} from "../setup/preflight";
+import { asksForIdentity } from "../setup/site-identity-report";
 import { ensurePluginAbsent } from "../wp/plugin";
 import {
   BEST_EFFORT_ALLOWANCE_PER_SITE_MS,
@@ -20,7 +28,9 @@ import {
  *      gates: it can stop WordPress booting), then verifies the site's transport (SSH/Docker/local)
  *      is reachable and functional — removing a broken copy of the cell's own plugin when WordPress
  *      boots only without it (see setup/cell-plugin.ts), which would otherwise fail every login
- *      before a scenario could heal it.
+ *      before a scenario could heal it. A site asking to run as an identity (`transport.runAs`) has
+ *      its web server asked who PHP runs as; the verdicts go to `site-identity.json` in the cell's auth
+ *      folder, which workers read before their first site command.
  *   2. Ends the WordPress session the cell's previous run saved, so a cookie in an older report's
  *      trace is dead (see session.ts).
  *   3. Logs in once through the WordPress UI and saves the session to that site's
@@ -44,7 +54,7 @@ keepSecretsOutOfFailureSnapshots(setup);
 // A setup that fails — a timeout included — ends the sessions it saved: its trace holds their cookies.
 const saved = endSessionsWhenSetupFails(setup);
 
-setup("authenticate site pool", async ({ browser }, testInfo) => {
+setup("authenticate site pool", async ({ browser, playwright }, testInfo) => {
   const { product, cell, edition } = readRouting(testInfo.project.metadata);
   const pool = getPool(product, cell);
   const real = pool.filter((site) => !isPlaceholderSite(site));
@@ -61,9 +71,11 @@ setup("authenticate site pool", async ({ browser }, testInfo) => {
   // plus what the best-effort steps around each login may spend, so that none of them
   // can run the setup out of time.
   const settle = getSettleLeftovers(product);
+  const probed = real.filter((site) => asksForIdentity(site.transport)).length;
   setup.setTimeout(
     60_000 +
       real.length * (60_000 + BEST_EFFORT_ALLOWANCE_PER_SITE_MS) +
+      probed * SITE_IDENTITY_ALLOWANCE_PER_SITE_MS +
       (settle === undefined ? 0 : SETTLE_LEFTOVERS_ALLOWANCE_MS),
   );
 
@@ -73,7 +85,11 @@ setup("authenticate site pool", async ({ browser }, testInfo) => {
   // The folder checked is the one this cell installs, which its @plugin scenarios clear — and the one
   // plugin this setup may remove, the same cleanup they run.
   const { slug } = resolveIdentity(getManifest(product), edition);
-  await verifyPool(pool, product, cell, [slug], ensurePluginAbsent, settle);
+  await verifyPool(pool, product, cell, [slug], ensurePluginAbsent, settle, {
+    request: playwright.request,
+    dir: resolve(REPO_ROOT, dirs(product, cell).auth),
+    runId: RUN_ID,
+  });
 
   await authenticatePool(browser, real, testInfo, undefined, saved);
 });

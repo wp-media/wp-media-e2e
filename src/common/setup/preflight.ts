@@ -1,5 +1,6 @@
 import { existsSync, statSync } from "node:fs";
 
+import type { APIRequest } from "@playwright/test";
 import { execa } from "execa";
 
 import { CommandKilledError } from "../wp/errors";
@@ -8,6 +9,7 @@ import {
   elevationSupport,
   exec,
   execAsTransport,
+  installKey,
 } from "../wp/exec";
 import type { ElevationSupport, ExecResult } from "../wp/exec";
 import { planOwnership } from "../wp/ownership";
@@ -17,6 +19,32 @@ import type {
   SiteStateOwnership,
 } from "../wp/ownership";
 import { firstError } from "../wp/plugin";
+import {
+  registerSiteIdentityVerdicts,
+  resolveSiteIdentity,
+} from "../wp/site-identity";
+import {
+  PROBE_TIMEOUT_MS,
+  checkWebIdentity,
+  writeSiteIdentityFile,
+} from "../wp/web-identity";
+import type { SiteIdentityVerdict } from "../wp/web-identity";
+import { classifyWpUserCheck, wpUserCheckArgs } from "../wp/wp-user";
+import { effectiveRunAs } from "../config/run-as";
+import { checkLoginShell } from "./login-shell";
+import {
+  asksForIdentity,
+  identityCheck,
+  identityIssues,
+} from "./site-identity-report";
+import type {
+  IdentityFacts,
+  IdentityIssue,
+  WebProbeOutcome,
+  WpUserOutcome,
+} from "./site-identity-report";
+import { parseSudoListing } from "./sudo-listing";
+import type { SudoListing } from "./sudo-listing";
 import { describePluginDir, inspectPluginDirs } from "../wp/plugin-dir";
 import {
   blameCellPlugin,
@@ -27,6 +55,7 @@ import {
 import type { HealCellPlugin } from "./cell-plugin";
 import {
   renderElevationWarning,
+  renderIdentityWarning,
   renderPluginDirWarning,
 } from "./elevation-report";
 import type { SiteElevation } from "./elevation-report";
@@ -53,6 +82,19 @@ import type {
  * rewrites a whole content directory.
  */
 export const SETTLE_LEFTOVERS_ALLOWANCE_MS = 15 * 60 * 1000;
+
+/**
+ * What the site identity report may add to a setup's timeout, per site that asks to run as an
+ * identity: the web probe's request ({@link PROBE_TIMEOUT_MS}) plus its sweep, write and removal, the
+ * run probe, `sudo -n -l` and the WordPress login's check. A setup timing out mid-request would skip
+ * the probe file's removal, leaving it servable until the next probe's sweep.
+ */
+export const SITE_IDENTITY_ALLOWANCE_PER_SITE_MS = PROBE_TIMEOUT_MS + 45_000;
+
+/** What the web probe needs: Playwright's `request` (`playwright.request`, or `@playwright/test`'s). */
+export interface IdentityProbe {
+  readonly request: APIRequest;
+}
 
 /**
  * Pre-flight transport verification — runs before authentication and tests.
@@ -89,6 +131,11 @@ export interface CheckResult {
   readonly detail: string;
   /** Actionable next step, shown only on failure. Omitted when `detail` alone is already actionable. */
   readonly hint?: string;
+  /**
+   * A passing check that reports something to act on (a site identity fallback, a missing sudoers
+   * setting): marked as a warning, never a failure. Ignored on a failed check.
+   */
+  readonly warning?: boolean;
 }
 
 /** The full pre-flight result for one site: its identity plus every check run against it. */
@@ -126,6 +173,13 @@ export interface SitePreflightResult {
    * (`./cell-plugin.ts`), for {@link verifyPool} to print; absent when none was removed.
    */
   readonly healedCellPlugin?: string;
+  /**
+   * What the run-level site identity banner lists for this site ({@link renderIdentityWarning}); empty
+   * when nothing. Absent when a gating check failed first.
+   */
+  readonly identityIssues?: readonly IdentityIssue[];
+  /** The web probe's verdict, for the verdict file workers read; absent when no probe ran or it threw. */
+  readonly identityVerdict?: SiteIdentityVerdict;
 }
 
 // ── Transport label (used in error output) ─────────────────────────────────────
@@ -500,9 +554,7 @@ async function verifySsh(transport: SshTransport): Promise<CheckResult[]> {
         detail:
           `WP-CLI exited ${String(result.exitCode)}` +
           (result.stderr.trim() ? `: ${result.stderr.trim()}` : "."),
-        hint:
-          `Ensure 'wp' is in the PATH of ${describeTarget(transport)}, as an ` +
-          "executable file: a shell function or alias named `wp` is never run.",
+        hint: await wpInfoHint(transport),
       });
       // We connected (the command ran), so we still check rootDir below.
     }
@@ -587,6 +639,26 @@ async function verifySsh(transport: SshTransport): Promise<CheckResult[]> {
   }
 
   return checks;
+}
+
+/**
+ * The `wp --info` gate's hint, naming who it ran as: the site's identity (through `sudo`, whose
+ * `secure_path` decides where `wp` is found) or the SSH user (its login `PATH`).
+ *
+ * @param transport - the site's ssh transport.
+ */
+async function wpInfoHint(transport: SshTransport): Promise<string> {
+  const state = await resolveSiteIdentity(transport).catch(() => undefined);
+  if (state?.kind === "site") {
+    return (
+      `Ensure 'wp' is on sudo's secure_path (e.g. /usr/local/bin/wp) for ${state.target.user}:` +
+      `${state.target.group}, the identity this site's commands run as, as an executable file.`
+    );
+  }
+  return (
+    `Ensure 'wp' is in the PATH of ${describeTarget(transport)}, as an ` +
+    "executable file: a shell function or alias named `wp` is never run."
+  );
 }
 
 // ── Docker checks ─────────────────────────────────────────────────────────────
@@ -998,12 +1070,20 @@ export async function checkPluginDirs(
  * WordPress that cannot boot; none skips both.
  * @param heal - removes a broken copy of the cell's plugin that stops WordPress booting — the auth
  * setup's; omitted, it is only reported (the healthcheck changes nothing).
+ * @param identity - what the web probe needs; omitted, no probe runs. Only a site asking to run as an
+ * identity ({@link asksForIdentity}) is probed: its verdict is given to this process at once
+ * (`registerSiteIdentityVerdicts`), so every later command here runs as it decides, and returned for
+ * the verdict file.
+ * @param loginShell - an ssh site's {@link checkLoginShell}, when the caller ran it already
+ * ({@link verifyPool}, before settling leftovers); omitted, it runs here.
  */
 export async function verifySite(
   site: SiteInput,
   index: number,
   slugs: readonly string[] = [],
   heal?: HealCellPlugin,
+  identity?: IdentityProbe,
+  loginShell?: CheckResult,
 ): Promise<SitePreflightResult> {
   let checks: CheckResult[];
   switch (site.transport.mode) {
@@ -1024,6 +1104,26 @@ export async function verifySite(
   if (!checks.every((check) => check.ok)) {
     return { index, baseURL: site.baseURL, transport: site.transport, checks };
   }
+  // A gate before anything here that writes (the probe, a heal): every command passes through this
+  // shell. Reported after the transport's gates, which say more when the connection itself fails.
+  if (site.transport.mode === "ssh") {
+    const shell = loginShell ?? (await checkLoginShell(site.transport));
+    checks.push(shell);
+    if (!shell.ok) {
+      return {
+        index,
+        baseURL: site.baseURL,
+        transport: site.transport,
+        checks,
+      };
+    }
+  }
+  // Before the boot and locale checks, so they, a heal and the reports below run as the identity the
+  // verdict decides: what scenarios will run as.
+  const web =
+    identity === undefined || !asksForIdentity(site.transport)
+      ? undefined
+      : await probeWebVerdict(site, identity.request);
   const boot = await checkBootAndLocale(site, slugs, heal);
   checks.push(...boot.checks);
 
@@ -1036,6 +1136,8 @@ export async function verifySite(
   const plan = await planOwnership(site.transport);
   checks.push(...checkFileOwnership(plan, elevation));
   checks.push(elevationCheck(elevation, plan));
+  const facts = await gatherIdentityFacts(site.transport, web);
+  checks.push(identityCheck(facts));
   const pluginDirs =
     slugs.length === 0
       ? undefined
@@ -1049,11 +1151,152 @@ export async function verifySite(
     checks,
     elevation,
     ownershipPending: plan.kind === "grant",
+    identityIssues: identityIssues(facts),
+    ...(web?.kind === "verdict" ? { identityVerdict: web.verdict } : {}),
     ...(pluginDirs === undefined
       ? {}
       : { leftoverPluginDirs: pluginDirs.leftovers }),
     ...(boot.healed === undefined ? {} : { healedCellPlugin: boot.healed }),
   };
+}
+
+// ── Site identity (never a gate) ──────────────────────────────────────────────
+
+/**
+ * Asks the web server who PHP runs as (`checkWebIdentity`) and gives the verdict to this process. A
+ * probe that throws (the transport failed) leaves no verdict: an `auto` site then stays unverified.
+ *
+ * @param site - the site, its transport verified.
+ * @param request - Playwright's `request`.
+ * @returns the verdict, or the error's message.
+ */
+async function probeWebVerdict(
+  site: SiteInput,
+  request: APIRequest,
+): Promise<WebProbeOutcome> {
+  try {
+    const verdict = await checkWebIdentity(site, request);
+    registerSiteIdentityVerdicts(
+      new Map([[installKey(site.transport), verdict]]),
+    );
+    return { kind: "verdict", verdict };
+  } catch (error) {
+    return { kind: "error", detail: errorMessage(error) };
+  }
+}
+
+/**
+ * Everything the "Site identity" check reports. Read-only: the state (its probes, memoised for the
+ * process), the WordPress login's check (one `wp eval`, plugins and theme skipped), and — only where
+ * the site asks for an identity — `sudo -n -l` (where site commands do or would go through `sudo`) and
+ * whether the SSH user has a WP-CLI config (in the `site` state).
+ *
+ * @param transport - the site's transport, verified.
+ * @param web - the web probe's outcome, when it ran.
+ */
+async function gatherIdentityFacts(
+  transport: Transport,
+  web: WebProbeOutcome | undefined,
+): Promise<IdentityFacts> {
+  let state: IdentityFacts["state"];
+  try {
+    state = await resolveSiteIdentity(transport);
+  } catch (error) {
+    state = { kind: "error", detail: errorMessage(error) };
+  }
+  // Only a site asking for an identity reaches `site` or `fallback` (`runAs` false is `disabled`, other
+  // modes `same-user`): there site commands do, or would once fixed, go through sudo.
+  const viaSudo = state.kind === "site" || state.kind === "fallback";
+  const wpUser =
+    transport.wpUser === undefined
+      ? undefined
+      : await checkWpUser(transport, transport.wpUser);
+  const sudo = viaSudo
+    ? await readSudoListing(
+        transport,
+        state.kind === "site" ? [state.target.user, state.identity.user] : [],
+      )
+    : undefined;
+  const wpCliConfig =
+    state.kind === "site" ? await hasWpCliConfig(transport) : undefined;
+  return {
+    mode: transport.mode,
+    runAs: effectiveRunAs(transport),
+    state,
+    ...(web === undefined ? {} : { web }),
+    ...(wpUser === undefined ? {} : { wpUser }),
+    ...(sudo === undefined ? {} : { sudo }),
+    ...(wpCliConfig === undefined ? {} : { wpCliConfig }),
+  };
+}
+
+/**
+ * The WordPress login's check, as `wpCli` runs it before its first `--user` (unmemoised: a report).
+ *
+ * @param transport - the site's transport.
+ * @param login - the site's WordPress login; never printed.
+ */
+async function checkWpUser(
+  transport: Transport,
+  login: string,
+): Promise<WpUserOutcome> {
+  try {
+    return classifyWpUserCheck(
+      await exec(transport, "wp", wpUserCheckArgs(login)),
+      login,
+    );
+  } catch (error) {
+    return { kind: "error", detail: errorMessage(error) };
+  }
+}
+
+/**
+ * `sudo -n -l` as the SSH user, in English, from `/`.
+ *
+ * @param transport - the site's transport.
+ * @param runAs - the identity's names, for `Defaults>` entries.
+ */
+async function readSudoListing(
+  transport: Transport,
+  runAs: readonly string[],
+): Promise<SudoListing> {
+  try {
+    return parseSudoListing(
+      await execAsTransport(
+        transport,
+        "env",
+        ["LC_ALL=C", "sudo", "-n", "-l"],
+        {
+          cwd: "/",
+        },
+      ),
+      runAs,
+    );
+  } catch {
+    return { kind: "unreadable" };
+  }
+}
+
+/**
+ * Whether the SSH user has `~/.wp-cli/config.yml` (`test -e` in `sh`, which expands `$HOME`).
+ *
+ * @param transport - the site's transport.
+ * @returns `undefined` when it could not be told.
+ */
+async function hasWpCliConfig(
+  transport: Transport,
+): Promise<boolean | undefined> {
+  try {
+    const { exitCode } = await execAsTransport(
+      transport,
+      "sh",
+      ["-c", 'test -e "$HOME/.wp-cli/config.yml"'],
+      { cwd: "/" },
+    );
+    return exitCode === 0 ? true : exitCode === 1 ? false : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -1124,7 +1367,11 @@ async function checkBootAndLocale(
  * @param slugs - the slug(s) the cell installs as, for {@link verifySite}.
  * @param heal - see {@link verifySite}.
  * @param settle - the product's `settleLeftovers`, run on every site before its checks
- * ({@link settleSiteLeftovers}); the healthcheck, calling {@link verifySite} alone, never settles.
+ * ({@link settleSiteLeftovers}) — but only once an ssh site's login shell passed
+ * ({@link checkLoginShell}, run first); the healthcheck, calling {@link verifySite} alone, never
+ * settles.
+ * @param identity - the web probe's `request`, and where this run's verdicts go (`dir`, the cell's
+ * auth folder, and `runId`); omitted, no probe runs and no file is written.
  */
 export async function verifyPool(
   pool: readonly SiteConfig[],
@@ -1133,6 +1380,7 @@ export async function verifyPool(
   slugs: readonly string[] = [],
   heal?: HealCellPlugin,
   settle?: SettleLeftovers,
+  identity?: IdentityProbe & { readonly dir: string; readonly runId: string },
 ): Promise<void> {
   const real = pool
     .map((site, i) => ({ site, i }))
@@ -1140,15 +1388,33 @@ export async function verifyPool(
 
   if (real.length === 0) return;
 
+  // The login shell first, read-only: settling writes (as root, on some products), and a shell that
+  // changes command lines must not be handed one. A site that fails it is not settled; `verifySite`
+  // reports the failure, reusing this result.
+  const shells = await Promise.all(
+    real.map(({ site }) =>
+      site.transport.mode === "ssh"
+        ? checkLoginShell(site.transport)
+        : Promise.resolve(undefined),
+    ),
+  );
+
   if (settle !== undefined) {
     await Promise.all(
-      real.map(({ site }) => settleSiteLeftovers(site, settle)),
+      real.map(({ site }, n) =>
+        shells[n]?.ok === false
+          ? Promise.resolve()
+          : settleSiteLeftovers(site, settle),
+      ),
     );
   }
 
   const results = await Promise.all(
-    real.map(({ site, i }) => verifySite(site, i, slugs, heal)),
+    real.map(({ site, i }, n) =>
+      verifySite(site, i, slugs, heal, identity, shells[n]),
+    ),
   );
+  if (identity !== undefined) await saveVerdicts(results, identity);
 
   // Changed a site before any scenario: always said, on a passing pool too.
   for (const { baseURL, healedCellPlugin } of results) {
@@ -1163,11 +1429,42 @@ export async function verifyPool(
   // pool that cannot elevate passes. Never throws and never changes a verdict: it warns.
   warnAboutElevation(results);
   warnAboutPluginDirs(results);
+  warnAboutIdentity(results);
 
   const failed = results.filter((r) => r.checks.some((c) => !c.ok));
   if (failed.length === 0) return;
 
   throw new Error(buildReport(failed, results.length, product, cell));
+}
+
+/**
+ * Writes the web probe's verdicts for this run's workers (`site-identity.json`) whenever a site asks
+ * for an identity ({@link asksForIdentity}) — even with no verdict (every probe failed), so a worker
+ * says its probe failed instead of blaming the previous run's file. A write that fails is a warning:
+ * workers then run `auto` sites as the transport's user, unverified, and say so.
+ *
+ * @param results - every site verified.
+ * @param target - the folder and this run's id.
+ */
+async function saveVerdicts(
+  results: readonly SitePreflightResult[],
+  target: { readonly dir: string; readonly runId: string },
+): Promise<void> {
+  const verdicts = new Map<string, SiteIdentityVerdict>();
+  for (const { transport, identityVerdict } of results) {
+    if (identityVerdict !== undefined) {
+      verdicts.set(installKey(transport), identityVerdict);
+    }
+  }
+  if (!results.some(({ transport }) => asksForIdentity(transport))) return;
+  try {
+    await writeSiteIdentityFile(target.dir, target.runId, verdicts);
+  } catch (error) {
+    console.warn(
+      `[preflight] could not write the site identity verdicts: ${printableLine(errorMessage(error))}; ` +
+        "scenarios run `auto` sites as the transport's user.",
+    );
+  }
 }
 
 /**
@@ -1254,6 +1551,36 @@ export function warnAboutPluginDirs(
       transport: transportLabel(result.transport),
       leftovers: result.leftoverPluginDirs ?? [],
     })),
+    palette,
+  );
+  if (banner !== undefined) print(banner);
+}
+
+/**
+ * Prints the run-level site identity banner, if any site needs it — shared with the healthcheck, as
+ * {@link warnAboutElevation} is.
+ *
+ * @param results - every site verified in this run; those a gate stopped first carry no issues.
+ * @param print - where to send it; see {@link warnAboutElevation}.
+ * @param palette - colour and symbols for `print`'s stream; see {@link warnAboutElevation}.
+ */
+export function warnAboutIdentity(
+  results: readonly SitePreflightResult[],
+  print: (message: string) => void = console.warn,
+  palette: Palette = workerPalette(),
+): void {
+  const banner = renderIdentityWarning(
+    results.flatMap((result) =>
+      result.identityIssues === undefined
+        ? []
+        : [
+            {
+              baseURL: result.baseURL,
+              transport: transportLabel(result.transport),
+              issues: result.identityIssues,
+            },
+          ],
+    ),
     palette,
   );
   if (banner !== undefined) print(banner);

@@ -89,6 +89,15 @@ const DROP_MESSAGES: Readonly<Record<WpUserDropReason, string>> = {
 };
 
 /**
+ * Why `--user` is dropped, in words with its fix, for a report. Never the login.
+ *
+ * @param reason - the reason.
+ */
+export function describeWpUserDrop(reason: WpUserDropReason): string {
+  return DROP_MESSAGES[reason];
+}
+
+/**
  * `args` with `--user=<login>` in front (WP-CLI reads global parameters anywhere before a snippet).
  *
  * @param login - the site's WordPress login.

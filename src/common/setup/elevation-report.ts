@@ -2,6 +2,7 @@ import { TEXT_PALETTE } from "../terminal/palette";
 import type { Palette } from "../terminal/palette";
 import { maskSiteUrl, printableLine, printableLines } from "../text";
 import type { ElevationSupport } from "../wp/exec";
+import type { IdentityIssue } from "./site-identity-report";
 
 /**
  * The run-level warnings: sites that cannot run a privileged housekeeping command, and sites holding a
@@ -203,6 +204,80 @@ export function renderPluginDirWarning(
   );
   lines.push(
     "     every install of its plugin. The next @plugin scenario on the site removes it and says so.",
+  );
+  lines.push("");
+  return lines.join("\n");
+}
+
+/** One site's site identity issues, as the banner names them. */
+export interface SiteIdentityIssues {
+  /** The site's base URL, as reports identify it. */
+  readonly baseURL: string;
+  /** The site's transport, already rendered (e.g. `ssh: ubuntu@203.0.113.10`). */
+  readonly transport: string;
+  /** What `identityIssues` found; empty when nothing. */
+  readonly issues: readonly IdentityIssue[];
+}
+
+/**
+ * Renders the warning for sites whose commands do not run as the web server's identity, whose
+ * identity was not verified over HTTP, or whose sudo logs command lines (`--key=` values included).
+ * A site listed twice (one install, two products' cells) is shown once.
+ *
+ * A **warning, not a failure**: a fallback runs as it always did (the transport's user, files handed
+ * over); any other site runs as its check says. Silent when no site has an issue: every site runs as
+ * its verified identity, already is it, or opted out (`runAs` false), and sudo keeps site commands'
+ * lines out of its log.
+ *
+ * @param sites - every real site checked in this run, with its issues.
+ * @param palette - colour and symbols for the stream it is printed to; plain Unicode text by default.
+ * @returns the banner, padded like {@link renderElevationWarning}'s, or `undefined` when no site has
+ * an issue.
+ */
+export function renderIdentityWarning(
+  sites: readonly SiteIdentityIssues[],
+  palette: Palette = TEXT_PALETTE,
+): string | undefined {
+  // One install checked by two products (a twin, a shared host) is listed once.
+  const seen = new Set<string>();
+  const affected = sites.filter((site) => {
+    const key = `${site.baseURL}\u0000${site.transport}`;
+    if (site.issues.length === 0 || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (affected.length === 0) return undefined;
+
+  const { paint, symbol } = palette;
+  const lines: string[] = [
+    "",
+    headline(
+      palette,
+      `SITE IDENTITY ${symbol("dash")} ${String(affected.length)} site(s) need attention`,
+    ),
+    "",
+  ];
+  for (const site of affected) {
+    lines.push(siteLine(site));
+    for (const { what, fix } of site.issues) {
+      const [first = "", ...rest] = printableLines(what);
+      lines.push(
+        `       ${symbol("bullet")} ${first}`,
+        ...rest.map((line) => `         ${line}`),
+      );
+      const [fixFirst = "", ...fixRest] = printableLines(fix);
+      lines.push(
+        `         ${paint("warn", symbol("arrow"))} ${fixFirst}`,
+        ...fixRest.map((line) => `           ${line}`),
+      );
+    }
+  }
+  lines.push("");
+  lines.push(
+    `     None of these fails a site ${symbol("dash")} a fallback runs as the transport's user, handing files`,
+  );
+  lines.push(
+    '     over as before; the rest run as their "Site identity" check says, which says more.',
   );
   lines.push("");
   return lines.join("\n");
