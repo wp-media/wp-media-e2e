@@ -136,21 +136,45 @@ Then(
 );
 
 /**
- * A log made to look old, by setting its modification time back — what `log-delete --older-than`
- * judges a log by. Only a log the transport's user wrote can be backdated, since only a file's owner
- * may set its time.
+ * Sets a run's log's modification time back. Only a log the identity site commands run as wrote can
+ * be backdated, since only a file's owner may set its time.
+ *
+ * @param transport - the site.
+ * @param which - the run, as a step names it (`oldest`, `newest`).
+ * @param seconds - how far back.
  */
+async function backdateRunLog(
+  transport: Transport,
+  which: string,
+  seconds: number,
+): Promise<void> {
+  const name = logName(await theRun(transport, which));
+  const { dir } = await logsInFolder(transport);
+  await backdateFile(transport, `${dir}/${name}`, seconds);
+}
+
+/** A log made to look old: its modification time is what `log-delete --older-than` judges it by. */
 Given(
   "the {word} run's log was last written {int} days ago",
   async ({ site }, which: string, days: number) => {
-    const name = logName(await theRun(site.transport, which));
-    const { dir } = await logsInFolder(site.transport);
-    await backdateFile(site.transport, `${dir}/${name}`, days * 24 * 60 * 60);
+    await backdateRunLog(site.transport, which, days * 24 * 60 * 60);
   },
 );
 
 /**
- * A log the transport's user may no longer write. BackWPup gives its logs WordPress's file mode, so
+ * A log written minutes before the next run's. Two runs made back to back can finish their logs in
+ * the same second, and the plugin orders logs by their modification time in whole seconds (`log-show
+ * --job_id` keys them by it, so a tie leaves "the newest" to chance).
+ */
+Given(
+  "the {word} run's log was last written {int} minute(s) ago",
+  async ({ site }, which: string, minutes: number) => {
+    await backdateRunLog(site.transport, which, minutes * 60);
+  },
+);
+
+/**
+ * A log the identity site commands run as may no longer write. BackWPup gives its logs WordPress's file mode, so
  * on a host where that mode leaves them writable by their owner alone, every log the web server
  * writes is in this state as far as WP-CLI is concerned; the cells this suite runs on leave logs
  * writable by all, so the scenario arranges it.

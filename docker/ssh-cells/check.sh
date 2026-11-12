@@ -144,6 +144,26 @@ wp_constant() { [[ "$(wp_web config get "$1")" == "$2" ]]; }
 # Succeeds when wp-config.php does not define <constant>. Usage: wp_constant_absent <name>
 wp_constant_absent() { ! wp_web config has "$1"; }
 
+# Succeeds when WordPress, in a web request, picks the `direct` filesystem method. Without
+# FS_METHOD, WordPress writes a temp file in WP_CONTENT_DIR and compares its owner (the PHP worker)
+# with that of wp-admin/includes/file.php (the docroot's), so only the request's worker matters,
+# not the probe's owner. The probe is still made by the docroot's owner, never root: its name is
+# random (a 16-hex suffix) and `dd conv=excl` refuses anything already at the path, a planted link
+# included. It is removed, as that owner, however the check ends.
+web_filesystem_is_direct() (
+  local owner="${V_OWNER%%:*}" name probe body
+  name="twin-fs-probe-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n').php"
+  probe="$TWIN_ROOT/$name"
+  trap 'runuser -u "$owner" -- rm -f -- "$probe"' EXIT
+  # shellcheck disable=SC2016 # $1 is the inner shell's.
+  printf '%s\n' '<?php' "require __DIR__ . '/wp-load.php';" \
+    "require_once ABSPATH . 'wp-admin/includes/file.php';" 'echo get_filesystem_method();' |
+    runuser -u "$owner" -- sh -c 'umask 022 && dd of="$1" conv=excl status=none' fs-probe "$probe" ||
+    return 1
+  body="$(curl -fsS --max-time 30 "${TWIN_SITE_URL}/${name}")" || return 1
+  [[ "$body" == direct ]]
+)
+
 echo "Checking variant ${variant} (${TWIN_STACK})"
 
 check "every path under ${TWIN_SITE_DIR} is ${V_OWNER}" prints_nothing wrong_owner "$V_OWNER"
@@ -191,6 +211,11 @@ check "WordPress is installed at ${TWIN_SITE_URL}" prints "$TWIN_SITE_URL" wp_we
 check "WP_DEBUG and WP_DEBUG_LOG on, WP_DEBUG_DISPLAY off" \
   eval 'wp_constant WP_DEBUG 1 && wp_constant WP_DEBUG_LOG 1 && wp_constant WP_DEBUG_DISPLAY ""'
 check "WP_MAX_MEMORY_LIMIT is 512M" wp_constant WP_MAX_MEMORY_LIMIT 512M
+if ((V_FS_DIRECT)); then
+  check "FS_METHOD is direct (the docroot is not the web server's)" wp_constant FS_METHOD direct
+else
+  check "FS_METHOD is not defined" wp_constant_absent FS_METHOD
+fi
 if [[ "$TWIN_STACK" == nginx ]]; then
   check "DISABLE_WP_CRON is on" wp_constant DISABLE_WP_CRON 1
   check "ubuntu's crontab requests wp-cron.php every minute" cron_requests_wp_cron
@@ -209,6 +234,7 @@ check "PHP-FPM runs with umask 0022" umask_of "php-fpm${TWIN_PHP}" 0022
 check "no process from before the reset survived" no_stray_processes
 check "sshd: key-only, ubuntu only" sshd_key_only
 check "a WordPress login reaches the dashboard" wordpress_login_works
+check "web requests write files directly (get_filesystem_method is direct)" web_filesystem_is_direct
 
 if ((failures)); then
   die "${failures} check(s) failed for variant ${variant}"

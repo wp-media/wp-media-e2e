@@ -11,7 +11,8 @@ Feature: Exporting and importing BackWPup jobs over WP-CLI
   Every claim is checked against the jobs the site stores, on the site, and answered in key names:
   the file carries the site's database host, name and user, so no value of it is ever quoted. Export
   files live in the scenario's private folder, which `{private folder}` names relative to the
-  directory WP-CLI runs in, private to WP-CLI's user and removed afterwards. `--passwords`, which
+  directory WP-CLI runs in, private to WP-CLI's user (outside the docroot when that user is the web
+  server) and removed afterwards. `--passwords`, which
   writes stored secrets in clear, is deliberately not run.
 
   Kept out of these scenarios' way, each a plugin bug: an import that refuses a malformed job only

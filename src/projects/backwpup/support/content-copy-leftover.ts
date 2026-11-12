@@ -169,7 +169,7 @@ export function judgeLeftover(facts: LeftoverFacts): Verdict {
  * settled — see the module header. A product's `settleLeftovers`, for the auth setup's preflight, and
  * the `contentCopyLeftover` worker fixture's body.
  *
- * Found as the transport's user. A site that cannot be asked is warned about, not refused — its
+ * Found as the identity site commands run as (the web server's in the `site` state). A site that cannot be asked is warned about, not refused — its
  * scenarios then fail in their own words — and a placeholder site is skipped.
  *
  * @param site - the site, or `undefined` when the project has none.

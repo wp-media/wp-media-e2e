@@ -18,7 +18,7 @@ import type { DatabaseDefaults } from "./database-defaults";
 /**
  * A copy of a site's `wp-content`, taken before a command that rewrites it wholesale and put back
  * exactly afterwards — for `wp backwpup restore`, which deletes what its archive does not hold and
- * writes the rest back as the transport's user (measured on `pro@nginx`).
+ * writes the rest back as the identity site commands run as (measured on `pro@nginx`, as the SSH user).
  *
  * **Root does both halves, from the start** — the one place elevation is not a fallback: only root
  * reads every file the web server owns and puts every owner back. Without passwordless `sudo` the
@@ -464,8 +464,8 @@ export function isLeftoverName(name: string): boolean {
 }
 
 /**
- * The copies' directories in the WordPress root itself, sorted. Asked as the transport's user: a
- * copy's directory is root-only, but the root lists it to anyone.
+ * The copies' directories in the WordPress root itself, sorted. Asked as the identity site commands
+ * run as: a copy's directory is root-only, but the root lists it to anyone.
  *
  * @param transport - the site.
  * @param root - the WordPress root's absolute path.

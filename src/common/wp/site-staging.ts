@@ -68,15 +68,34 @@ const ENSURE_WRITABLE_SCRIPT =
 /** {@link ENSURE_WRITABLE_SCRIPT}'s exit for "it exists, and another user's": the only one healed. */
 const NOT_WRITABLE = 3;
 
+/** A prefix {@link staleDirSweepScript} may embed in its script: nothing a shell would read. */
+const SWEEP_PREFIX = /^[a-z0-9][a-z0-9-]*$/;
+
 /**
- * As the transport's user: remove its own inboxes in `$1` older than `$2` minutes. Only directories
- * (a symlink below `$1` is not followed: `find` without `-L`), only the login's (`id -u`: in a sticky folder no
- * other user's could be removed anyway), only the inbox prefix, never below the first level.
+ * A `sh -c` script removing, as whoever runs it, its own directories in `$1` named `<prefix>*` and
+ * older than `$2` minutes. Only directories (a symlink below `$1` is not followed: `find` without
+ * `-L`), only the runner's (`id -u`: in a sticky folder no other user's could be removed anyway),
+ * never below the first level.
+ *
+ * @param prefix - the names' prefix: lowercase letters, digits and hyphens.
+ * @returns the script; `$1`, `$2` are its arguments after `$0`.
+ * @throws Error if the prefix holds anything else (it is embedded in the script).
  */
-const SWEEP_SCRIPT =
-  // `-H` follows `$1` itself when it is a link (macOS's `/tmp`), and nothing below it.
-  `find -H "$1" -mindepth 1 -maxdepth 1 -type d -name '${INBOX_PREFIX}*' ` +
-  `-user "$(id -u)" -mmin +"$2" -exec rm -rf -- {} +`;
+export function staleDirSweepScript(prefix: string): string {
+  if (!SWEEP_PREFIX.test(prefix)) {
+    throw new Error(
+      `[wp/staging] "${prefix}" cannot prefix the directories a sweep removes.`,
+    );
+  }
+  return (
+    // `-H` follows `$1` itself when it is a link (macOS's `/tmp`), and nothing below it.
+    `find -H "$1" -mindepth 1 -maxdepth 1 -type d -name '${prefix}*' ` +
+    `-user "$(id -u)" -mmin +"$2" -exec rm -rf -- {} +`
+  );
+}
+
+/** As the transport's user: remove its own inboxes in `$1` older than `$2` minutes. */
+const SWEEP_SCRIPT = staleDirSweepScript(INBOX_PREFIX);
 
 /** `$0` of the two `sh -c` scripts: what `ps` shows, never a path. */
 const SCRIPT_NAME = "e2e-staging";

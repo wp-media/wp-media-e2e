@@ -231,7 +231,11 @@ fixtures](docs/guides/authoring-tests.md#backwpups-fixtures). Rules to know befo
 - `cli` runs `wp backwpup …` where the **command is the system under test** and returns a refusal
   instead of throwing; when WP-CLI only arranges or checks a site, use `support/backups.ts`
   (throws). A `--key=` value never appears in a message naming the command: name it through
-  `commandLine` (`support/cli.ts`).
+  `commandLine` (`support/cli.ts`). A scenario whose premise is two users starts with `Given WP-CLI
+runs as the SSH user, not the web server` (`cli.runAsSshUser()`, before any BackWPup command) and
+  judges permissions through `cli.transport`.
+- `privateFolder` (`{private folder}`) is `0700`, the identity's: in the staging area, or in `site`
+  `/tmp/e2e-private-<name>` (the web server owns it there, so the docroot would serve it).
 - Request `markers` **before** the backup under inspection runs: requesting it plants them.
 - `restore` (the six-step wizard: `strategiesOffered`, `restoreWith`) fails each wait at once on the
   wizard's error line, the decryption prompt, the login screen, or what `WizardWatch` saw (a stream
@@ -531,7 +535,9 @@ automatically, and that verification **must not** be skipped. Mirrored as a comm
   another user); the web probe file is constant PHP, random-named, created with `O_EXCL` (`dd conv=excl`, never
   `set -C`, which writes through a symlink to a FIFO), removed in `finally`
   ([details](docs/architecture/wordpress-automation.md#site-identity-wpsite-identityts)).
-- **Debug log** ([`wp/log.ts`](src/common/wp/log.ts)): `clearDebugLog` in a `Before`, `scanDebugLog`
+- **Debug log** ([`wp/log.ts`](src/common/wp/log.ts)): `clearDebugLog` in a `Before` (empties the
+  log in place, else replaces it with an empty one; a log the identity owns is kept in `site`, else
+  handed to the site's ownership or removed, so the web server can always append), `scanDebugLog`
   (`{ raw, fatals, warnings, notices }`; WordPress booted with no plugin or theme, so a broken one
   cannot write into the log it reads; a direct read when even that fails) in an
   `After`. Presets in `support/debug-log.ts`: `*_LOG_OPTIONS` scans everything, `*_OWN_LOG_OPTIONS` that

@@ -1,6 +1,6 @@
 import { expect } from "@playwright/test";
 
-import { Then, When } from "../fixtures";
+import { Given, Then, When } from "../fixtures";
 import { backwpup } from "../config/backwpup.config";
 import {
   backwpupCli,
@@ -23,6 +23,9 @@ import {
   theScheduledJob,
 } from "../support/job-options";
 import { commandArgv } from "../support/placeholders";
+import { sshUserBoot } from "../support/cli-session";
+import { wpCli } from "../../../common/wp/exec";
+import { asTransportUser } from "../../../common/wp/site-identity";
 import { isRestoreCommand } from "../support/cli-restore";
 import { isObject } from "../../../common/guards";
 import { resolveIdentity } from "../../../common/artifacts/manifest";
@@ -45,6 +48,29 @@ import type { CliLevel, CliResult } from "../support/cli";
  * site itself stores, what its backup history records, or which edition it installed. Those are what
  * stop a scenario passing by comparing the command's output with itself.
  */
+
+// ── Who runs it ─────────────────────────────────────────────────────────────
+
+/**
+ * Runs the scenario's BackWPup commands as the SSH user, with no `--user`, instead of as the site's
+ * identity: for a scenario whose premise is that WP-CLI and the web server are two users, which the
+ * `site` state (every command as the web server) would erase. Steps judging what the command may do
+ * read the site through `cli.transport`. Must come before the scenario's first BackWPup command.
+ *
+ * Skipped, naming the reason, when the SSH user may not read the site: nothing it would run could set
+ * up the premise. Any other failure to boot WordPress as it fails the scenario.
+ */
+Given(
+  "WP-CLI runs as the SSH user, not the web server",
+  async ({ cli, site, $testInfo }) => {
+    const boot = sshUserBoot(
+      await wpCli(asTransportUser(site.transport), ["core", "is-installed"]),
+    );
+    if (boot.kind === "failed") throw new Error(boot.message);
+    if (boot.kind === "refused") $testInfo.skip(true, boot.reason);
+    cli.runAsSshUser();
+  },
+);
 
 // ── Running a command ────────────────────────────────────────────────────────
 

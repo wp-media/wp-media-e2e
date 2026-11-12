@@ -3,11 +3,13 @@ Feature: Deleting and downloading BackWPup backups over WP-CLI
 
   `wp backwpup backup-delete` removes an archive from the storages that hold it, and
   `backup-download` copies one to a file of the user's choosing. Both run on the site, inside
-  WP-CLI, so both act as WP-CLI's own user — and on a site where the web server writes as another
-  user, that decides what they may do. An archive made by a run inside WP-CLI belongs to WP-CLI's
-  user, and deleting it works. One the web server made — every scheduled or on-demand backup is —
-  belongs to the web server and carries its file mode, and the plugin refuses to delete what WP-CLI
-  may not write, although WP-CLI may still read it and download it.
+  WP-CLI, so both act as WP-CLI's own user: the web server's where the suite runs site commands as
+  it, else the SSH user. Where the two differ, that decides what they may do. An archive made by a
+  run inside WP-CLI belongs to WP-CLI's user, and deleting it works. One the web server made — every
+  scheduled or on-demand backup is — belongs to the web server and carries its file mode, and the
+  plugin refuses to delete what WP-CLI may not write, although WP-CLI may still read it and download
+  it. The scenario about that refusal runs WP-CLI as the SSH user, so the two differ whoever site
+  commands otherwise run as.
 
   Every outcome is read off the site's own filesystem, and every archive is held to the digest it had
   when its run made it, so "left as it was" means byte for byte. Neither command's own line is taken
@@ -16,9 +18,10 @@ Feature: Deleting and downloading BackWPup backups over WP-CLI
   next one exits 1 for a file it did remove.
 
   A download lands on the site, and a relative destination is resolved against the directory WP-CLI
-  runs in — here the WordPress root. Each scenario downloads into a folder of its own there, which
-  `{private folder}` names relative to that root: private to WP-CLI's user, since the web server
-  serves anything it can read in the docroot, and removed afterwards. `{oldest backup}` and
+  runs in — here the WordPress root. Each scenario downloads into a folder of its own, which
+  `{private folder}` names relative to that root: private to WP-CLI's user (and outside the docroot
+  when that user is the web server, which serves anything it can read there), and removed
+  afterwards. `{oldest backup}` and
   `{newest backup}` are the archives of the first and the latest backup the scenario made. The job
   backs up the database only, the smallest real backup a site can make.
 
@@ -42,7 +45,8 @@ Feature: Deleting and downloading BackWPup backups over WP-CLI
   # One delete only. A refusal leaves its error queued on the site, and the next backup-delete repeats
   # it and exits 1 even for a file it did remove — a plugin bug, kept out of this scenario's way.
   Scenario: Deleting a backup the web server made is refused, and the archive and its history are left as they were
-    Given the scheduled job has made 1 backup through the web server
+    Given WP-CLI runs as the SSH user, not the web server
+    And the scheduled job has made 1 backup through the web server
     And WP-CLI's user may not write the newest backup
     When I run the BackWPup command "backup-delete {newest backup} --yes"
     Then the command fails

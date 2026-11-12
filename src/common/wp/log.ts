@@ -1,6 +1,10 @@
 import { CommandKilledError } from "./errors";
 import { elevationSupport, exec, execElevated, wpCli } from "./exec";
+import { normalizeOwnership } from "./ownership";
+import { resolveSiteIdentity } from "./site-identity";
+import { isObject } from "../guards";
 import type { ExecResult } from "./exec";
+import type { OwnershipOutcome } from "./ownership";
 import type { Transport } from "../config/types";
 
 /**
@@ -32,16 +36,13 @@ import type { Transport } from "../config/types";
 // Run inside WP via `wp eval`; WP_CONTENT_DIR is resolved by WordPress itself.
 
 /**
- * How every snippet here boots WordPress: **no plugin, no theme**. Reading or removing a file needs
+ * How every snippet here boots WordPress: **no plugin, no theme**. Reading or clearing a file needs
  * neither, and `WP_CONTENT_DIR` comes from `wp-config.php`, which loads either way. A plugin that
  * cannot boot — a half-removed copy of the one under test — would otherwise kill the read on its
  * fatal and, through `WP_DEBUG_LOG`, write that fatal into the very log being judged (measured on a
  * cell), blaming the scenario for the read itself.
  */
 const BOOT_BARE = ["--skip-plugins", "--skip-themes", "eval"] as const;
-
-/** What {@link CLEAR_DEBUG_LOG} prints when the log is genuinely gone. */
-const CLEARED = "cleared";
 
 // An absent log is legitimately empty; an unreadable one exits non-zero so the caller falls back
 // instead of mistaking "cannot read" for "no errors were logged".
@@ -52,16 +53,151 @@ const READ_DEBUG_LOG =
   'if ($c === false) { fwrite(STDERR, "debug.log exists but could not be read"); exit(1); }' +
   "echo $c; }";
 
+/** What leads {@link CLEAR_DEBUG_LOG}'s verdict line, so it is told from anything PHP printed first. */
+const CLEAR_MARK = "e2e-debug-log-clear ";
+
 /**
- * Cleared by **removing** the file, not by truncating it: emptying it needs write permission on
- * the file, which belongs to the web-server user, whereas unlinking needs it on the containing
- * directory — which the transport's user usually does have. WordPress recreates the log on its
- * next write either way.
+ * Empties the log **in place** when it is a regular file the identity may write: its owner and mode
+ * are kept, so a log the web server writes stays one it can write. Otherwise (another user's file, a
+ * link, anything else at the path) it is unlinked, which needs write access to the directory only,
+ * and made again empty with `O_EXCL` as the identity. Whatever the log was, a PHP process writing to it
+ * next appends to that file instead of creating it under its own owner and umask — which WP-CLI does
+ * (PHP 8.5 logs deprecations from WP-CLI's own code on every call), leaving a log the web server
+ * cannot write and its fatals lost.
+ *
+ * Prints {@link CLEAR_MARK} and a JSON verdict ({@link ClearVerdict}) as its last line.
  */
-const CLEAR_DEBUG_LOG =
+export const CLEAR_DEBUG_LOG =
   '$f = WP_CONTENT_DIR . "/debug.log";' +
-  "if (file_exists($f)) { @unlink($f); }" +
-  `echo file_exists($f) ? "kept" : "${CLEARED}";`;
+  "clearstatcache();" +
+  'if (is_file($f) && !is_link($f) && is_writable($f) && false !== @file_put_contents($f, "")) { $s = "emptied"; }' +
+  "else {" +
+  "if (file_exists($f) || is_link($f)) { @unlink($f); clearstatcache(); }" +
+  'if (file_exists($f) || is_link($f)) { $s = "kept"; }' +
+  'else { $h = @fopen($f, "x"); if ($h) { fclose($h); $s = "created"; } else { $s = "removed"; } }' +
+  "}" +
+  "clearstatcache();" +
+  '$o = "created" === $s ? true : (("emptied" === $s && function_exists("posix_geteuid")) ? fileowner($f) === posix_geteuid() : null);' +
+  '$r = rtrim((string) realpath(ABSPATH), "/"); $p = realpath($f);' +
+  '$rel = false === $p ? null : (("" !== $r && 0 === strpos($p, $r . "/")) ? substr($p, strlen($r) + 1) : $p);' +
+  `echo "\n${CLEAR_MARK}" . json_encode(["state" => $s, "ours" => $o, "path" => $rel]);`;
+
+/**
+ * What {@link CLEAR_DEBUG_LOG} did: `emptied` in place, `created` anew after removing what was there,
+ * `removed` and not made again (the directory refused the identity), or `kept` (still there, full).
+ */
+export interface ClearVerdict {
+  readonly state: "emptied" | "created" | "removed" | "kept";
+  /**
+   * Whether the identity commands run as owns the log left: `true` when it made it; `null` when
+   * there is none, or PHP cannot tell (no `posix` extension).
+   */
+  readonly ours: boolean | null;
+  /**
+   * The log, resolved: relative to the WordPress root when inside it, else absolute; `null` when
+   * there is none.
+   */
+  readonly path: string | null;
+}
+
+/** The states {@link CLEAR_DEBUG_LOG} reports. */
+const CLEAR_STATES: ReadonlySet<string> = new Set([
+  "emptied",
+  "created",
+  "removed",
+  "kept",
+]);
+
+/**
+ * {@link CLEAR_DEBUG_LOG}'s verdict, from the last line of its output that carries the mark.
+ *
+ * @param stdout - what `wp eval` printed.
+ * @returns the verdict, or `undefined` when none is there or it does not parse — which the caller
+ * treats as "not cleared" (the fallbacks run).
+ */
+export function parseClearVerdict(stdout: string): ClearVerdict | undefined {
+  const line = stdout
+    .split("\n")
+    .reverse()
+    .find((candidate) => candidate.startsWith(CLEAR_MARK));
+  if (line === undefined) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line.slice(CLEAR_MARK.length));
+  } catch {
+    return undefined;
+  }
+  if (!isObject(parsed)) return undefined;
+  const { state, ours, path } = parsed;
+  if (typeof state !== "string" || !CLEAR_STATES.has(state)) return undefined;
+  if (ours !== null && typeof ours !== "boolean") return undefined;
+  if (path !== null && (typeof path !== "string" || path === "")) {
+    return undefined;
+  }
+  return { state: state as ClearVerdict["state"], ours, path };
+}
+
+/** How {@link keepLogWritable} reaches the site. */
+export interface KeepWritableOps {
+  /**
+   * Whether the site is in the `site` identity state, where commands run as the web server; `false`
+   * when that cannot be told.
+   */
+  writesAsWebServer(): Promise<boolean>;
+  /** Hands a path relative to the WordPress root to the site's ownership ({@link normalizeOwnership}). */
+  handOver(path: string): Promise<OwnershipOutcome>;
+  /** Removes a path (relative to the WordPress root, or absolute) as the identity commands run as. */
+  remove(path: string): Promise<ExecResult>;
+  /** Reports what does not fail the clear. */
+  warn(message: string): void;
+}
+
+/**
+ * After a clear, keeps the log one the web server can append to. A log the identity commands run as
+ * owns (made just now, or left by an earlier WP-CLI call) is the web server's own in the `site`
+ * state, and kept. Elsewhere it is kept only once handed to the site's ownership (`normalized`), as
+ * anything else this suite writes into the docroot; any other outcome removes it, as every clear did
+ * before — no worse than a missing log. `unnecessary` there means WP-CLI's user owns the install, not
+ * that the web server is that user, and `disabled` that nothing was handed over: either way a `0644`
+ * log of WP-CLI's user would be one PHP-FPM may not append to, its fatals lost. A log another user
+ * owns is left emptied, its owner untouched; `ours: null` likewise, since handing over someone
+ * else's file could take it from the web server.
+ *
+ * @param verdict - what the clear did.
+ * @param ops - see {@link KeepWritableOps}.
+ */
+export async function keepLogWritable(
+  verdict: ClearVerdict,
+  ops: KeepWritableOps,
+): Promise<void> {
+  const { ours, path } = verdict;
+  if (ours !== true || path === null) return;
+  if (await ops.writesAsWebServer()) return;
+  if (!path.startsWith("/") && (await ops.handOver(path)) === "normalized") {
+    return;
+  }
+  const removed = await ops.remove(path);
+  if (removed.exitCode !== 0) {
+    ops.warn(
+      `[wp/log] debug.log could not be handed to the site's ownership, nor removed (exit ` +
+        `${String(removed.exitCode)}); the web server may be unable to write it until the next clear.`,
+    );
+  }
+}
+
+/**
+ * Whether commands on this site run as the web server (the `site` identity state). A state that
+ * cannot be resolved (the transport failed) counts as not: removing the log is the safe answer.
+ *
+ * @param transport - the site.
+ */
+async function writesAsWebServer(transport: Transport): Promise<boolean> {
+  try {
+    return (await resolveSiteIdentity(transport)).kind === "site";
+  } catch {
+    return false;
+  }
+}
 
 // Fallback target when `wp eval` can't run: the default location, relative to the WP root.
 const DEBUG_LOG_PATH = "wp-content/debug.log";
@@ -210,6 +346,13 @@ export async function readDebugLog(transport: Transport): Promise<string> {
 /**
  * Clears `wp-content/debug.log` (use in a Before hook to scope errors to one scenario).
  *
+ * Through WordPress the log is emptied in place, or replaced by an empty one, and left one the web
+ * server can write ({@link CLEAR_DEBUG_LOG}, {@link keepLogWritable}): a log merely removed is made
+ * again by the next PHP process to write, and WP-CLI's would be the transport user's `0644`, which
+ * PHP-FPM cannot append to (measured on a twin: its fatals were lost, BackWPup's restore stream hung).
+ * When WordPress cannot boot, or its snippet kept the log, the fallbacks only remove it, escalating if
+ * the directory refuses: whoever writes first then makes it, as every clear did before.
+ *
  * Success is the snippet's own verdict, not WP-CLI's exit code — see this module's header. A log
  * that silently refuses to clear would attribute one scenario's fatal to every scenario after it,
  * so this fails loudly instead.
@@ -219,11 +362,19 @@ export async function readDebugLog(transport: Transport): Promise<string> {
  */
 export async function clearDebugLog(transport: Transport): Promise<void> {
   const viaCli = await evalBare(transport, CLEAR_DEBUG_LOG);
-  if (
-    !(viaCli instanceof CommandKilledError) &&
-    viaCli.exitCode === 0 &&
-    viaCli.stdout.trim().endsWith(CLEARED)
-  ) {
+  const verdict =
+    !(viaCli instanceof CommandKilledError) && viaCli.exitCode === 0
+      ? parseClearVerdict(viaCli.stdout)
+      : undefined;
+  if (verdict !== undefined && verdict.state !== "kept") {
+    await keepLogWritable(verdict, {
+      writesAsWebServer: () => writesAsWebServer(transport),
+      handOver: (path) => normalizeOwnership(transport, path),
+      remove: (path) => exec(transport, "rm", ["-f", path]),
+      warn: (message) => {
+        console.warn(message);
+      },
+    });
     return;
   }
   warnFallback(
@@ -231,7 +382,7 @@ export async function clearDebugLog(transport: Transport): Promise<void> {
     viaCli,
     viaCli instanceof CommandKilledError ? "" : viaCli.stderr || viaCli.stdout,
   );
-  // Direct removal — no WordPress bootstrap; WordPress recreates the log on its next write.
+  // Direct removal — no WordPress bootstrap; the next PHP process to write recreates the log.
   // `rm -f` is a no-op when the file is already absent and is portable (Linux, macOS, BusyBox).
   await exec(transport, "rm", ["-f", DEBUG_LOG_PATH]);
   // Confirmed rather than inferred, for the same reason the exit code above is not trusted.

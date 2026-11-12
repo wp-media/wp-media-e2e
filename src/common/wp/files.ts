@@ -289,8 +289,8 @@ export async function listFiles(
  *
  * Measured from the **site's** clock, which is the one such a judgement uses, so a runner whose
  * clock disagrees cannot shift which side of a cut-off the file lands on. Only the file's owner may
- * set its time, so this works on a file the transport's user wrote and is refused on one the web
- * server did.
+ * set its time, so this works on a file the identity site commands run as wrote and, outside the
+ * `site` state, is refused on one the web server did.
  *
  * @param transport - the site holding the file.
  * @param path - its absolute path on that site.

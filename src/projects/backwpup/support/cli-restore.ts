@@ -26,7 +26,7 @@ import type { Transport } from "../../../common/config/types";
  *
  *  - **`--type=file|full` replaces `wp-content` wholesale**, deleting what its archive does not hold
  *    (other plugins' empty directories, `.donotbackup` folders, files the job's exclusions skip) and
- *    writing the rest back as the transport's user. So `wp-content` is copied before and put back
+ *    writing the rest back as the identity site commands run as. So `wp-content` is copied before and put back
  *    after, exactly (`./content-copy.ts`).
  *  - **`--type=db|full` runs `wp db reset`**, which drops and recreates the whole database: its default
  *    collation changes (set back, `./database-defaults.ts`), and whatever it holds that the backup

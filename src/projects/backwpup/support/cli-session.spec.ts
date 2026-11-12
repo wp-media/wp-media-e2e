@@ -1,5 +1,11 @@
 import { test, expect } from "@playwright/test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,14 +14,21 @@ import {
   fillPlaceholders,
   parseCommandText,
   refusePathsOffTheSite,
+  sshUserBoot,
 } from "./cli-session";
+import { resolveSiteIdentity } from "../../../common/wp/site-identity";
 import type { PlaceholderResolvers } from "./cli-session";
-import type { LocalTransport } from "../../../common/config/types";
+import type {
+  LocalTransport,
+  SshTransport,
+} from "../../../common/config/types";
 
 // The same house pattern as `cli.spec.ts`: a stub `wp` on PATH exercises the session over the real
 // exec layer, with no WordPress. `argv` echoes what it was called with, so the namespace the runner
-// supplies is observable; `refuse` reproduces the shape of a command that declined.
+// supplies is observable; `refuse` reproduces the shape of a command that declined. With
+// $WP_STUB_CALLS set, every call's argv is appended to that file.
 const STUB_WP = `#!/usr/bin/env bash
+[ -n "$WP_STUB_CALLS" ] && printf '%s\\n' "$*" >> "$WP_STUB_CALLS"
 case "$WP_STUB_MODE" in
   argv)   printf '%s' "$*" ;;
   refuse) printf 'Error: Invalid field: nope\\n' >&2; exit 1 ;;
@@ -348,5 +361,180 @@ test.describe("CliSession", () => {
       "`wp backwpup backup-encrypt a.tar --key=<hidden>` had not answered after 0.2 s.",
     );
     await expect(run).rejects.not.toThrow(key);
+  });
+});
+
+/**
+ * The opt-back for a scenario whose premise is two users: the session's commands run as the SSH user
+ * with no `--user`, decided before its first command and never half-way.
+ */
+test.describe("CliSession.runAsSshUser", () => {
+  const ssh: SshTransport = {
+    mode: "ssh",
+    host: "example.test",
+    username: "ubuntu",
+    privateKeyPath: "/nonexistent/key",
+    rootDir: "/var/www/site",
+    runAs: "auto",
+    wpUser: "admin",
+  };
+
+  test("swaps the transport for the SSH user's copy: runAs false, no --user login", async () => {
+    const session = new CliSession(ssh);
+    expect(session.transport).toBe(ssh);
+
+    session.runAsSshUser();
+
+    expect(session.transport).not.toBe(ssh);
+    expect(session.transport).toMatchObject({ runAs: false });
+    expect("wpUser" in session.transport).toBe(false);
+    await expect(resolveSiteIdentity(session.transport)).resolves.toEqual({
+      kind: "disabled",
+      reason: "as-transport-user",
+    });
+    // Idempotent before a command: asking twice keeps the one copy.
+    const copy = session.transport;
+    session.runAsSshUser();
+    expect(session.transport).toBe(copy);
+  });
+
+  test("sends today's argv: no --user, even for a site whose commands would carry one", async () => {
+    process.env.WP_STUB_MODE = "argv";
+    const calls = join(rootDir, "calls.log");
+    process.env.WP_STUB_CALLS = calls;
+    try {
+      const session = new CliSession({ ...local(), wpUser: "admin" });
+      session.runAsSshUser();
+
+      const result = await session.run(["job", "--format=count"]);
+
+      expect(result.stdout).toBe("backwpup job --format=count");
+      // No `--user` check before it either: the copy carries no login to check.
+      expect(readFileSync(calls, "utf8")).toBe("backwpup job --format=count\n");
+    } finally {
+      delete process.env.WP_STUB_CALLS;
+      rmSync(calls, { force: true });
+    }
+  });
+
+  test("refuses once a command was started, keeping the transport it ran with", async () => {
+    process.env.WP_STUB_MODE = "argv";
+    const site = local();
+    const session = new CliSession(site);
+    await session.run(["job"]);
+
+    expect(() => {
+      session.runAsSshUser();
+    }).toThrow(/before the scenario's first BackWPup command/);
+    expect(session.transport).toBe(site);
+  });
+
+  // A command that failed to run still counts: it may have reached the site.
+  test("refuses after a command that never answered", async () => {
+    process.env.WP_STUB_MODE = "slow";
+    const session = new CliSession(local());
+    await expect(session.run(["status"], 100)).rejects.toThrow(
+      /had not answered/,
+    );
+
+    expect(() => {
+      session.runAsSshUser();
+    }).toThrow(/before the scenario's first BackWPup command/);
+  });
+});
+
+test.describe("sshUserBoot", () => {
+  /** WP-CLI's PHP 8.5 noise, printed before anything that matters (measured on a twin). */
+  const NOISE =
+    "PHP Deprecated:  Using null as an array offset is deprecated in phar:///usr/local/bin/wp/Colors.php on line 95";
+
+  test("a WordPress that answers boots", () => {
+    expect(sshUserBoot({ exitCode: 0, stdout: "", stderr: "" })).toEqual({
+      kind: "boots",
+    });
+  });
+
+  // Each as WP-CLI printed it on a twin whose files the SSH user may not read.
+  for (const [what, stderr] of [
+    [
+      "an unreadable wp-config.php",
+      "PHP Warning:  file_get_contents(/var/www/site/public/wp-config.php): Failed to open stream: " +
+        "Permission denied in phar:///usr/local/bin/wp/Runner.php on line 755\n" +
+        "Error: Strange wp-config.php file: wp-settings.php is not loaded directly.",
+    ],
+    [
+      "unreadable core files",
+      "Error: This does not seem to be a WordPress installation.\nThe used path is: /var/www/site/public/",
+    ],
+    [
+      "a root it may not enter",
+      "sh: 1: cd: can't cd to /var/www/site/public: Permission denied",
+    ],
+  ] as const) {
+    test(`${what} is a refusal to skip on, quoting the line that says so`, () => {
+      const boot = sshUserBoot({
+        exitCode: 1,
+        stdout: "",
+        stderr: `${NOISE}\n${stderr}`,
+      });
+      expect(boot.kind).toBe("refused");
+      const reason = boot.kind === "refused" ? boot.reason : "";
+      expect(reason).toContain(
+        `(\`wp core is-installed\`: exit 1: ${stderr.split("\n")[0] ?? ""}`.slice(
+          0,
+          120,
+        ),
+      );
+      expect(reason).not.toContain("Deprecated");
+    });
+  }
+
+  // Not the SSH user's access: skipping would hide a broken site or a transient failure.
+  for (const [what, stderr] of [
+    [
+      "a database that is down",
+      "PHP Warning:  mysqli_real_connect(): (HY000/2002): No such file or directory\n" +
+        "Error: Error establishing a database connection.",
+    ],
+    ["a site that is not installed", ""],
+    [
+      "a fatal while booting",
+      "PHP Fatal error:  Uncaught Error: Call to undefined function x()",
+    ],
+  ] as const) {
+    test(`${what} is a failure, never a skip`, () => {
+      const boot = sshUserBoot({
+        exitCode: 1,
+        stdout: "",
+        stderr: `${NOISE}\n${stderr}`,
+      });
+      expect(boot.kind).toBe("failed");
+    });
+  }
+
+  test("a failure quotes WP-CLI's error line over its noise, masked", () => {
+    const boot = sshUserBoot({
+      exitCode: 1,
+      stdout: "",
+      stderr:
+        `${NOISE}\nError: Error establishing a database connection. token ghp_` +
+        "a".repeat(36) +
+        "\nsecond line",
+    });
+
+    const message = boot.kind === "failed" ? boot.message : "";
+    expect(message).toContain(
+      "failed as the SSH user (exit 1: Error: Error establishing a database connection.",
+    );
+    expect(message).not.toContain("second line");
+    expect(message).not.toContain("a".repeat(36));
+  });
+
+  test("says the exit alone when WP-CLI said nothing", () => {
+    const boot = sshUserBoot({ exitCode: 255, stdout: "", stderr: "" });
+    expect(boot.kind).toBe("failed");
+    expect(boot.kind === "failed" ? boot.message : "").toContain(
+      "failed as the SSH user (exit 255), and not",
+    );
   });
 });

@@ -6,19 +6,26 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  OUTSIDE_MAX_AGE_MINUTES,
   PLACED_FILE_CONTENT,
   PRIVATE_CATEGORY,
   PrivateFolder,
   preparedFolderPath,
+  privateFolderHome,
   privateFolderKey,
 } from "./private-folder";
-import type { LocalTransport } from "../../../common/config/types";
+import type { PrivateHome } from "./private-folder";
+import type {
+  LocalTransport,
+  SshTransport,
+} from "../../../common/config/types";
 
 /**
  * A stub `wp` on PATH. The snippet that prepares the folder is recognised by its `mkdir`, counted,
@@ -430,5 +437,132 @@ test.describe("PrivateFolder.release", () => {
       console.warn = warn;
       chmodSync(category, 0o755);
     }
+  });
+});
+
+/**
+ * Where commands run as the web server (the `site` identity state), mode `0700` keeps nothing from it,
+ * so the folder lives outside the docroot: made only by this call, removed afterwards, and what a
+ * killed run left swept once old.
+ */
+test.describe("PrivateFolder — outside the docroot", () => {
+  let outsideRoot: string;
+  const outside = (): Promise<PrivateHome> =>
+    Promise.resolve({ kind: "outside", root: outsideRoot });
+  const folderPath = (name: string): string => join(outsideRoot, name);
+
+  test.beforeEach(() => {
+    outsideRoot = mkdtempSync(join(tmpdir(), "bwp-private-outside-"));
+    process.env.WP_STUB_PREPARED_PATH = folderPath("e2e-private-abc-r0");
+  });
+
+  test.afterEach(() => {
+    rmSync(outsideRoot, { recursive: true, force: true });
+  });
+
+  test("is named e2e-private-<key> in that folder, never in the staging area", async () => {
+    const folder = new PrivateFolder(local(), "abc-r0", outside);
+    expect(await folder.absolutePath()).toBe(folderPath("e2e-private-abc-r0"));
+    expect(await folder.absolutePathTo("job.json")).toBe(
+      folderPath("e2e-private-abc-r0/job.json"),
+    );
+  });
+
+  // A shared directory: a path already there, a planted link included, must fail, never be reused.
+  test("is created by this call alone: no parents made, nothing already there reused", async () => {
+    await new PrivateFolder(local(), "abc-r0", outside).relativePath();
+    const php = readFileSync(`${capture}.prepare`, "utf8");
+    expect(php).toContain(
+      "if ( ! mkdir( $dir, 0700 ) ) {\n\tWP_CLI::error( 'could not create ' . $dir );\n}",
+    );
+    expect(php).not.toContain("is_dir(");
+    expect(php).not.toContain("wp_mkdir_p(");
+  });
+
+  test("is handed to a command relative to WP-CLI's working directory", async () => {
+    expect(
+      await new PrivateFolder(local(), "abc-r0", outside).relativePath(),
+    ).toMatch(/^(\.\.\/)+.*e2e-private-abc-r0$/);
+  });
+
+  test("removes its own folder and the stale ones, keeping young ones and other names", async () => {
+    const own = folderPath("e2e-private-abc-r0");
+    mkdirSync(own);
+    writeFileSync(join(own, "copy.tar"), "archive");
+    const stale = folderPath("e2e-private-killed-r0");
+    const young = folderPath("e2e-private-running-r0");
+    const other = folderPath("e2e-inbox-1-00");
+    for (const dir of [stale, young, other]) mkdirSync(dir);
+    const old = Date.now() / 1000 - (OUTSIDE_MAX_AGE_MINUTES + 5) * 60;
+    utimesSync(stale, old, old);
+    utimesSync(other, old, old);
+    // Young, but not brand new: only a sweep given the full age keeps it.
+    const recent = Date.now() / 1000 - (OUTSIDE_MAX_AGE_MINUTES - 5) * 60;
+    utimesSync(young, recent, recent);
+
+    const folder = new PrivateFolder(local(), "abc-r0", outside);
+    await folder.relativePath();
+    await folder.release();
+
+    expect(existsSync(own)).toBe(false);
+    expect(existsSync(stale)).toBe(false);
+    expect(existsSync(young)).toBe(true);
+    expect(existsSync(other)).toBe(true);
+  });
+
+  test("decides where it lives once, however many times it is asked", async () => {
+    let asked = 0;
+    const folder = new PrivateFolder(local(), "abc-r0", () => {
+      asked += 1;
+      return outside();
+    });
+    await folder.relativePath();
+    await folder.absolutePath();
+    await folder.absolutePathTo("job.json");
+    await folder.release();
+    expect(asked).toBe(1);
+  });
+
+  test("leaves the folder alone when the scenario never used it", async () => {
+    const own = folderPath("e2e-private-abc-r0");
+    mkdirSync(own);
+    await new PrivateFolder(local(), "abc-r0", outside).release();
+    expect(existsSync(own)).toBe(true);
+  });
+
+  test("reports a removal that failed rather than failing the scenario", async () => {
+    const own = folderPath("e2e-private-abc-r0");
+    mkdirSync(own);
+    writeFileSync(join(own, "copy.tar"), "archive");
+    chmodSync(own, 0o555);
+    const warnings: string[] = [];
+    const warn = console.warn;
+    console.warn = (message: string) => warnings.push(message);
+    try {
+      const folder = new PrivateFolder(local(), "abc-r0", outside);
+      await folder.relativePath();
+      await folder.release();
+      expect(warnings.join(" ")).toMatch(
+        /could not remove the scenario's private folder: rm exited 1/,
+      );
+    } finally {
+      console.warn = warn;
+      chmodSync(own, 0o755);
+    }
+  });
+});
+
+test.describe("privateFolderHome", () => {
+  test("is the staging area where commands run as the transport's user", async () => {
+    expect(await privateFolderHome(local())).toEqual({ kind: "staging" });
+    const ssh: SshTransport = {
+      mode: "ssh",
+      host: "example.test",
+      username: "ubuntu",
+      privateKeyPath: "/nonexistent/key",
+      rootDir: "/var/www/site",
+      runAs: false,
+    };
+    expect(await privateFolderHome(ssh)).toEqual({ kind: "staging" });
   });
 });

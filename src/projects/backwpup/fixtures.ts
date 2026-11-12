@@ -92,9 +92,9 @@ interface BackWPupFixtures {
    */
   markers: SiteMarkers;
   /**
-   * The scenario's own folder on the site, private to the transport's user, for the files a command
-   * writes or reads there — a download, an export, a key — which a command names as
-   * `{private folder}`. Free to request: nothing is created until a step uses it, and only then is it
+   * The scenario's own folder on the site, private to the identity site commands run as (outside the
+   * docroot when that is the web server), for the files a command writes or reads there — a download,
+   * an export, a key — which a command names as `{private folder}`. Free to request: nothing is created until a step uses it, and only then is it
    * removed afterwards, best-effort.
    */
   privateFolder: PrivateFolder;

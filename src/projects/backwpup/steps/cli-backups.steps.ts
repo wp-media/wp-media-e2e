@@ -22,8 +22,8 @@ import type { Transport } from "../../../common/config/types";
  * Steps for what `wp backwpup backup-delete` and `backup-download` do to the archives on a site.
  *
  * **Who made an archive decides what WP-CLI may do to it.** A run inside WP-CLI writes its archive
- * as the transport's user; a run handed to the web server writes it as the web server's, under that
- * server's own file mode. So the steps that make a scenario's backups say which of the two made them,
+ * as the identity site commands run as; a run handed to the web server writes it as the web server's,
+ * under that server's own file mode — the same user only in the `site` identity state. So the steps that make a scenario's backups say which of the two made them,
  * and record each archive as it was made — its digest, taken on the site — so a later step can say
  * whether a command left it untouched.
  *
@@ -63,7 +63,7 @@ async function recordBackups(
 
 /**
  * Backups made by running the scheduled job **inside WP-CLI** — so each archive, and each log,
- * belongs to the transport's user.
+ * belongs to the identity site commands run as.
  */
 Given(
   "the scheduled job has made {int} backup(s) inside WP-CLI",
@@ -99,7 +99,8 @@ Given(
 
 /**
  * The premise of a refusal: WP-CLI's user may not write the archive — the check the plugin itself
- * makes before it deletes one.
+ * makes before it deletes one. Asked through `cli.transport`, as the command under test will run
+ * (the SSH user once "WP-CLI runs as the SSH user, not the web server" was given).
  *
  * On a site whose web server and WP-CLI are one user, or where the web server's archives come out
  * writable by both, nothing the web server makes is out of WP-CLI's reach, so there is no refusal to
@@ -108,9 +109,9 @@ Given(
  */
 Given(
   "WP-CLI's user may not write the {word} backup",
-  async ({ site, archives, $testInfo }, which: string) => {
+  async ({ cli, archives, $testInfo }, which: string) => {
     const name = archives.named(runOrder(which));
-    const { file, folder } = await findBackup(site.transport, name);
+    const { file, folder } = await findBackup(cli.transport, name);
     expect(file, `${folder.dir} should hold ${name}`).toBeDefined();
     $testInfo.skip(
       file?.writable === true,

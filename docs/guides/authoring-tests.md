@@ -198,12 +198,19 @@ Fixtures for commands acting on files:
   the whole scenario. Backup-making steps (`Given the scheduled job has made 2 backups inside WP-CLI`,
   or `… through the web server`, which decides file ownership) record into it
   ([`support/archive-snapshot.ts`](../../src/projects/backwpup/support/archive-snapshot.ts)).
-- **`privateFolder`** is the scenario's own folder in the site's staging area, for files a command
-  writes or reads (a download, an export, a key). Private to the transport's user, because the web
-  server serves what it can read there and a file may be a whole database; handed over by a path worked
-  out on the site from where the folder and WP-CLI really are, so a symlink cannot redirect it. Free
-  until used; removed afterwards only if used
+- **`privateFolder`** is the scenario's own folder on the site, for files a command writes or reads
+  (a download, an export, a key). Mode `0700`, private to the identity site commands run as, because a
+  file may be a whole database. Outside the `site` state it is in the staging area, where the web
+  server serves what it can read; in `site` the web server is its owner, so it is
+  `/tmp/e2e-private-<name>` instead (made only by this call, never reused; one a killed run left is
+  swept once an hour old). Handed over by a path worked out on the site from where the folder and
+  WP-CLI really are, so a symlink cannot redirect it. Free until used; removed afterwards only if used
   ([`support/private-folder.ts`](../../src/projects/backwpup/support/private-folder.ts)).
+- **`cli.runAsSshUser()`** — via `Given WP-CLI runs as the SSH user, not the web server`, before the
+  scenario's first BackWPup command — runs that session's commands as the SSH user with no `--user`
+  (`asTransportUser`), for a scenario whose premise is two users; skipped, with the reason, where
+  the SSH user may not read the site; any other failure to boot WordPress as it fails the step. Steps judging what the command may do read the site
+  through `cli.transport`.
 - **`keys`** draws the scenario's encryption keys when a placeholder first names one
   ([`support/encryption-keys.ts`](../../src/projects/backwpup/support/encryption-keys.ts)).
 - **`jobExports`** records a digest of the site's jobs as each export is arranged — what "the site's

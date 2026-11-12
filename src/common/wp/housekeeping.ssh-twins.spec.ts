@@ -179,12 +179,11 @@ test.describe("SSH twins: ownership, residue, log and files by identity state", 
           "PHP Notice: e2e",
         );
         await clearDebugLog(transport);
+        // Emptied in place: still the web server's own, nothing handed over.
         await expect(
-          execAsTransport(transport, "test", [
-            "-e",
-            `${root}/wp-content/debug.log`,
-          ]),
-        ).resolves.toMatchObject({ exitCode: 1 });
+          ownerAndMode(transport, `${root}/wp-content/debug.log`),
+        ).resolves.toBe("www-data:www-data 644");
+        await expect(readDebugLog(transport)).resolves.toBe("");
         await directLogRoute(twin.stack, transport, root);
 
         await removeSiteResidue(transport, [DATA_DIR]);
@@ -316,6 +315,88 @@ test.describe("SSH twins: ownership, residue, log and files by identity state", 
           ),
         ).toBe(true);
         await ensurePluginAbsent(transport, SLUG);
+      });
+    });
+
+    // WP-CLI's PHP makes the log as `ubuntu` 644 when nothing is there, and PHP-FPM then cannot
+    // append: a clear hands such a log to the install's owner, the web server's group writing it.
+    test(`${twin.stack} legacy-777: a debug.log WP-CLI's user made is handed over by a clear, so the web server can append`, async ({
+      playwright,
+    }) => {
+      await onVariant(twin, "legacy-777", noCleanup, async (transport) => {
+        await verify(twin, transport, playwright.request, "fallback");
+        const root = await wpRootDir(transport);
+        const path = `${root}/wp-content/debug.log`;
+        const owner = await probeSiteOwnership(transport);
+        expect(
+          (
+            await execAsTransport(transport, "sh", [
+              "-c",
+              'rm -f -- "$1" && echo "PHP Deprecated: e2e" > "$1"',
+              "plant",
+              path,
+            ])
+          ).exitCode,
+        ).toBe(0);
+        // The login's umask decides the mode; its own group is never the web server's.
+        await expect(ownerAndMode(transport, path)).resolves.toMatch(
+          /^ubuntu:ubuntu 6[0-7]4$/,
+        );
+
+        await clearDebugLog(transport);
+
+        await expect(ownerAndMode(transport, path)).resolves.toBe(
+          `${owner?.user ?? ""}:${owner?.group ?? ""} 664`,
+        );
+        twinExec(twin.stack, [
+          "runuser",
+          "-u",
+          "www-data",
+          "--",
+          "sh",
+          "-c",
+          'echo "PHP Fatal error: e2e from the web" >> "$1"',
+          "append",
+          path,
+        ]);
+        // The appended line alone: the clear emptied what WP-CLI's user had written.
+        await expect(readDebugLog(transport)).resolves.toBe(
+          "PHP Fatal error: e2e from the web",
+        );
+        // The next clear empties it in place: the install's owner keeps it.
+        await clearDebugLog(transport);
+        await expect(ownerAndMode(transport, path)).resolves.toBe(
+          `${owner?.user ?? ""}:${owner?.group ?? ""} 664`,
+        );
+      });
+    });
+
+    // `transport.fileOwner: false` hands nothing over, so a log WP-CLI's user made would stay one
+    // PHP-FPM cannot append to: the clear removes it instead, and the web server makes its own.
+    test(`${twin.stack} legacy-777: with no handover, a debug.log WP-CLI's user made is removed by a clear, never kept as that user's`, async ({
+      playwright,
+    }) => {
+      await onVariant(twin, "legacy-777", noCleanup, async (siteTransport) => {
+        await verify(twin, siteTransport, playwright.request, "fallback");
+        const transport: Transport = { ...siteTransport, fileOwner: false };
+        const root = await wpRootDir(transport);
+        const path = `${root}/wp-content/debug.log`;
+        expect(
+          (
+            await execAsTransport(transport, "sh", [
+              "-c",
+              'rm -f -- "$1" && echo "PHP Deprecated: e2e" > "$1"',
+              "plant",
+              path,
+            ])
+          ).exitCode,
+        ).toBe(0);
+
+        await clearDebugLog(transport);
+
+        await expect(
+          execAsTransport(transport, "test", ["-e", path]),
+        ).resolves.toMatchObject({ exitCode: 1 });
       });
     });
 
