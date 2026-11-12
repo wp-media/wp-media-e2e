@@ -73,17 +73,23 @@ import type { Transport } from "../config/types";
  * cell resolves to the same owner GNU would report. Both reads are confined to `./owner-probe.ts`
  * (as the transport's user, whatever the site runs as) so a future BSD branch stays a local change.
  *
- * **Who "the site's commands" are.** In the `site` identity state (`./site-identity.ts`) commands
- * run as the identity, so {@link planOwnership} compares the owner with **that** identity, read off
- * the state's run probe, not with the transport's user; every other state runs them as the
- * transport's user, as before.
+ * **The `site` identity state needs none of this.** There (`./site-identity.ts`) every command runs
+ * as the web server's own user and group, under the site's umask, so what the suite writes is
+ * already the web server's, exactly as if the website had written it: {@link planOwnership} answers
+ * `unnecessary` without comparing anything, and no privileged command runs. `transport.fileOwner`
+ * then only counts as `false` (disabled) or when malformed (reported); a declared owner is not
+ * enforced, since the writer is the identity the operator chose or the pre-flight verified. Every
+ * other state runs commands as the transport's user, and the handover above applies as before.
  */
 
 /** What {@link normalizeOwnership} did. It never throws, so this is the whole result. */
 export type OwnershipOutcome =
   /** Ownership was corrected and the result verified by re-reading it. */
   | "normalized"
-  /** The transport's user already owns the tree as the site expects — nothing was run. */
+  /**
+   * Nothing was run: the transport's user already owns the tree as the site expects, or the site is
+   * in the `site` identity state, where commands already write as the web server.
+   */
   | "unnecessary"
   /**
    * Nothing was run: no target ownership could be resolved, the transport's own identity could not
@@ -132,7 +138,7 @@ const worldWriteNotices = new Set<string>();
  * `X` rather than `x` so directories become traversable without making PHP files executable, and
  * `+` throughout so a mode is only ever added — this can never tighten a host's permissions.
  *
- * @param identity - who the site's commands run as, from `parseIdentity` (or {@link fromRunIdentity}).
+ * @param identity - the transport's user, from `parseIdentity` (the `site` state never grants).
  * @param target - the ownership the tree is being given, which may be known only by name.
  * @returns the mode argument for `chmod -R`, and whether it grants world-write.
  */
@@ -202,10 +208,14 @@ async function transportIdentity(
   return found;
 }
 
+/** Who this site's commands run as: the `site` state's identity, else the transport's own user. */
+type CommandIdentity =
+  | { readonly kind: "site"; readonly identity: RunIdentity }
+  | { readonly kind: "transport"; readonly identity: TransportIdentity };
+
 /**
- * Who this site's commands run as: the identity of the `site` state (the run probe's `id`), else the
- * transport's own user. Two caches never mixed: the state's, keyed by install and `runAs`, and
- * {@link transportIdentity}'s, which always means the transport's user.
+ * Who this site's commands run as. Two caches never mixed: the state's, keyed by install and
+ * `runAs`, and {@link transportIdentity}'s, which always means the transport's user.
  *
  * @param transport - the target site's transport.
  * @returns the identity, or `undefined` when it could not be read (a transport failure resolving the
@@ -213,33 +223,32 @@ async function transportIdentity(
  */
 async function commandIdentity(
   transport: Transport,
-): Promise<TransportIdentity | undefined> {
+): Promise<CommandIdentity | undefined> {
   let state: IdentityState;
   try {
     state = await resolveSiteIdentity(transport);
   } catch {
-    // Not an answer: see `detectSiteOwnership`.
+    // Not an answer: see `detectSiteOwnership`. Never the transport's user instead: on a `site`
+    // install that would plan a root handover of what the identity wrote.
     return undefined;
   }
-  return state.kind === "site"
-    ? fromRunIdentity(state.identity)
-    : transportIdentity(transport);
+  if (state.kind === "site") return { kind: "site", identity: state.identity };
+  const identity = await transportIdentity(transport);
+  return identity === undefined ? undefined : { kind: "transport", identity };
 }
 
 /**
- * A run identity as {@link grantModeFor} reads one.
+ * The ownership files written as a run identity get: its user and primary group.
  *
  * @param identity - the `site` state's identity.
- * @returns the same ids and groups; the user's name only when the host mapped it (a name of digits
- * equal to the uid is the id standing in for one).
+ * @returns its user and primary group, by name and by id.
  */
-export function fromRunIdentity(identity: RunIdentity): TransportIdentity {
+export function ownershipOf(identity: RunIdentity): SiteOwnership {
   return {
+    user: identity.user,
+    group: identity.group,
     uid: identity.uid,
     gid: identity.gid,
-    groupIds: identity.groupIds,
-    groupNames: identity.groupNames,
-    ...(identity.user !== String(identity.uid) ? { user: identity.user } : {}),
   };
 }
 
@@ -405,6 +414,17 @@ async function resolveDeclaredIds(
 }
 
 /**
+ * What the `site` state's files may differ from, for the pre-flight to say: the writer there is the
+ * identity, whatever these are.
+ */
+export interface SiteStateOwnership {
+  /** The install's owner as `stat` read it; absent when it could not be read. */
+  readonly installOwner?: SiteOwnership;
+  /** A declared `transport.fileOwner`, which the `site` state does not enforce. */
+  readonly declared?: OwnerSpec;
+}
+
+/**
  * What this site needs done to it, decided without doing any of it.
  *
  * Extracted so that **reporting and acting share one decision.** Pre-flight tells an operator what
@@ -421,8 +441,16 @@ export type OwnershipPlan =
   | { readonly kind: "unknown-ownership" }
   /** Which user the site's commands run as could not be read. */
   | { readonly kind: "unknown-identity"; readonly target: SiteOwnership }
-  /** The transport's user already owns the install exactly as the site expects. */
-  | { readonly kind: "unnecessary"; readonly target: SiteOwnership }
+  /**
+   * Nothing to hand over. `target` is the ownership the suite's files get: the install's, which the
+   * transport's user already has, or — `site` set — the `site` state's identity, since commands
+   * run as the web server there.
+   */
+  | {
+      readonly kind: "unnecessary";
+      readonly target: SiteOwnership;
+      readonly site?: SiteStateOwnership;
+    }
   /** Ownership must be handed over, and this is the grant that keeps both users working. */
   | {
       readonly kind: "grant";
@@ -460,16 +488,29 @@ export async function planOwnership(
     return { kind: "bad-owner", message: errorMessage(error) };
   }
 
-  const [detected, identity] = await Promise.all([
+  const [detected, commands] = await Promise.all([
     detectSiteOwnership(transport),
     commandIdentity(transport),
   ]);
+  // Before the ownership is even needed: the identity writes as the web server, so whatever the
+  // install's owner reads as (or not at all), nothing is handed over.
+  if (commands?.kind === "site") {
+    return {
+      kind: "unnecessary",
+      target: ownershipOf(commands.identity),
+      site: {
+        ...(detected === undefined ? {} : { installOwner: detected }),
+        ...(declared === undefined ? {} : { declared }),
+      },
+    };
+  }
   let target = resolveTarget(declared, detected);
   if (target === undefined) return { kind: "unknown-ownership" };
   // A declaration made by name carries no ids until the host is asked for them.
   if (declared !== undefined && !Number.isInteger(target.uid)) {
     target = (await resolveDeclaredIds(transport, declared)) ?? target;
   }
+  const identity = commands?.identity;
   if (identity === undefined) return { kind: "unknown-identity", target };
 
   // Nothing to correct: WP-CLI already runs as the account that owns this install, which is the
@@ -486,8 +527,9 @@ export async function planOwnership(
  * transport's user so it can still be managed from WP-CLI.
  *
  * Never throws, and does nothing at all on a target that already has it right — a `docker` cell,
- * where WP-CLI runs as the same user that owns the files, takes the `"unnecessary"` path without
- * running a single privileged command.
+ * where WP-CLI runs as the same user that owns the files, and any site in the `site` identity state,
+ * where commands run as the web server, take the `"unnecessary"` path without running a single
+ * privileged command.
  *
  * @param transport - the target site's transport.
  * @param sitePath - what to fix, **relative to the WordPress root** (e.g.

@@ -1,6 +1,6 @@
 # Phase 12 — Run as the site: the web server's identity for every site command
 
-Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5 and 12.6 done 2026-11-11. Parent:
+Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11. Parent:
 [e2e-modernization-plan.md](e2e-modernization-plan.md) (§3 phase table). Reverses that plan's §8.2
 rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of WP Rocket's port
 ([phase-6 plan §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket)).
@@ -265,7 +265,7 @@ Code never cites this plan; docs may.
 | 12.4 | Exec wiring: wrapper, `execAsTransport`, probe callers moved, stderr noise (done 2026-11-11) | 12.1, 12.3 | — | M / H |
 | 12.5 | Staging through an inbox; staging owned by another identity (done 2026-11-11) | 12.4 | 12.6, 12.7 | S / M |
 | 12.6 | `--user=<login>` (done 2026-11-11) | 12.4 | 12.5, 12.7 | S / M |
-| 12.7 | Ownership, residue, log, files in the `site` state | 12.4 | 12.5, 12.6 | M / M |
+| 12.7 | Ownership, residue, log, files in the `site` state (done 2026-11-11) | 12.4 | 12.5, 12.6 | M / M |
 | 12.8 | Install outputs, handed over in fallback | 12.7 | 12.9, 12.10 | S / S |
 | 12.9 | Pre-flight and healthcheck reports, banner, sudoers checks | 12.3–12.6 | 12.8, 12.10 | M / M |
 | 12.10 | BackWPup on the new system; the two-user scenario opts back; private folder | 12.0b, 12.5–12.7; step 4 also 12.9 | 12.8, 12.9 (steps 1–3) | M / M |
@@ -563,8 +563,8 @@ Documented in [wordpress-automation.md → Transport & exec](../architecture/wor
   `readlink -f`, docker `pwd`, and the pre-flight's `ls -d <root>/.` check (its hint names the SSH
   user). The pre-flight's `wp --info` and `core is-installed` stay `exec` (as the site in `site`).
 - **`planOwnership`** reads who commands run as: `site` → the state's identity (`RunIdentity` gained
-  `groupIds`/`groupNames`, `fromRunIdentity`); else `probeIdentity`'s cache (transport user only). A
-  throw resolving the state → `unknown-identity`, not cached.
+  `groupIds`/`groupNames`); else `probeIdentity`'s cache (transport user only). A throw resolving the
+  state → `unknown-identity`, not cached. (12.7 replaced the `site` comparison; see there.)
 - **Overlays:** `cells.sh` writes `"runAs": "auto"`. Without a verdict (no 12.9 yet) runs and the
   healthcheck stay `fallback/unverified` = as today.
 - **Test seams:** `__fixtures__/fake-sudo.ts` `SKIP_SUDO_OPTIONS` (`-n`, `-u`/`-g` exported, `--` or
@@ -616,8 +616,9 @@ Documented in [wordpress-automation.md → Transport & exec](../architecture/wor
 
 Left open (owners named):
 - **12.5 (done):** staging in `site` (above, measured).
-- **12.7:** `ownership.ts`'s `warnOnce` dedupes per install + reason across states (an
-  `asTransportUser` copy shares an install's warnings).
+- **12.7 (decided: kept):** `ownership.ts`'s `warnOnce` dedupes per install + reason across states
+  (an `asTransportUser` copy shares an install's warnings). In `site` only `bad-input`/`bad-owner` can
+  warn (state-independent text); every other state warns the same text and fix for the same reason.
 - **12.9:** the `wp --info` gate's hint still names the SSH user's `PATH`; root's sudo lines keep
   the hostname noise (only the wrapper strips it; the report's `/etc/hosts` fix covers both).
 - **Known limit:** a program run as the site that itself exits 1 printing only `sudo:` lines is read
@@ -725,16 +726,77 @@ Documented in [wordpress-automation.md → `--user`](../architecture/wordpress-a
   ("After a backup has run…", "A job run in the background…"; 12.10); in `site` all 15 fail at the
   `@plugin` hook's staging `mkdir`, with and without `--user` (12.9).
 
-### 12.7 — Ownership, residue, log and files in the `site` state
+### 12.7 — Ownership, residue, log and files in the `site` state (done 2026-11-11)
 
-- `planOwnership` in `site` → `unnecessary` (the writer is the web user); the module header says so.
-  Fallback unchanged: grant, then root `chown`.
-- Residue: unprivileged first (as the site), then root. Twin spec: zero root escalations in `site`.
-- `log.ts`: root fallbacks stay; in `site` they never run (twin assert).
-- `files.ts`: `is_writable` means "writable by the identity commands run as". Update the TSDoc of
-  `listLocatedFiles`/`SiteFile` (`files.ts:72-75`).
-- Tests: a twin spec takes a tiny fake plugin through `stageAndInstallPlugin`, data directories and
-  residue removal, asserting owners, modes and no `sudo -n --`.
+Documented in [wordpress-automation.md → File ownership](../architecture/wordpress-automation.md#file-ownership-wpownershipts)
+and [Elevated housekeeping](../architecture/wordpress-automation.md#elevated-housekeeping).
+- **`planOwnership`:** `disabled` and `bad-owner` first (config), then `site` → `unnecessary`, before
+  `unknown-ownership`, the declared ids and any comparison; `target` = `ownershipOf(identity)`, `site`
+  = `{ installOwner?, declared? }` for the pre-flight. A declared `fileOwner` is neither resolved (no
+  `id -u`/`getent`) nor enforced in `site`. `commandIdentity` returns `site`|`transport`; a throw
+  resolving the state → `undefined` (`unknown-identity`), never the transport's user. `fromRunIdentity`
+  deleted (dead). Fallback/disabled unchanged (grant, then root `chown`).
+- **Pre-flight (`checkFileOwnership`, exported, returns checks):** in `site` "File ownership" names the
+  identity as the writer, plus the install's owner when it differs (uid or gid); a declared
+  `fileOwner` naming someone else (either half, by name or id) adds a passing "File owner override"
+  line. Elsewhere `unnecessary` keeps "the transport's user already owns the install".
+- **Residue, log:** both already ran "as themselves" through `exec` (the site in `site`) and escalated
+  only what failed; the root fallbacks stay (a survivor another user left, a log the identity is
+  refused). No state gate on root: gating would let an unreadable log pass the fatal gate. **Audit
+  fix:** a data directory root had to `mkdir -p` in `site` stayed `root:root` (only `0777` hid it):
+  now the missing components (read as root before the `mkdir`, from the target up to the first
+  existing one, never past the root) get a root `chown -h -- <uid>:<gid>`, each behind
+  `assertSafeElevatedTarget`; a failed `chown` warns (best-effort). Other states unchanged.
+- **`files.ts`:** `SiteFile.writable`/`listLocatedFiles` TSDoc: the identity commands run as.
+- **Root detection on the twins:** sudo's own log (`/var/log/sudo-twin.log`), with a drop-in
+  `/etc/sudoers.d/99-e2e-log-allowed` (`Defaults:ubuntu log_allowed`, `loglinelen=0`; removed in
+  `finally`, by the reset, and by `env:cells:up` from a twin whose spec lock has no live pid) so each
+  allowed call is one `USER=` line. Negative control: one
+  `execElevated(true)` → exactly one `USER=root … COMMAND=…/true` line.
+- **Specs:** `housekeeping.site.ssh.spec.ts` (19, fake sudo, per-operand refusals as the site only;
+  identity `www-data:web` 33/82 so swaps show): `site` unnecessary with another owner / unreadable
+  owner / declared `fileOwner` (no `getent`), a state that cannot resolve → `unknown-identity`, no
+  root; disabled/bad-owner kept; `runAs` false/absent, `asTransportUser`, `fallback/no-sudo` → exact
+  root argv `-n true`, `chmod -R`, `chown -Rh`; data dirs as the site (`test`,`mkdir`,`chmod`); a
+  refused `mkdir` → root `test -e` up to the first existing, `mkdir -p`, `chown -h -- 33:82` of only
+  what was missing (nested parents too); a failed root `mkdir` hands nothing over; fallback hands
+  nothing back itself; residue removed with no root, root `rm` only for the refused survivor;
+  `debug.log` via `wp eval`, direct read/removal as the site, root only after a refusal.
+  `preflight.spec.ts` +8 (`checkFileOwnership` lines). `ownership.spec.ts`: `fromRunIdentity`'s 2
+  removed, `ownershipOf` 1 added. `exec.site.ssh.spec.ts` (12.4): 2 expectations gained
+  `site: { installOwner }` (the plan's new field; same decision). `housekeeping.ssh-twins.spec.ts`
+  (8: both stacks): `site` — fake plugin through `stageAndInstallPlugin` (`www-data:www-data`
+  755/644, `unnecessary`), data dir 777, a written file 644, `listFiles` writable `true` / as-today
+  copy `false`, log read + cleared through `wp eval` and through the direct route, residue + plugin +
+  staging removed, zero `USER=root`, >10 `USER=www-data`; a root-owned `uploads` → root makes the data
+  dir and its parent, both handed to `www-data` (`chown -h -- 33:33 …/made …/e2e-housekeeping`),
+  `uploads` stays `root:root 755`, root only `true`/`test`/`mkdir`/`chown`; a root-owned survivor →
+  root only `true`/`rm`/`test`; `legacy-777` → the install's owner via a root `chown -Rh`.
+- **Twin spec hygiene (audit):** the direct log route's `wp-cli.yml` goes **above** the docroot
+  (WP-CLI searches upward; measured on the twin) and requires a file exiting 1 only for 120 s (an
+  expired copy boots, measured; `wp-cli.yml` removed first, since one requiring a missing file breaks
+  WP-CLI); cleanups independent (drop-in, resting reset, host cleanup each run; `work`'s error wins);
+  the probe zip is built per test in its output folder (emptied by the next run). SIGKILL mid-test
+  (log route planted) left: the drop-in, the two files above the root, probe plugin, data dir,
+  `.e2e_temp`, the zip, the lock folder; WP-CLI booted again once the 120 s passed, `env:cells:up`
+  removed the drop-in, `env:cells:reset` the rest, the next unit run the zip, `withTwin` takes the
+  stale lock.
+- **Mutants (46: 39 unit + 7 twin, all killed, in an isolated copy):** the 19 above (reconstructed: site branch off /
+  always; ids resolved before the site branch; `ownershipOf` swaps; site identity read as the
+  transport's; prepare root-first / always escalating; removal root-for-all / root-first; log read
+  escalating always; clear escalating after removal; log root fallbacks removed; chown before chmod;
+  twins: branch always on `legacy-777`, prepare always escalating, removal root-first, log read
+  escalating always, clear escalating after removal); the audits' M1–M11 (M1/M2/M8/M9 survived the
+  audit: `ownershipOf` unit test, distinct ids, the pre-flight line tests, the resolve-throw test —
+  `exec.site.ssh.spec.ts` already caught M9 but was outside the audit's spec list); A1 (9 + 2 twin: no
+  handback, missing read as the identity, no stop at the first existing, handback in every state,
+  ids swapped, chown after a failed mkdir, existing parent handed over, no `-h`, never wired; twins:
+  no handback — the bug reproduced on the twin — and existing parent handed over); A2 (7: gid ignored,
+  owner sentence dropped / wrong, override on one matching half, ids not the identity, override
+  failing, site branch ignored).
+- **Deferred to 12.10:** `DATA_DIR_MODE` `0777` is still applied in `site`, where one user writes;
+  it can now be narrowed there safely (root-made data dirs are handed back to the identity, so the
+  mode no longer hides a `root:root` owner). Decide with the private folder.
 
 ### 12.8 — Install outputs
 
@@ -805,6 +867,8 @@ Documented in [wordpress-automation.md → `--user`](../architecture/wordpress-a
    - Verify `backup-download`, job export and the encryption-key flows accept it.
    - Remove it in the scenario's teardown; sweep `/tmp/e2e-private-*` older than 1 h.
    - Update its TSDoc and authoring-tests.md "BackWPup's fixtures".
+   - Decide `residue.ts`'s `DATA_DIR_MODE` (`0777`, for two users) in `site`, where one user writes
+     (from 12.7): safe to narrow there now, since every data dir in `site` ends the identity's.
 4. **Compare:** the suite with `runAs: "auto"` in `site` and `site-775`.
    - A scenario passing in the baseline that fails or skips is investigated: a two-user outcome gets
      the step; anything else is fixed in the shared layer.

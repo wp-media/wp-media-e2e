@@ -10,6 +10,7 @@ import {
   wpRootDir,
 } from "./exec";
 import { normalizeOwnership } from "./ownership";
+import { resolveSiteIdentity } from "./site-identity";
 import {
   PROTECTED_SITE_PATHS,
   assertSafeElevatedTarget,
@@ -568,7 +569,9 @@ async function prepareOneDataDir(
   // `--` ends option parsing, as the ownership commands do. The guard above already proves
   // `target` is absolute so it cannot begin with a dash — this keeps that from being the only
   // thing standing between a future refactor and a flag.
-  await escalateIfDenied(transport, "mkdir", ["-p", "--", target]);
+  await escalateIfDenied(transport, "mkdir", ["-p", "--", target], (mkdir) =>
+    handBackWhatRootMakes(transport, root, target, describe, mkdir),
+  );
   await escalateIfDenied(transport, "chmod", ["--", DATA_DIR_MODE, target]);
   // Last, so the grant is applied while the directory is still ours to change: normalising first
   // would hand it to the site's user and make the mode above need privileges it did not need.
@@ -576,7 +579,70 @@ async function prepareOneDataDir(
 }
 
 /**
- * Runs `file args…` as the transport's user, retrying with privileges if it was refused.
+ * In the `site` identity state, hands what a root `mkdir -p` of `target` creates back to the
+ * identity, so the data directory (and any parent it had to make) ends the web server's, as if the
+ * site had made it — else root's, which only {@link DATA_DIR_MODE} would hide. Every other state
+ * leaves it to {@link normalizeOwnership}, as before.
+ *
+ * What was missing is read **as root before** the `mkdir`, from `target` up to the first component
+ * that exists, never past `root`: so only what this call created is handed over, never a parent that
+ * was already there (the identity might not see it, and would then hand it over). The `chown` is
+ * root's, `-h` (never through a link), each path behind {@link assertSafeElevatedTarget}. A failed
+ * `chown` warns and leaves the directory working (the mode above still opens it): best-effort, as
+ * {@link normalizeOwnership} is.
+ *
+ * @param transport - the target site's transport.
+ * @param root - the site's resolved WordPress root.
+ * @param target - the data directory, absolute, already proved inside `root`.
+ * @param describe - the refusal message {@link assertSafeElevatedTarget} throws with.
+ * @param mkdir - the root `mkdir -p` itself.
+ * @returns what that `mkdir` returned.
+ * @throws Error if a path to hand over fails the guard, or the transport fails.
+ */
+async function handBackWhatRootMakes(
+  transport: Transport,
+  root: string,
+  target: string,
+  describe: (reason: string) => string,
+  mkdir: () => Promise<ExecResult>,
+): Promise<ExecResult> {
+  const state = await resolveSiteIdentity(transport);
+  if (state.kind !== "site") return mkdir();
+  const missing: string[] = [];
+  for (
+    let path = target;
+    path !== root && path.startsWith(`${root}/`);
+    path = posix.dirname(path)
+  ) {
+    if ((await execElevated(transport, "test", ["-e", path])).exitCode === 0) {
+      break;
+    }
+    missing.push(path);
+  }
+  const made = await mkdir();
+  if (made.exitCode !== 0 || missing.length === 0) return made;
+  for (const path of missing) assertSafeElevatedTarget(path, root, describe);
+  const { uid, gid } = state.identity;
+  const chown = await execElevated(transport, "chown", [
+    "-h",
+    "--",
+    `${String(uid)}:${String(gid)}`,
+    ...missing,
+  ]);
+  if (chown.exitCode !== 0) {
+    console.warn(
+      `[wp/residue] ${describeTarget(transport)}: root made ${missing.join(", ")} but could not hand ` +
+        `${missing.length === 1 ? "it" : "them"} to ${state.identity.user}:${state.identity.group} ` +
+        `(exit ${String(chown.exitCode)}: ${chown.stderr.trim() || "no output"}); left root's, ` +
+        `opened ${DATA_DIR_MODE}.`,
+    );
+  }
+  return made;
+}
+
+/**
+ * Runs `file args…` as the site's commands run (the identity in the `site` state, else the
+ * transport's user), retrying with privileges if it was refused.
  *
  * Used for the preparation steps above, where a non-zero exit means "not permitted" rather than a
  * legitimate answer. Reports the *unprivileged* failure when escalation is unavailable or also fails,
@@ -585,20 +651,25 @@ async function prepareOneDataDir(
  * @param transport - the target site's transport.
  * @param file - the command to run.
  * @param args - its arguments, as an array so nothing is shell-interpreted.
+ * @param elevated - wraps the privileged retry (given it as a thunk), for a step that must act around
+ * it; default: just the retry.
  * @throws Error naming the site, the command, the path and how far privileges reached.
  */
 async function escalateIfDenied(
   transport: Transport,
   file: string,
   args: string[],
+  elevated: (retry: () => Promise<ExecResult>) => Promise<ExecResult> = (
+    retry,
+  ) => retry(),
 ): Promise<void> {
   const first = await exec(transport, file, args);
   if (first.exitCode === 0) return;
 
   const elevation = await elevationSupport(transport);
   if (elevation === "available") {
-    const elevated = await execElevated(transport, file, args);
-    if (elevated.exitCode === 0) return;
+    const retried = await elevated(() => execElevated(transport, file, args));
+    if (retried.exitCode === 0) return;
   }
   throw new Error(
     `[wp/residue] ${describeTarget(transport)}: could not \`${file} ${args.join(" ")}\` ` +

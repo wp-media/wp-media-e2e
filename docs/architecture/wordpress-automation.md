@@ -176,11 +176,17 @@ Limits:
 - **Second, never first**: callers try as themselves and escalate only what failed, so a
   correctly-permissioned host never runs a privileged command, not even the probe. Two exceptions. Ownership normalisation elevates `chmod` and `chown` directly (only the owner or root may `chown`,
   and the owner is by then known not to be us), yet decides before probing and skips both when the
-  transport user already owns the install ([File ownership](#file-ownership-wpownershipts)). BackWPup's guard around `wp backwpup restore` (`support/content-copy.ts`) copies `wp-content` and
+  transport user already owns the install or the site is in the `site` identity state ([File ownership](#file-ownership-wpownershipts)). BackWPup's guard around `wp backwpup restore` (`support/content-copy.ts`) copies `wp-content` and
   puts it back as root from the start (only root reads every file and restores every owner), refusing
   to run the command where it cannot; so does settling a copy a reboot orphaned
   (`support/content-copy-leftover.ts`). Root acts on the copy only inside its directory, once proved
   root's, not a link and — for the run that made it — still holding its token (`IN_COPY_SCRIPT`).
+- **In the `site` state "as themselves" is the web server's identity**, which owns what the suite and
+  the plugin write: ownership, residue removal, data directories and `debug.log` run no root command
+  there unless the identity is refused (a survivor another user left), then only for that
+  (`housekeeping.ssh-twins.spec.ts` asserts zero `USER=root` lines in the twins' sudo log). A data
+  directory root had to create (with any parent it made) is handed back to the identity by a root
+  `chown -h -- <uid>:<gid>`; what was missing is read as root first, so no existing parent changes owner.
 - **Never interactive**: `sudo -n` fails instead of waiting for a password; `--` stops sudo parsing
   the target's flags.
 - **Refusable per site** (`transport.elevate: false`), enforced by `execElevated` throwing. The probe
@@ -424,6 +430,9 @@ Reads and categorises `wp-content/debug.log` to catch PHP errors a UI assertion 
 - Clearing **removes** the file (needs write on the directory, usually the transport user's) rather
   than truncating it (needs write on the file, the web server's); WordPress recreates it. If it
   survives both routes, `clearDebugLog` throws.
+- The direct read and removal try as the site's commands first and escalate to
+  [root](#elevated-housekeeping) only when refused. In the `site` identity state the web server owns
+  the log and its directory, so the root fallbacks are kept but not needed unless the identity is refused.
 
 API: `clearDebugLog(transport)` (in a `Before` hook), `readDebugLog(transport)` (`""` if absent),
 `scanDebugLog(transport, opts?)` → [`DebugLogScan`](../../src/common/wp/log.ts)
@@ -471,7 +480,8 @@ directories** on the QA cell before this existed.
 - `removeSiteResidue(transport, paths)` validates **every** path before removing any, removes them,
   and **confirms they are gone** rather than trusting `rm -rf`'s exit code. Every path is attempted;
   the error names all survivors.
-- **Two passes**: as the transport's user, then whatever survived
+- **Two passes**: as the site's commands run (the transport's user; the web server's identity in the
+  `site` state), then whatever survived
   [with privileges](#elevated-housekeeping) — a correctly-permissioned host never elevates, one whose
   data the web server owns still ends clean. Before a privileged `rm -rf`, `rootDir` must be plausible
   (absolute, not top-level, target resolving inside it) — the half `normaliseResiduePath` cannot see.
@@ -595,6 +605,15 @@ dirs and `664` files; the web server (`www-data`, say) is denied its next write:
 directory, an update, a wp-admin delete. It is **not** the "WordPress wants FTP credentials" symptom:
 `get_filesystem_method()` (WP 7.1 core, read on the cell) compares a _core_ file's owner with a temp
 file's, both `www-data`, so it picks `direct` and then fails with a plain permission error.
+
+**In the `site` identity state none of this applies**: commands run as the web server's user and group
+under the site's umask, so what the suite writes is already the web server's. `planOwnership` answers
+`unnecessary` before comparing anything (`target`: the identity's ownership; `site`: the install's
+owner when readable, and the declared `fileOwner`) and no privileged command runs. `transport.fileOwner` then counts only as `false`
+(`disabled`) or when malformed (`bad-owner`); a declared owner is neither resolved nor enforced (the
+pre-flight's "File owner override" line says so when it names someone else, and "File ownership"
+names the identity as the writer, plus the install's owner when that differs). Every other state keeps
+the handover below.
 
 **The owner is detected, never assumed**: `stat -c '%U:%G:%u:%g'` on `wp-content` (else the WP root).
 It is not always the web server — a docroot deployed over SFTP belongs to the deployment account, the
@@ -735,9 +754,10 @@ pre-flight writes its verdict (Phase 12, [plan](../plans/phase-12-site-identity-
   `root:root` → `no-identity`, no sudo call).
 - `asTransportUser(transport)`: a frozen copy without `wpUser`, `runAs: false` over `ssh`;
   idempotent; its state is `disabled/as-transport-user` and never reads the original's cache.
-- `planOwnership` compares the owner with **who commands run as**: the `site` state's identity (the
-  run probe's `id`, groups included: `RunIdentity.groupIds`/`groupNames`, `fromRunIdentity`), else
-  the transport's user (`probeIdentity`'s cache, which always means that user).
+- `planOwnership` in the `site` state answers `unnecessary` with `target` the identity's ownership
+  (`ownershipOf`) and `site` the install's owner and declared `fileOwner` (for the pre-flight's lines);
+  elsewhere it compares the owner with the transport's user (`probeIdentity`'s cache). A state that
+  cannot be resolved is `unknown-identity`, never the transport's user.
 
 **The web probe** ([`wp/web-identity.ts`](../../src/common/wp/web-identity.ts)) asks the web server
 who PHP runs as: `probeWebIdentity(site, request)` sweeps leftovers, writes
@@ -894,8 +914,9 @@ All computed on the site, so nothing large moves.
   `options` (`EvalPhpOptions`: `skipPlugins`, `skipThemes`) keeps their output out when only the file
   matters.
 - `listFiles(transport, dir, { digests?, missingAsEmpty? })` → the regular files directly inside: name,
-  size, mtime, whether the **transport's** user may write it (`is_writable()` inside WP-CLI, what a
-  plugin command checks before deleting), and SHA-256 on request; links and subdirectories left out. A
+  size, mtime, whether the identity site commands run as may write it — the web server's in the
+  `site` state, else the transport's user (`is_writable()` inside WP-CLI, what a plugin command checks
+  before deleting), and SHA-256 on request; links and subdirectories left out. A
   missing directory **throws** — "no files" would pass a "was removed" assertion on a wrong path; only
   a directory a scenario may never have made passes `missingAsEmpty`.
 - `listLocatedFiles(transport, locate, what, options)` → the same for a directory only the site can

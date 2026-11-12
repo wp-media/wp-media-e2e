@@ -12,6 +12,7 @@ import { join } from "node:path";
 
 import {
   buildReport,
+  checkFileOwnership,
   settleSiteLeftovers,
   transportLabel,
   verifyPool,
@@ -509,6 +510,130 @@ test.describe("verifySite — ownership & elevation reporting", () => {
  * `warnAboutElevation`, and the whole suite would still be green. `sudo` is shimmed rather than
  * real: the answer must not depend on the sudoers file of whatever machine runs the tests.
  */
+test.describe("checkFileOwnership — the site identity state names its writer", () => {
+  // Every id distinct, so a swapped or misread one shows.
+  const IDENTITY = { user: "www-data", group: "web", uid: 33, gid: 82 };
+  const DEPLOY = { user: "deploy", group: "deploy", uid: 1001, gid: 1002 };
+
+  test("names the identity as the writer, nothing handed over, no override line", () => {
+    const checks = checkFileOwnership(
+      {
+        kind: "unnecessary",
+        target: IDENTITY,
+        site: { installOwner: IDENTITY },
+      },
+      "available",
+    );
+
+    expect(checks).toEqual([
+      {
+        name: "File ownership",
+        ok: true,
+        detail:
+          "Files are written as www-data:web, the web server's identity this site's commands run as " +
+          "(the `site` identity state), so nothing is handed over.",
+      },
+    ]);
+  });
+
+  test("says when the install's owner is someone else, and still passes", () => {
+    const [ownership, ...rest] = checkFileOwnership(
+      { kind: "unnecessary", target: IDENTITY, site: { installOwner: DEPLOY } },
+      "unavailable",
+    );
+
+    expect(ownership?.ok).toBe(true);
+    expect(ownership?.detail).toContain(
+      "The install itself is deploy:deploy; what the suite writes is www-data:web's, not its.",
+    );
+    expect(rest).toEqual([]);
+  });
+
+  test("an install owner differing only by gid is still named", () => {
+    const [ownership] = checkFileOwnership(
+      {
+        kind: "unnecessary",
+        target: IDENTITY,
+        site: { installOwner: { ...IDENTITY, group: "www-data", gid: 33 } },
+      },
+      "available",
+    );
+
+    expect(ownership?.detail).toContain(
+      "The install itself is www-data:www-data",
+    );
+  });
+
+  test("an unreadable install owner is not invented", () => {
+    const [ownership] = checkFileOwnership(
+      { kind: "unnecessary", target: IDENTITY, site: {} },
+      "available",
+    );
+
+    expect(ownership?.detail).not.toContain("The install itself");
+  });
+
+  test("a declared fileOwner naming someone else gets a passing line saying it is not enforced", () => {
+    const checks = checkFileOwnership(
+      {
+        kind: "unnecessary",
+        target: IDENTITY,
+        site: { declared: { user: "deploy", group: "deploy" } },
+      },
+      "available",
+    );
+
+    expect(checks[1]).toEqual({
+      name: "File owner override",
+      ok: true,
+      detail:
+        "`transport.fileOwner` (deploy:deploy) is not enforced in the `site` identity state: files " +
+        "are written as www-data:web.",
+    });
+  });
+
+  test("a declared fileOwner differing in one half only still gets the line", () => {
+    for (const declared of [
+      { user: "www-data", group: "deploy" },
+      { user: "deploy", group: "web" },
+    ]) {
+      expect(
+        checkFileOwnership(
+          { kind: "unnecessary", target: IDENTITY, site: { declared } },
+          "available",
+        ).map((check) => check.name),
+      ).toEqual(["File ownership", "File owner override"]);
+    }
+  });
+
+  test("a declared fileOwner that is the identity, by name or by id, adds nothing", () => {
+    for (const declared of [
+      { user: "www-data", group: "web" },
+      { user: "33", group: "82" },
+    ]) {
+      expect(
+        checkFileOwnership(
+          { kind: "unnecessary", target: IDENTITY, site: { declared } },
+          "available",
+        ),
+      ).toHaveLength(1);
+    }
+  });
+
+  test("outside the site state the unnecessary line credits the transport's user", () => {
+    expect(
+      checkFileOwnership({ kind: "unnecessary", target: DEPLOY }, "available"),
+    ).toEqual([
+      {
+        name: "File ownership",
+        ok: true,
+        detail:
+          "deploy:deploy — the transport's user already owns the install, so nothing is changed.",
+      },
+    ]);
+  });
+});
+
 test.describe("verifySite → warnAboutElevation — the wiring the banner depends on", () => {
   let binDir: string;
   let pathBefore: string;

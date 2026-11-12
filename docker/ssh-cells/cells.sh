@@ -4,8 +4,9 @@
 #   up                       makes the SSH key if absent, starts both twins (building their
 #                            images unless TWIN_SKIP_BUILD=1 or another checkout owns them),
 #                            waits until each has verified its site, proves from the host that
-#                            every published port answers, then writes this checkout's sites
-#                            overlays and proves they load
+#                            every published port answers, removes a killed twin spec's sudoers
+#                            logging drop-in, then writes this checkout's sites overlays and
+#                            proves they load
 #   down [--force] [--purge-key]
 #                            removes this checkout's overlays, then the containers and their
 #                            volumes; --purge-key also the shared key (only one cells.sh made)
@@ -54,6 +55,10 @@ TWIN_SSH_USER=ubuntu
 OWNER_LABEL=wpme.ssh-twins.checkout
 # How many times, one second apart, `up` asks each published port before giving up.
 PORT_ATTEMPTS=15
+# The sudoers drop-in the housekeeping twin spec adds while it runs (it logs ubuntu's command lines);
+# a runner killed mid-test leaves it. The twin specs' lock folder (ssh-twins.ts's TWIN_LOCK_DIR).
+TWIN_LOG_DROP_IN=/etc/sudoers.d/99-e2e-log-allowed
+TWIN_LOCK_DIR=/tmp/wpme-ssh-twins
 
 export TWIN_APACHE_SSH_PORT="${TWIN_APACHE_SSH_PORT:-2210}"
 export TWIN_NGINX_SSH_PORT="${TWIN_NGINX_SSH_PORT:-2211}"
@@ -445,10 +450,28 @@ cmd_up() {
     die "The twins did not become healthy: see the logs above"
   fi
   prove_ports
+  remove_stray_drop_ins
   write_overlays
   check_overlays_load
   echo "✓ Twins ready — apache: http://localhost:${TWIN_APACHE_HTTP_PORT} (ssh :${TWIN_APACHE_SSH_PORT})" \
     " ·  nginx: http://localhost:${TWIN_NGINX_HTTP_PORT} (ssh :${TWIN_NGINX_SSH_PORT})"
+}
+
+# Removes a stray TWIN_LOG_DROP_IN from each twin no spec holds (its lock's pid running): a holder's
+# drop-in is its own, in use. Usage: remove_stray_drop_ins
+remove_stray_drop_ins() {
+  local stack pid
+  for stack in apache nginx; do
+    pid="$(cat "$TWIN_LOCK_DIR/wpme-ssh-twin-$stack.lock/pid" 2>/dev/null || true)"
+    if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && ps -p "$pid" >/dev/null 2>&1; then
+      say "The $stack twin is held by a spec (pid $pid): its sudoers drop-ins left alone"
+      continue
+    fi
+    if docker exec "wpme-ssh-$stack" test -e "$TWIN_LOG_DROP_IN"; then
+      docker exec "wpme-ssh-$stack" rm -f -- "$TWIN_LOG_DROP_IN"
+      say "Removed a killed twin spec's $TWIN_LOG_DROP_IN from the $stack twin"
+    fi
+  done
 }
 
 # Removes this checkout's overlays, then the twins (containers, volumes, network) unless another
