@@ -47,7 +47,7 @@ src/
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm + warm-lines.ts its output, pin)
 │   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/), raw Allure results, a stub Allure CLI and a stop at a chosen check (allure.ts), a web server serving the identity probe (probe-web-server.ts), a FIFO's blocked reader released, or fed chunk by chunk, within a deadline, or a FIFO tapped to prove nothing was written through a path (fifo.ts), a `dd` taking `conv=excl` where the runner's (BSD) lacks it (excl-dd.ts), a `.tar.gz` listed from its raw headers (tar-listing.ts), an in-process SSH server that runs what it is sent, with a recording fake `sudo` (ssh-server.ts; `denySudo` all or one `-u` user), the option parsing every fake `sudo` shares (fake-sudo.ts), arguments that must survive every command line (hostile-arguments.ts), the SSH twins' gate, sites, variants, `resetTwin` and the cross-worker lock `withTwin` (ssh-twins.ts: `E2E_SSH_TWINS=1`), a shell command that dies with its spawner even on SIGKILL (tether.ts; `php -S` and the SSH server's commands)
-│   └── wp/                 # WordPress over WP-CLI (exec — exec/wpCli by identity state — over transport-exec, php, staging + site-staging (the `site` state's inbox), plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership + owner-probe, paths, cache, db, teardown, errors; site-identity + web-identity + run-as-argv: who site commands run as)
+│   └── wp/                 # WordPress over WP-CLI (exec — exec/wpCli by identity state, wpCli's `--user` in wp-user — over transport-exec, php + php-literal, staging + site-staging (the `site` state's inbox), plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership + owner-probe, paths, cache, db, teardown, errors; site-identity + web-identity + run-as-argv: who site commands run as)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
     └── <product>/
@@ -475,9 +475,16 @@ automatically, and that verification **must not** be skipped. Mirrored as a comm
   nothing at the plugin's path** (`wp/plugin-dir.ts`), not "WordPress lists none": cleanup removes
   what is left by path and returns it to report; removal under test fails naming it, never sweeps.
   Only the cell's own slug is inspected.
-- **Every `wp eval` goes through [`wp/php.ts`](src/common/wp/php.ts)**; **any value from outside this
+- **`wp eval` goes through [`wp/php.ts`](src/common/wp/php.ts)** where it can (`wpCli`'s own `--user`
+  check, `wp/wp-user.ts`, cannot: `evalPhp` runs through `wpCli`); **any value from outside this
   codebase (site, scenario, fixture) is embedded with `phpLiteral`** — the injection boundary, no
   exceptions.
+- **`wpCli` adds `--user=<the site's username>`** on every transport once one check per install
+  (WP-CLI's own lookup) finds an administrator under a non-numeric login; else dropped with a warning
+  (an unanswered check waits 30 s before the next; a login WP-CLI later refuses: the call retried once
+  without, the login checked again after the wait). `exec(…, "wp", …)` and `asTransportUser` copies get
+  none. The login is never printed
+  ([details](docs/architecture/wordpress-automation.md#wordpress-runs-as-the-sites-administrator---user-wpwp-userts)).
 - **Never `wp cron event run <hook>`** (it runs every event on the hook, in WP-CLI's PHP): use
   `triggerScheduledEvent` (`wp/cron.ts`).
 - Read options with `getOption`/`getOptionJson` (missing → `undefined`, unbootable → throws); never

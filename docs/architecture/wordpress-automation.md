@@ -29,7 +29,7 @@ A [`Transport`](../../src/common/config/types.ts), discriminated on `mode`:
 | `ssh`    | `host`, `port?`, `username`, `privateKeyPath`, `rootDir`, `stagingDir?`, `elevate?`, `fileOwner?`, `runAs?`, `umask?` | `node-ssh` `execCommand`, one line we build (below). |
 
 Every loaded transport also carries `wpUser`, resolved-only (the site's `username`; a sites file may
-not set it); no command reads it yet (`--user`, Phase 12). `runAs`/`umask` decide the
+not set it), which `wpCli` passes as `--user` ([below](#wordpress-runs-as-the-sites-administrator---user-wpwp-userts)). `runAs`/`umask` decide the
 [site identity](#site-identity-wpsite-identityts) state `exec`/`wpCli` follow
 ([configuration.md](../guides/configuration.md#transport-modes-transport)).
 
@@ -43,7 +43,8 @@ not set it); no command reads it yet (`--user`, Phase 12). `runAs`/`umask` decid
   failure (one reading the admin locale is a failed boot the cell's plugin may be blamed for). Over `ssh` this is new with `exec` in the line (below): a login shell that did not `exec`
   the last command (dash, or bash before 5.1) turned the signal into exit `128 + n`. A channel closing with neither status nor signal (connection disposed)
   is a plain `Error`.
-  `wpCli(transport, args, opts?)` runs `wp …` and is the primary entry point.
+  `wpCli(transport, args, opts?)` runs `wp …` and is the primary entry point; it adds `--user`
+  ([below](#wordpress-runs-as-the-sites-administrator---user-wpwp-userts)), `exec(…, "wp", …)` never does.
 - **An exec error names the program and the reason, never the arguments.** The argv carries a
   `--key=` value and every value a `wp eval` snippet embeds (`phpLiteral`'s base64 is an encoding, not
   a cipher). execa's messages quote the command line, so on `local`/`docker` the message is built from
@@ -108,6 +109,43 @@ not set it); no command reads it yet (`--user`, Phase 12). `runAs`/`umask` decid
   (`withConnection`); nothing sent is ever re-sent. An unopenable connection fails as
   `could not connect to <user>@<host>: <reason>`. Pinned against ssh2's in-process server in
   `exec.ssh.spec.ts`.
+
+### WordPress runs as the site's administrator: `--user` ([`wp/wp-user.ts`](../../src/common/wp/wp-user.ts))
+
+`wpCli` leads with `--user=<wpUser>` on every transport and identity state, so capability checks and
+"current user" code see an admin request. None without `wpUser` (an `asTransportUser` copy, a
+hand-built transport) and none on `exec(…, "wp", …)` (the pre-flight's direct calls; its locale check
+passes its own).
+
+- **The check**, once per install, runner (the `site` state's uid:gid, else the transport's user) and
+  login, per process; itself without `--user`, in the root, never with the caller's `cwd`:
+  `wp --skip-plugins --skip-themes eval` calling `WP_CLI\Fetchers\User::get_check(<login>)` — the very
+  lookup `--user` runs (WP-CLI 2.12: ID if numeric, email if email-shaped then login, else login) —
+  the login through `phpLiteral`, answering one marked JSON line (`is_numeric`, `user_can(…,
+  'manage_options')`). Not through `evalPhp`, which runs through `wpCli` and would recurse.
+- **Dropped for the install, warned once:** WP-CLI's exact refusal (below); a **numeric** login (WP-CLI
+  reads it as an ID: another user, or that user's own ID too, and then an `Ambiguous user match …
+  '<login>'` warning on every call); a non-administrator. Otherwise whoever the lookup found is who
+  `--user` acts as (the database's collation matched it: `ADMIN`, `Admín` on `utf8mb4_unicode_520_ci`), so it is trusted.
+- **Unknown** (WordPress not booting, another exit, no marked line): not kept, no warning; that call
+  and every call for 30 s (`RECHECK_AFTER_MS`) run without `--user`, then one checks again. A thrown
+  check (transport) is thrown.
+- **Removed mid-process** (a database reset or restore): a `--user` call answered with WP-CLI's exact
+  refusal is discarded and run once more without `--user`; the verdict becomes unknown (warned once),
+  so the login is checked again after the wait (a restore may bring it back; still missing → dropped).
+  Safe: WP-CLI 2.12 resolves `--user` in an `init` hook (priority 0), after `wp-config.php`,
+  mu-plugins, plugins, `plugins_loaded`, the theme and `after_setup_theme` (they load again on the
+  retry, as on any call), before the command dispatches.
+- **WP-CLI's refusal** (measured on 2.12): exit 1, stderr line `Error: Invalid user ID, email or login:
+  '<login>'` (raw login; `Invalid user login: '<login>'` under `WP_CLI_FORCE_USER_LOGIN`), after PHP
+  8.5's `Deprecated:` lines. Matched as a whole line quoting **that** login, so a command's own refusal
+  of another user (`wp user get bob`) is its answer. Terminal escapes are removed first: `color: true`
+  in a WP-CLI config wraps `Error:` in SGR codes.
+- **One behaviour change:** without `--user`, WP-CLI removes KSES's filters (`kses_remove_filters` at
+  `init`); with it, the admin's `unfiltered_html` decides, as in wp-admin (admins have it on a single
+  site without `DISALLOW_UNFILTERED_HTML`).
+- **The login is never printed:** the refusal quotes it, so it is discarded; warnings say "the site's
+  WordPress login" and name the endpoint.
 
 ### Elevated housekeeping
 
@@ -824,7 +862,8 @@ back**, so the site never loses the schedule.
 
 Every module asking WordPress what no WP-CLI command answers goes through here.
 
-- `phpLiteral(value)` embeds a value as `json_decode( base64_decode( '…' ), true )`. The snippet gets
+- `phpLiteral(value)` (in import-free [`php-literal.ts`](../../src/common/wp/php-literal.ts), re-exported
+  by `php.ts`, so `wp-user.ts` below `exec.ts` can use it) embeds a value as `json_decode( base64_decode( '…' ), true )`. The snippet gets
   only `A-Za-z0-9+/=`, which holds no PHP metacharacter, so quotes, backslashes, newlines and `$` cannot
   end the literal or interpolate — safe for values **read off a site**. A value with no JSON form
   (`undefined`, a function, a symbol) throws here, naming the mistake.
@@ -840,7 +879,7 @@ Every module asking WordPress what no WP-CLI command answers goes through here.
 constant of ours in snippet _source_ (a budget, a destination slug) is not such a value; those few
 sites say so inline.
 
-**Every `wp eval` runs through `evalPhp`.** A caller interpreting the reply validates the _returned
+**`wp eval` runs through `evalPhp`** where it can (not `wpCli`'s `--user` check, above, which embeds the login with `phpLiteral`; a few constant snippets also call `wp eval` directly: the pre-flight's locale read, `log.ts`'s bare boots, `plugin.ts`'s boot probe). A caller interpreting the reply validates the _returned
 string_ afterwards (`isJobRunning` insists on `"0"` or `"1"`). Guards that must survive a plugin that
 will not load belong in the **PHP**, not in exit-code branching: `isJobRunning`'s snippet asks
 `class_exists( 'BackWPup' )` first and answers "nothing is running".

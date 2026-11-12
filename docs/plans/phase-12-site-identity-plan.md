@@ -1,6 +1,6 @@
 # Phase 12 — Run as the site: the web server's identity for every site command
 
-Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4 and 12.5 done 2026-11-11. Parent:
+Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5 and 12.6 done 2026-11-11. Parent:
 [e2e-modernization-plan.md](e2e-modernization-plan.md) (§3 phase table). Reverses that plan's §8.2
 rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of WP Rocket's port
 ([phase-6 plan §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket)).
@@ -75,7 +75,7 @@ the checks to repeat on the twins. Re-measure when in doubt.
 | F8 | An unresolvable hostname makes every sudo call add `sudo: unable to resolve host …` to **stderr**. Exit codes and stdout are unchanged. |
 | F9 | sudo + wrapper add ≤ 10 ms per call (83–88 ms → 87–98 ms per round-trip). |
 | F10 | A killed runner leaves the remote command running, with or without sudo (as today). Only the same identity, or root, can kill it. |
-| F11 | `--user=<login>`: `get_current_user_id()` is that user, also with `--skip-plugins --skip-themes`. No database change from the flag. A missing login → exit 1 `Error: Invalid user ID, email or login: '<login>'` from every WordPress-loading command. `core is-installed`, `cli info`, `core version`, `config get` and `db query` ignore it. |
+| F11 | `--user=<login>`: `get_current_user_id()` is that user, also with `--skip-plugins --skip-themes`. No database change from the flag. A missing login → exit 1 `Error: Invalid user ID, email or login: '<login>'` from every WordPress-loading command. `core is-installed`, `cli info`, `core version`, `config get` and `db query` ignore it. Re-measured 2026-11-11 (twins, WP-CLI 2.12, PHP 8.5): the login quoted raw (`'o'b"$(id)'`), after 53 PHP 8.5 `Deprecated:` lines on stderr; `--user` runs `Fetchers\User::get_check` in `Runner` (ID if numeric — warning when also a login —, email if email-shaped then login, else login; `Invalid user login: '…'` under `WP_CLI_FORCE_USER_LOGIN`); `ADMIN`, `QA@Example.Test` and `1` all resolve the admin (MySQL's case-insensitive match). |
 | F12 | WP Rocket installed as `www-data` with `--user=admin`, both stacks, both modes: <ul><li>every file `www-data:www-data`; the page cache works;</li><li>the same owners and modes as a wp-admin upload install;</li><li>modes follow the docroot (WordPress's `FS_CHMOD_*`), except the empty `index.html` stubs, which follow the umask.</li></ul> |
 | F13 | Leftovers after uninstall: <ul><li>`define( 'WP_CACHE', false ); // Added by WP Rocket`;</li><li>a 0-byte `advanced-cache.php`;</li><li>an empty `wp-content/cache/`;</li><li>`wp-content/upgrade/`;</li><li>on Apache, the `.htaccess` block: written only by the first wp-admin request, never removed by WP-CLI (S2).</li></ul> |
 | F14 | `wp-config.php` `root:www-data 644`: activation writes no `WP_CACHE` and nothing is cached. **`wp plugin deactivate wp-rocket` exits 0 and the plugin stays active.** Deactivating works with `add_filter('rocket_prevent_deactivation', fn($c) => array_values(array_diff((array) $c, ['wpconfig'])), PHP_INT_MAX)`, or `add_filter('rocket_set_wp_cache_constant', '__return_false')`, followed by `deactivate_plugins()`. |
@@ -183,18 +183,22 @@ Fallback reasons, each with its fix:
   (the pre-flight's three are deliberate; the locale check passes its own).
 - `validateSite` copies `site.username` into a resolved-only `transport.wpUser`; a sites file
   setting it is refused.
-- The check, once per install per process, with `--skip-plugins --skip-themes`:
-  1. `wp user get <login> --field=ID`;
-  2. `user_can(<id>, 'manage_options')` via `evalPhp`, the login through `phpLiteral`.
+- The check, once per install, runner and login per process, without `--user`, in the root: one
+  `wp --skip-plugins --skip-themes eval` of WP-CLI's own `Fetchers\User::get_check(<login>)` (what
+  `--user` runs, §1.1 F11; the login through `phpLiteral`), echoing one marked line: `is_numeric`,
+  `user_can(…, 'manage_options')`.
 
   Outcomes:
-  - Only the exact `Invalid user ID, email or login` answer, or a non-admin, is cached as "drop":
-    warn once and drop `--user` for that install.
-  - Any other failure (WordPress cannot boot yet) is not cached.
-  - WP-CLI reads a numeric `--user` as an ID, so the check compares the returned user's
-    `user_login` with the login and drops `--user`, with a warning, on a mismatch.
-- Mid-process removal (a DB reset or restore): when a `wpCli` call fails with that exact error, warn
-  once, mark the install "drop" and retry the call once without `--user`.
+  - Cached as "drop", warned once: the exact `Invalid user ID, email or login` answer; a numeric login
+    (WP-CLI reads it as an ID: another user, or its own ID and an `Ambiguous user match` warning
+    quoting it on every call); a non-admin. Any other user found is the one `--user` will act as (the
+    database's collation matched it), so it is trusted.
+  - Unknown (WordPress cannot boot yet, no marked line): not cached; that call and every call for
+    30 s run without `--user`, then one checks again.
+- Mid-process removal (a DB reset or restore): when a `wpCli` call fails with that exact error (SGR
+  escapes removed: `color: true` colours `Error:`), warn once, retry the call once without `--user`,
+  and make the verdict unknown (checked again after the 30 s). Safe: WP-CLI resolves `--user` in an
+  `init` hook, before the command dispatches.
 - Never printed: messages say "the site's WordPress login". Unit transports carry no `wpUser`.
 
 ### 2.4 BackWPup: the new system, plus "as today" where a premise needs it
@@ -259,12 +263,12 @@ Code never cites this plan; docs may.
 | 12.2 | Config: `runAs`, `umask`, `wpUser` (done 2026-11-10) | — | 12.0a, 12.1 | S / S |
 | 12.3 | `wp/site-identity.ts`: states, probes, web probe and verdict file, `asTransportUser` (done 2026-11-10) | 12.2 | 12.0b | M / H |
 | 12.4 | Exec wiring: wrapper, `execAsTransport`, probe callers moved, stderr noise (done 2026-11-11) | 12.1, 12.3 | — | M / H |
-| 12.5 | Staging through an inbox; staging owned by another identity | 12.4 | 12.6, 12.7 | S / M |
-| 12.6 | `--user=<login>` | 12.4 | 12.5, 12.7 | S / M |
+| 12.5 | Staging through an inbox; staging owned by another identity (done 2026-11-11) | 12.4 | 12.6, 12.7 | S / M |
+| 12.6 | `--user=<login>` (done 2026-11-11) | 12.4 | 12.5, 12.7 | S / M |
 | 12.7 | Ownership, residue, log, files in the `site` state | 12.4 | 12.5, 12.6 | M / M |
 | 12.8 | Install outputs, handed over in fallback | 12.7 | 12.9, 12.10 | S / S |
 | 12.9 | Pre-flight and healthcheck reports, banner, sudoers checks | 12.3–12.6 | 12.8, 12.10 | M / M |
-| 12.10 | BackWPup on the new system; the two-user scenario opts back; private folder | 12.0b, 12.5–12.7 | 12.8, 12.9 | M / M |
+| 12.10 | BackWPup on the new system; the two-user scenario opts back; private folder | 12.0b, 12.5–12.7; step 4 also 12.9 | 12.8, 12.9 (steps 1–3) | M / M |
 | 12.11 | Docs, decision record, live verification, default `"auto"` | 12.0b–12.10 | — | M / M |
 | 12.12 | WP Rocket declarations and licence | 12.11 | 12.13 | S / M |
 | 12.13 | Settling admin request after install | 12.11 | 12.12 | S / M |
@@ -674,19 +678,52 @@ Documented in [wordpress-automation.md → Staging in the `site` state](../archi
   2 h-old inbox and keeps a young one. `legacy-777` (`fallback/owner-not-web`): today's path, the file
   `ubuntu:ubuntu`, no inbox.
 
-### 12.6 — `--user=<login>`
+### 12.6 — `--user=<login>` (done 2026-11-11)
 
-- Per §2.3: injection in `wpCli`, the check, the drop-and-retry-once on the exact error. The
-  "drop" cache is keyed per §2.1.
-- `wpUser` is the site's `username`, which may be an email (the login form and `wp --user` accept
-  one): the mismatch check compares `user_email` as well as `user_login` (found in 12.2).
-- Tests:
-  - argv with and without `wpUser`;
-  - missing / non-admin / not-booting (not cached) / numeric login / email login;
-  - the retry on the exact error, once;
-  - no `--user` on the check or under `asTransportUser`;
-  - the login never appears in a message.
-- Docs: wordpress-automation.md "Transport & exec".
+Documented in [wordpress-automation.md → `--user`](../architecture/wordpress-automation.md#wordpress-runs-as-the-sites-administrator---user-wpwp-userts).
+- **Where:** `wp/wp-user.ts` (pure parts + the memo; no import of `exec.ts`, the check's runner is
+  handed in); `wpCli` (`exec.ts`) resolves the state, asks `shouldUseWpUser`, prepends `--user`,
+  retries once on `isUnknownUserError`. `phpLiteral` moved to import-free `wp/php-literal.ts`
+  (re-exported by `php.ts`) so `wp-user.ts` can embed the login without the `php.ts` → `exec.ts` cycle.
+- **Decisions:** every transport and state, per §2.3 (live runs with `runAs: false` get `--user`
+  too); the check is **one** `wp --skip-plugins --skip-themes eval` of `Fetchers\User::get_check`
+  (§1.1 F11; no login as a positional WP-CLI could read as a flag), not through `evalPhp` (which goes
+  through `wpCli`: recursion), in the root without the caller's `cwd` (its verdict serves every
+  caller); numeric logins dropped (WP-CLI 2.12 `Fetchers\User::get`: ID lookup, plus a warning
+  quoting the login when it is also a login); any other user found trusted (the database's collation decides, as for `--user`:
+  `ADMIN` and `Admín` name `admin` on the twins' `utf8mb4_unicode_520_ci`); the refusal matched as a whole stderr line quoting
+  that login, exit 1, both fetcher messages, SGR escapes removed from stderr, stdout and the login;
+  the retry's result replaces the refused one (its stderr quotes the login); unknown and a refusal
+  wait `RECHECK_AFTER_MS` (30 s, clock injectable) before the next check — a refusal re-checking at
+  once would cost three calls per call should the check and the command ever disagree; a thrown
+  check is rethrown, not kept; warnings once per key and reason, naming the endpoint only.
+- **Behaviour change:** WP-CLI calls `kses_remove_filters` only without `--user`; with it the admin's
+  `unfiltered_html` decides (wordpress-automation.md). The locale pre-flight still passes its own
+  `--user` via `exec`.
+- **Lands live before 12.10, no gate (decided):** every cell gets `--user=<username>` at merge,
+  `runAs: false` included. Evidence: on `legacy-777` (today's live case), BackWPup `cli-reads` +
+  `cli-runs` on `pro@twin-apache` and `pro@twin-nginx` identical with and without `--user` (13 pass,
+  the same 2 fail on both sides, below); BackWPup 5.7.8 source: activation does not depend on the
+  user, the `wp-cli` history trigger comes from the job's start type, user meta is written only on
+  admin/AJAX/REST hooks, and the debug log's "Runs with user:" line differs. The rest is 12.10's.
+- **Specs:** `wp-user.spec.ts` (39: argv incl. the leading newline, the exact refusal plain/coloured
+  and near-misses, every verdict, marked-line parsing with noise and escapes, key per
+  install/runner/login, memo: concurrency, unknown/refusal waits on a fake clock, an old check never
+  removing a newer one, throws not kept, warnings once per key × reason without the login);
+  `wp-user.ssh.spec.ts` (19: lines without/with `wpUser`, email, missing / non-admin / numeric, not
+  booting waiting, the retry once (plain and coloured) and its second refusal returned, the caller's
+  `cwd` on every path and never on the check, a command's own refusal of `bob` kept,
+  `asTransportUser`, `site` through sudo with no `--user` on the check, one answer per runner);
+  `wp-user.ssh-twins.spec.ts` (4: both stacks × `legacy-777`/`site`: `get_current_user_id()` 1 for
+  `admin`, `ADMIN`, `Admín` and the upper-cased email, 0 for the as-today copy, a subscriber, a nobody, `1`
+  and a login equal to its own ID (raw `--user` shows WP-CLI's `Ambiguous` warning; `wpCli` none), an
+  administrator deleted mid-process → retried, 0, warned). 51 mutants, all killed (the audit's 34
+  plus escapes, waits, numeric, `cwd`, warning keys).
+- **Verified on the twins** (2026-11-11): the twin specs above, and the existing twin specs (`exec`,
+  `staging`, pre-flight) green with every loaded site carrying `--user=admin`. BackWPup on
+  `pro@twin-{apache,nginx}`, with and without `--user`: in `legacy-777` the same 2 fail on both sides
+  ("After a backup has run…", "A job run in the background…"; 12.10); in `site` all 15 fail at the
+  `@plugin` hook's staging `mkdir`, with and without `--user` (12.9).
 
 ### 12.7 — Ownership, residue, log and files in the `site` state
 
@@ -742,6 +779,12 @@ Documented in [wordpress-automation.md → Staging in the `site` state](../archi
   `site`/`same-user`, verified, and `!log_allowed` is set.
 - Never a gate.
 - Tests: renderers for every state and reason; the `sudo -n -l` parser; twin runs of every variant.
+- **BackWPup in `site` depends on this verdict** (found in 12.6, read in `decideIdentityState` and
+  `staging.ts`): nothing writes `site-identity.json` yet, so a run with `runAs: "auto"` is
+  `fallback/unverified` and stages as the SSH user, today's `mkdir -p`; on the `site` variant's
+  `www-data` 755 docroot the `@plugin` hook's `mkdir <root>/.e2e_temp/plugins` is refused (all 15
+  `cli-reads` + `cli-runs` scenarios, both twins, with and without `--user`). Not a 12.5 bug: the
+  fallback is today's path, which needs a writable docroot. Done includes that run passing in `site`.
 
 ### 12.10 — BackWPup on the new system
 
@@ -770,6 +813,19 @@ Documented in [wordpress-automation.md → Staging in the `site` state](../archi
      - `cli-runs.feature`'s history trigger `"wp-cli"`;
      - `onboarding.ts` `isPristineActivation`;
      - `wp backwpup kill` (`job-runs.ts:290`) now running as the web user.
+   - `--user` is already live (12.6, no gate); still to check with it: `plugin-deletion.feature` /
+     `footprint.ts` (above), the debug log's "Runs with user:" line wherever a step reads it, and
+     KSES (WP-CLI removes its filters only without `--user`) for anything BackWPup saves through
+     WP-CLI.
+   - Needs 12.9's verdict: without it `site`/`site-775` run `fallback/unverified` and fail at
+     staging (12.9's note).
+   - **Twin limit to resolve first:** on `legacy-777` "After a backup has run…" and "A job run in the
+     background…" fail with and without `--user`. Apache: the background job dies with `PHP Fatal
+     error: Uncaught TypeError: ftp_fput(): Argument #1 ($ftp) must be of type FTP\Connection, null
+     given` (`class-wp-filesystem-ftpext.php:266`): the docroot is not the web user's, so
+     `get_filesystem_method()` is not `direct`, the `ftp` extension is loaded and `wp-config.php` has
+     no `FS_METHOD`. Nginx: `runnow` answers 200 (31 bytes) and no backup starts. Fix in the twins
+     (e.g. `FS_METHOD` `direct` in `legacy-777`, or a variant) before judging background runs.
 5. **TSDoc premises** that name "the transport's user", reworded to "the identity commands run as"
    where that is now true: `makeLogReadOnly`, `backdateFile`, `content-copy.ts` `findLeftovers`,
    `restore-snapshots.ts:142`, `markers.ts:76`, `backups.ts:460`, `cli-restore.ts:29`; the Feature
@@ -929,7 +985,7 @@ Documented in [wordpress-automation.md → Staging in the `site` state](../archi
 | sudoers refuses a group (F1) and says "a password is required" (F2) | The run probe uses the exact wrapper; the report names `(ALL:ALL)`. |
 | Hostname noise in stderr (F8) | Stripped in `runSsh` under the wrapper; the pre-flight names the fix. |
 | Private files servable once owned by the web user | The private folder leaves the docroot in `site` (12.10); the record too (12.15). Staging still holds plugin zips (not secret); 6J keeps the staging area off the web. |
-| `--user` changes plugin behaviour or breaks mid-run | No DB writes from the flag (F11); drop-and-retry on the exact error (§2.3); 12.10 checks the BackWPup places it could touch. |
+| `--user` changes plugin behaviour or breaks mid-run (live at 12.6's merge, before 12.10) | No DB writes from the flag (F11); BackWPup `cli-reads`/`cli-runs` identical with and without it on `legacy-777` (12.6); retry and a later re-check on the exact error (§2.3); 12.10 checks the BackWPup places it could touch. |
 | A BackWPup scenario silently depends on two users | 12.10's baseline-versus-new comparison; a new skip or failure blocks the phase. |
 | A killed runner leaves web-user processes (F10) | Unchanged from today; anything that stops one uses the same identity. |
 | The probe file served publicly | 128-bit random name, constant content (ids, umask, SAPI), deleted in `finally`, swept after 1 h. |

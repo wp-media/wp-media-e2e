@@ -2,6 +2,14 @@ import { SiteIdentityRefusedError } from "./errors";
 import { isSudoRefusal } from "./run-as-argv";
 import { forgetSiteIdentity, resolveSiteIdentity } from "./site-identity";
 import { describeTarget, execAsSite, execAsTransport } from "./transport-exec";
+import {
+  forgetWpUser,
+  isUnknownUserError,
+  shouldUseWpUser,
+  withWpUser,
+  wpUserCheckArgs,
+  wpUserKey,
+} from "./wp-user";
 import type { ExecOptions, ExecResult } from "./transport-exec";
 import type { Transport } from "../config/types";
 
@@ -22,6 +30,9 @@ export * from "./transport-exec";
  *   the arguments), and that resolution is forgotten, so the next command resolves again.
  * - **every other state** (`same-user`, `fallback`, `disabled`; always on `docker`/`local`): as the
  *   transport's user, byte for byte the command line it always was.
+ *
+ * {@link wpCli} also runs WordPress as the site's administrator (`--user=<login>`, `./wp-user.ts`);
+ * {@link exec} adds nothing to a `wp` it is given.
  *
  * WP-CLI is never root: {@link wpCli} has no way to ask for it, and the root rules
  * (`execElevated`: housekeeping only, attempted second, refusable) are unchanged. Probes the state
@@ -76,15 +87,36 @@ export async function exec(
  * As the site's identity in the `site` state, else as the transport's user; never root, and
  * deliberately unable to be: files WP-CLI created as root would be unwritable by the web server.
  *
+ * With `transport.wpUser` set (every loaded site; an `asTransportUser` copy and a hand-built
+ * transport have none), `--user=<login>` leads the arguments once the install's check passed
+ * (`./wp-user.ts`: one `wp eval` per install per process, itself without `--user`, run in the
+ * WordPress root without `options`: its verdict serves every caller). Should WP-CLI then refuse the
+ * login as naming nobody (it was removed mid-process), that answer is discarded, the verdict
+ * forgotten (warned once; checked again after a wait) and the call run once more without `--user`.
+ * The command never ran: WP-CLI resolves `--user` in an `init` hook (priority 0), after
+ * `wp-config.php`, plugins and theme loaded (they load again on the retry, as on any call) but before
+ * the command dispatches.
+ *
  * @param transport - the site's transport.
  * @param args - WP-CLI's arguments.
  * @param options - see {@link ExecOptions}.
  * @returns the outcome, as {@link exec}.
+ * @throws as {@link exec}; also Error if the `--user` check could not run (the transport failed).
  */
-export function wpCli(
+export async function wpCli(
   transport: Transport,
   args: string[],
   options?: ExecOptions,
 ): Promise<ExecResult> {
+  const login = transport.wpUser;
+  if (login === undefined) return exec(transport, "wp", args, options);
+  const key = wpUserKey(transport, await resolveSiteIdentity(transport), login);
+  const useLogin = await shouldUseWpUser(transport, key, login, () =>
+    exec(transport, "wp", wpUserCheckArgs(login)),
+  );
+  if (!useLogin) return exec(transport, "wp", args, options);
+  const result = await exec(transport, "wp", withWpUser(login, args), options);
+  if (!isUnknownUserError(result, login)) return result;
+  forgetWpUser(transport, key);
   return exec(transport, "wp", args, options);
 }

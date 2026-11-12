@@ -78,7 +78,9 @@ Discriminated on `mode`; dispatch in [wordpress-automation.md](../architecture/w
 | `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir` | `port`, `stagingDir`, `elevate`, `fileOwner`, `runAs`, `umask`    |
 
 The loader adds `wpUser` to every transport, copied from the site's `username` (the WordPress login
-WP-CLI will act as, `--user`); a sites file that sets it is refused.
+`wpCli` acts as, `--user`, once checked to name an administrator; else dropped with a warning,
+[details](../architecture/wordpress-automation.md#wordpress-runs-as-the-sites-administrator---user-wpwp-userts));
+a sites file that sets it is refused.
 
 `ssh` needs, on the site: a **POSIX login shell** for `username` (sh/dash/bash/zsh — never csh/tcsh,
 which read `!` inside quotes), and `wp` as an **executable on that login's `PATH`** (a shell function or
