@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   chownSync,
@@ -15,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  GRANT_SCRIPT,
   detectSiteOwnership,
   grantModeFor,
   matches,
@@ -713,7 +715,7 @@ test.describe("normalizeOwnership — the privileged commands", () => {
     expect(outcome).toBe("normalized");
     expect(elevated).toEqual([
       "sudo -n true",
-      `sudo -n -- chmod -R -- ug+rwX ${plugin}`,
+      `sudo -n -- sh -c ${GRANT_SCRIPT} e2e-ownership-grant ug+rwX ${plugin}`,
       `sudo -n -- chown -Rh -- www-data:www-data ${plugin}`,
     ]);
   });
@@ -789,6 +791,37 @@ test.describe("normalizeOwnership — the privileged commands", () => {
     expect(outcome.join("\n")).toMatch(/outside it|could not be resolved/);
     expect(ran().some((line) => /chmod|chown/.test(line))).toBe(false);
     rmSync(outside, { recursive: true, force: true });
+  });
+
+  /**
+   * A link **inside** the root passes both root guards, and GNU `chmod -R` follows an operand that is
+   * a link (measured on coreutils 9.4: a link to a `700` folder made it `777`). The grant's own root
+   * command refuses it, so nothing runs on what it points to: no `chmod` reaches it, no `chown`
+   * follows. `sudo` here runs what it is given (but `chown`, which needs real root), so the
+   * refusal is the script's, on this machine's `sh`.
+   */
+  test("refuses a symbolic link at the path inside its root command, chowning nothing", async () => {
+    stub(
+      "sudo",
+      '[ "$*" = "-n true" ] && exit 0; shift 2; case "$1" in chown) exit 0 ;; esac; exec "$@"',
+    );
+    const uploads = join(wpRoot, "wp-content", "uploads");
+    mkdirSync(uploads, { recursive: true });
+    chmodSync(uploads, 0o700);
+    mkdirSync(join(wpRoot, "wp-content", "plugins"), { recursive: true });
+    symlinkSync(uploads, join(wpRoot, "wp-content", "plugins", "backwpup-pro"));
+
+    const lines = await captureConsole(async () => {
+      expect(
+        await normalizeOwnership(local, "wp-content/plugins/backwpup-pro"),
+      ).toBe("failed");
+    });
+
+    expect(lines.join("\n")).toMatch(
+      /"wp-content\/plugins\/backwpup-pro" is a symbolic link, so its ownership was left alone/,
+    );
+    expect(ran().filter((line) => line.includes("chown"))).toEqual([]);
+    expect(statSync(uploads).mode & 0o777).toBe(0o700);
   });
 
   /**
@@ -914,7 +947,9 @@ test.describe("normalizeOwnership — the privileged commands", () => {
     });
 
     const plugin = join(wpRoot, "wp-content/plugins/backwpup-pro");
-    expect(ran()).toContain(`sudo -n -- chmod -R -- ug+rwX,o+rwX ${plugin}`);
+    expect(ran()).toContain(
+      `sudo -n -- sh -c ${GRANT_SCRIPT} e2e-ownership-grant ug+rwX,o+rwX ${plugin}`,
+    );
     const notices = lines.filter((line) =>
       line.includes("granted world-write"),
     );
@@ -981,6 +1016,65 @@ test.describe("normalizeOwnership — the privileged commands", () => {
     expect(outcome).toBe("failed");
     // It got as far as running both commands — the failure is the re-read disagreeing, not a refusal.
     expect(ran().filter((line) => /chmod|chown/.test(line))).toHaveLength(2);
+  });
+});
+
+/**
+ * The grant's script on this machine's `sh`: the refusal is its exit status, so a link — dangling
+ * or not — is never handed to `chmod`, and mode and path are arguments no shell parses.
+ */
+test.describe("GRANT_SCRIPT", () => {
+  let dir: string;
+
+  /** Runs the script as the grant does; its exit status. */
+  const grant = (mode: string, path: string): number => {
+    try {
+      execFileSync("sh", ["-c", GRANT_SCRIPT, "grant", mode, path], {
+        cwd: dir,
+        stdio: "ignore",
+      });
+      return 0;
+    } catch (error) {
+      return (error as { status: number }).status;
+    }
+  };
+
+  test.beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "grant-script-"));
+  });
+
+  test.afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("refuses a link with its own status, leaving what it points to alone", () => {
+    const target = join(dir, "uploads");
+    mkdirSync(target);
+    chmodSync(target, 0o700);
+    symlinkSync(target, join(dir, "link"));
+    symlinkSync(join(dir, "nowhere"), join(dir, "dangling"));
+
+    expect(grant("ug+rwX,o+rwX", join(dir, "link"))).toBe(90);
+    expect(grant("ug+rwX,o+rwX", join(dir, "dangling"))).toBe(90);
+    expect(statSync(target).mode & 0o777).toBe(0o700);
+  });
+
+  test("grants recursively on anything else, whatever the path holds", () => {
+    const tree = join(dir, "a b$(touch pwned)'`id`");
+    mkdirSync(join(tree, "sub"), { recursive: true });
+    writeFileSync(join(tree, "sub", "f"), "");
+    chmodSync(join(tree, "sub", "f"), 0o600);
+    chmodSync(join(tree, "sub"), 0o700);
+
+    expect(grant("go+rX", tree)).toBe(0);
+    expect(statSync(join(tree, "sub")).mode & 0o777).toBe(0o755);
+    expect(statSync(join(tree, "sub", "f")).mode & 0o777).toBe(0o644);
+    expect(existsSync(join(dir, "pwned"))).toBe(false);
+  });
+
+  test("passes chmod's own failure through, never as the link status", () => {
+    expect(grant("ug+rwX", join(dir, "missing"))).not.toBe(0);
+    expect(grant("ug+rwX", join(dir, "missing"))).not.toBe(90);
   });
 });
 

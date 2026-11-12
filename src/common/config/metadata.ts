@@ -1,4 +1,5 @@
 import { isNonEmptyString, isObject } from "../guards";
+import { normaliseInstallOutputs } from "../wp/paths";
 import type { ScanDebugLogOptions } from "../wp/log";
 import type { SiteDbResidue } from "../wp/db-residue";
 import type {
@@ -179,6 +180,38 @@ export function registerSiteDbResidue(
  */
 export function getSiteDbResidue(product: string): SiteDbResidue {
   return siteDbResidue.get(product) ?? {};
+}
+
+// Per-process registry: product -> what its plugin's activation writes outside its own folder.
+const installOutputs = new Map<string, readonly string[]>();
+
+/**
+ * Registers what a product's activation writes outside its plugin folder, for the shared install to
+ * hand over (or verify) when the install created it. Validated here, so a bad declaration fails
+ * every process as the config is built rather than on a site. Undeclared: not registered.
+ *
+ * @param product - the product's name.
+ * @param outputs - `ProductConfig.installOutputs`.
+ * @throws Error naming the first path that is not a usable site path.
+ */
+export function registerInstallOutputs(
+  product: string,
+  outputs: readonly string[] | undefined,
+): void {
+  if (outputs === undefined) return;
+  installOutputs.set(product, normaliseInstallOutputs(outputs));
+}
+
+/**
+ * A product's validated install outputs, or `undefined` when it declares none — the install then runs
+ * no command for them. Never throws, for the same reason as {@link getSiteResidue}.
+ *
+ * @param product - the product's name.
+ */
+export function getInstallOutputs(
+  product: string,
+): readonly string[] | undefined {
+  return installOutputs.get(product);
 }
 
 // Per-process registry: product -> how to ask its installed plugin for the data directories it names

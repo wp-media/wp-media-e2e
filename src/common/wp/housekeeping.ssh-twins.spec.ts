@@ -314,6 +314,50 @@ test.describe("SSH twins: ownership, residue, log and files by identity state", 
         await ensurePluginAbsent(transport, SLUG);
       });
     });
+
+    test(`${twin.stack} legacy-777: a symbolic link at the target is refused by root's grant, what it points to untouched`, async ({
+      playwright,
+    }) => {
+      await onVariant(
+        twin,
+        "legacy-777",
+        () => undefined,
+        async (transport) => {
+          await verify(twin, transport, playwright.request, "fallback");
+          const root = await wpRootDir(transport);
+          // Inside the root, so both root guards pass: only the grant's own check stands between GNU
+          // `chmod -R` and the folder the link leads to.
+          const pointee = `${root}/wp-content/uploads/e2e-link-target`;
+          const link = `${root}/wp-content/plugins/${SLUG}`;
+          twinExec(twin.stack, [
+            "sh",
+            "-c",
+            'mkdir -p -- "$1" && chmod 0700 -- "$1" && ln -s -- "$1" "$2"',
+            "e2e",
+            pointee,
+            link,
+          ]);
+          const log = sudoLog(twin.stack);
+
+          await expect(
+            normalizeOwnership(transport, `wp-content/plugins/${SLUG}`),
+          ).resolves.toBe("failed");
+
+          expect(
+            twinExec(twin.stack, ["stat", "-c", "%U:%G %a", "--", pointee]),
+          ).toBe("root:root 700\n");
+          const calls = rootCalls(log.since());
+          expect(calls.some((line) => /COMMAND=\S*\/sh -c /.test(line))).toBe(
+            true,
+          );
+          // No bare `chmod` and no `chown`: the grant's script is the only command naming the path.
+          expect(calls.some((line) => /COMMAND=\S*\/chmod /.test(line))).toBe(
+            false,
+          );
+          expect(calls.some((line) => line.includes("chown"))).toBe(false);
+        },
+      );
+    });
   }
 });
 

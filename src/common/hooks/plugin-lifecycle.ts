@@ -18,8 +18,13 @@ import {
   removeSiteResidue,
 } from "../wp/residue";
 import { pluginSitePath } from "../wp/paths";
+import {
+  recordInstallOutputs,
+  settleInstallOutputs,
+} from "../wp/install-outputs";
 import { stageAndInstallPlugin } from "../wp/staging";
 import {
+  getInstallOutputs,
   getSiteDataDirResolver,
   getSiteDbResidue,
   getSiteResidue,
@@ -69,6 +74,11 @@ export interface DeclaredResidue {
    * `ProductConfig.resolveSiteDataDirs`.
    */
   readonly resolveDataDirs?: ResolveSiteDataDirs | undefined;
+  /**
+   * What activation writes outside the plugin's folder, validated — `ProductConfig.installOutputs`.
+   * Not leftovers to remove: the outputs the install hands over when it created them.
+   */
+  readonly installOutputs?: readonly string[] | undefined;
 }
 
 /** A product that declares neither kind of leftover; every step below then costs nothing. */
@@ -86,6 +96,7 @@ export function declaredResidue(product: string): DeclaredResidue {
     files: getSiteResidue(product),
     db: getSiteDbResidue(product),
     resolveDataDirs: getSiteDataDirResolver(product),
+    installOutputs: getInstallOutputs(product),
   };
 }
 
@@ -230,6 +241,10 @@ export function extendedTimeout(current: number): number {
  * scenario assumes an *active* plugin at that slug, and without this check a silent
  * non-activation would surface much later as a baffling UI failure.
  *
+ * What activation writes **outside** the plugin's folder (`installOutputs`) is checked once before
+ * the install and once after that re-assert; only what the install created is handed over, or
+ * verified as the identity's in the `site` state (`../wp/install-outputs.ts`).
+ *
  * The install itself has the same two-user problem, one step earlier: WP-CLI unpacks the zip as
  * the *transport's* user, so the plugin's own files arrive owned by someone the web server is not,
  * and its next admin request cannot write them. Passing the artifact's `slug` is what lets the
@@ -364,7 +379,8 @@ async function removeOldCopy(
 
 /**
  * The install on a site the old copy has left: sweep its database footprint, install and activate
- * the artifact, then prepare its data directories — see {@link installPluginUnderTest}.
+ * the artifact, hand over (or verify) the outputs its activation created outside its folder, then
+ * prepare its data directories — see {@link installPluginUnderTest}.
  *
  * @param transport - the target site's transport.
  * @param artifact - the resolved artifact under test.
@@ -378,6 +394,12 @@ async function installFresh(
   // After the old copy's removal: a plugin removed by path after its uninstall failed leaves exactly
   // the rows this sweep takes.
   await sweepDbResidue(transport, residue.db, "before");
+  // Right before the install, so an output present now is the site's (or an earlier run's), never
+  // this install's: only what the install creates is handed over. No command when none is declared.
+  const outputsBefore = await recordInstallOutputs(
+    transport,
+    residue.installOutputs ?? [],
+  );
   await stageAndInstallPlugin(transport, artifact.zipPath, {
     activate: true,
     slug: artifact.slug,
@@ -385,6 +407,9 @@ async function installFresh(
   if (!(await isPluginActive(transport, artifact.slug))) {
     throw new PluginActivationFailedError(artifact.slug);
   }
+  // Once activation is proved: it is what writes them. Best-effort, never throws, and bounded
+  // (`SETTLE_BUDGET_MS`), so a slow handover cannot run the hook out of time.
+  await settleInstallOutputs(transport, outputsBefore);
   // Asked of the plugin now installed, since each install names these anew — and asked before any
   // directory is handed over, because asking boots WordPress over WP-CLI, as the transport's user.
   const resolved =

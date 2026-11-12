@@ -2,12 +2,14 @@ import { test, expect } from "@playwright/test";
 
 import {
   getDebugLogOptions,
+  getInstallOutputs,
   getPool,
   getSiteResidue,
   getSettleLeftovers,
   getStopRunningWork,
   readRouting,
   registerDebugLogOptions,
+  registerInstallOutputs,
   registerPool,
   registerSiteResidue,
   registerSettleLeftovers,
@@ -163,5 +165,34 @@ test.describe("site-residue registry", () => {
     registerSiteResidue("spec-residue-b", ["wp-content/uploads/b"]);
     expect(getSiteResidue("spec-residue-a")).toEqual(["wp-content/uploads/a"]);
     expect(getSiteResidue("spec-residue-b")).toEqual(["wp-content/uploads/b"]);
+  });
+});
+
+test.describe("install-outputs registry", () => {
+  test("serves back the declared outputs, validated and normalised", () => {
+    registerInstallOutputs("spec-outputs", [
+      "wp-content/cache/",
+      "wp-content/advanced-cache.php",
+      "wp-content/cache",
+    ]);
+    expect(getInstallOutputs("spec-outputs")).toEqual([
+      "wp-content/cache",
+      "wp-content/advanced-cache.php",
+    ]);
+  });
+
+  test("is undefined for a product that declares none, so the install sends nothing", () => {
+    expect(getInstallOutputs("spec-no-outputs")).toBeUndefined();
+    registerInstallOutputs("spec-undefined-outputs", undefined);
+    expect(getInstallOutputs("spec-undefined-outputs")).toBeUndefined();
+  });
+
+  test("refuses an unusable path as the config is built, registering nothing", () => {
+    expect(() => {
+      registerInstallOutputs("spec-bad-outputs", ["wp-content/cache", "/etc"]);
+    }).toThrow(
+      /"\/etc" cannot be declared as an install output: it is absolute/,
+    );
+    expect(getInstallOutputs("spec-bad-outputs")).toBeUndefined();
   });
 });

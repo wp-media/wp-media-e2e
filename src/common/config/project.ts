@@ -21,6 +21,7 @@ import {
   registerPool,
   registerSettleLeftovers,
   registerSiteDataDirResolver,
+  registerInstallOutputs,
   registerSiteDbResidue,
   registerSiteResidue,
   registerStopRunningWork,
@@ -234,6 +235,10 @@ export function createProductConfig(
   // And for the footprint it leaves in the site's *database* when its files go without its own
   // uninstall running — swept off what is found, not off whether the plugin is installed.
   registerSiteDbResidue(product.name, product.siteDbResidue);
+
+  // And for what its activation writes outside its plugin folder, which the shared install hands over
+  // when it created it — validated here, so a bad path fails as the config is built.
+  registerInstallOutputs(product.name, product.installOutputs);
 
   // And for how to ask the installed plugin for the data directories it names at runtime, which the
   // shared install prepares beside the declared ones — a function, so this is its only channel too.

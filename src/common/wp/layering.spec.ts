@@ -119,6 +119,21 @@ test("exec.ts and ownership.ts do reach the resolver: the check above guards a r
   }
 });
 
+/**
+ * The product registries are loaded by every config process (`config/project.ts`), which runs no site
+ * command: validating a declaration there must not load the modules that do (`exec`, `ssh`).
+ */
+test("config/metadata.ts loads only path rules from wp/, never a command-running module", () => {
+  const { files, unfollowed } = runtimeClosure([
+    join(WP_DIR, "..", "config", "metadata.ts"),
+  ]);
+
+  expect(files.filter((file) => file.startsWith(WP_DIR))).toEqual([
+    join(WP_DIR, "paths.ts"),
+  ]);
+  expect(unfollowed).toEqual([]);
+});
+
 test.describe("valueImports reads what loads at run time, and only that", () => {
   for (const [label, source, expected] of [
     ["an import", 'import { a } from "./a";', ["./a"]],

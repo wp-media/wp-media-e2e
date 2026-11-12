@@ -304,6 +304,16 @@ export interface ProductConfig {
    */
   readonly siteResidue?: readonly SiteResidue[];
   /**
+   * What the plugin's **activation** may write outside its own folder, relative to the WordPress
+   * root (e.g. `wp-content/advanced-cache.php`, `wp-content/cache`). The shared install checks which
+   * exist before it installs; each one the install created is handed to the site's ownership where
+   * commands run as the transport's user, and verified as the identity's in the `site` state. One
+   * that existed before (a shared parent such as `wp-content/cache`) is never touched; declare its
+   * children too. Never created or removed through this: removal is {@link siteResidue}'s. Validated
+   * when the config is built. Omit when activation writes only inside the plugin's folder.
+   */
+  readonly installOutputs?: readonly string[];
+  /**
    * The data directories this product's plugin names at runtime, asked of the installed plugin after
    * every `@plugin` install and prepared like the declared ones — open to both the transport's user
    * and the web server before either writes there.

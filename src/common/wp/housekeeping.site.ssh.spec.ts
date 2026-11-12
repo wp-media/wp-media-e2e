@@ -1,9 +1,11 @@
 import { test, expect } from "@playwright/test";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -11,6 +13,7 @@ import { join } from "node:path";
 import { disposeConnections, installKey } from "./exec";
 import { clearDebugLog, readDebugLog } from "./log";
 import {
+  GRANT_SCRIPT,
   normalizeOwnership,
   planOwnership,
   resetOwnershipCaches,
@@ -334,11 +337,63 @@ test.describe("ownership in every other state: today's handover, as root, grant 
 
       expect(rootCallsSince(from)).toEqual([
         ["-n", "true"],
-        ["-n", "--", "chmod", "-R", "--", "ug+rwX,o+rwX", target],
+        [
+          "-n",
+          "--",
+          "sh",
+          "-c",
+          GRANT_SCRIPT,
+          "e2e-ownership-grant",
+          "ug+rwX,o+rwX",
+          target,
+        ],
         ["-n", "--", "chown", "-Rh", "--", "www-data:web", target],
       ]);
     });
   }
+});
+
+test.describe("ownership of a symbolic link: refused inside root's own grant", () => {
+  test("a link inside the root passes the guards; the grant's script refuses it and nothing follows", async () => {
+    const transport = server.transport({ runAs: false });
+    const from = await settled(transport, "disabled");
+    const uploads = join(server.root, "wp-content", "uploads");
+    chmodSync(uploads, 0o700);
+    const target = join(server.root, "wp-content", "plugins", "probe");
+    rmSync(target, { recursive: true });
+    symlinkSync(uploads, target);
+    const warned: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]): void => {
+      warned.push(args.map(String).join(" "));
+    };
+    try {
+      await expect(
+        normalizeOwnership(transport, "wp-content/plugins/probe"),
+      ).resolves.toBe("failed");
+    } finally {
+      console.warn = realWarn;
+      chmodSync(uploads, 0o755);
+    }
+
+    // The one root command acting on the path is the grant's guarded script: no bare chmod, no chown.
+    expect(rootCallsSince(from)).toEqual([
+      ["-n", "true"],
+      [
+        "-n",
+        "--",
+        "sh",
+        "-c",
+        GRANT_SCRIPT,
+        "e2e-ownership-grant",
+        "ug+rwX,o+rwX",
+        target,
+      ],
+    ]);
+    expect(warned.join("\n")).toMatch(
+      /"wp-content\/plugins\/probe" is a symbolic link, so its ownership was left alone/,
+    );
+  });
 });
 
 test.describe("residue in the site state: as the site first, root only for what it was refused", () => {
