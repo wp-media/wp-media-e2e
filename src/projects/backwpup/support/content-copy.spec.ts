@@ -573,6 +573,15 @@ test.describe("ContentCopy", () => {
     expect(kept.kept).toBe(true);
   });
 
+  test("accepts that copy on a host whose sudo cannot resolve its own name: sudo's line is no tar complaint", async () => {
+    process.env.H_SUDO_NOISE = "1";
+    process.env.COPY_TAR_EXIT = "1";
+    process.env.COPY_TAR_ERR = "tar: ./debug.log: file changed as we read it";
+    const kept = copy();
+    await kept.keep();
+    expect(kept.kept).toBe(true);
+  });
+
   test("refuses a copy that does not read back, and leaves nothing behind", async () => {
     process.env.H_LIST_EXIT = "2";
     await expect(copy().keep()).rejects.toThrow(/does not read back.*not run/s);

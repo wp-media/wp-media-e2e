@@ -226,8 +226,10 @@ export interface SiteIdentityIssues {
  *
  * A **warning, not a failure**: a fallback runs as it always did (the transport's user, files handed
  * over); any other site runs as its check says. Silent when no site has an issue: every site runs as
- * its verified identity, already is it, or opted out (`runAs` false), and sudo keeps site commands'
- * lines out of its log.
+ * its verified identity, already is it, or opted out (`runAs` false), sudo keeps site commands' lines
+ * out of its log, and — in any state, `runAs` false included — no sudo call the run makes waits 1 s or
+ * more for the host's own name. An issue with nothing to fix (that wait) gets no fix line, and a
+ * banner of only such issues is headed "to note", not "need attention".
  *
  * @param sites - every real site checked in this run, with its issues.
  * @param palette - colour and symbols for the stream it is printed to; plain Unicode text by default.
@@ -249,11 +251,15 @@ export function renderIdentityWarning(
   if (affected.length === 0) return undefined;
 
   const { paint, symbol } = palette;
+  // Only notes (nothing to fix, e.g. a slow host lookup): nothing "needs attention".
+  const toFix = affected.some((site) =>
+    site.issues.some((issue) => issue.fix !== undefined),
+  );
   const lines: string[] = [
     "",
     headline(
       palette,
-      `SITE IDENTITY ${symbol("dash")} ${String(affected.length)} site(s) need attention`,
+      `SITE IDENTITY ${symbol("dash")} ${String(affected.length)} site(s) ${toFix ? "need attention" : "to note"}`,
     ),
     "",
   ];
@@ -265,6 +271,7 @@ export function renderIdentityWarning(
         `       ${symbol("bullet")} ${first}`,
         ...rest.map((line) => `         ${line}`),
       );
+      if (fix === undefined) continue;
       const [fixFirst = "", ...fixRest] = printableLines(fix);
       lines.push(
         `         ${paint("warn", symbol("arrow"))} ${fixFirst}`,

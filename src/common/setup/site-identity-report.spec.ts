@@ -31,7 +31,7 @@ const WWW: WebIdentity = {
 const WWW_OWNER = { user: "www-data", group: "www-data", uid: 33, gid: 33 };
 
 /** The `site` state as www-data, umask `umask`. */
-const site = (umask = "0022", sudoNoise = false): IdentityState => ({
+const site = (umask = "0022"): IdentityState => ({
   kind: "site",
   target: { user: "www-data", group: "www-data" },
   identity: {
@@ -43,7 +43,6 @@ const site = (umask = "0022", sudoNoise = false): IdentityState => ({
     groupNames: ["www-data"],
   },
   umask,
-  sudoNoise,
 });
 
 /** An `owner-is-web` verdict, the web server as `web`. */
@@ -164,22 +163,48 @@ test.describe("fallback — each reason with its fix, on the line and in the ban
     ]);
   });
 
-  test("the /etc/hosts fix shows wherever the run probe saw sudo's noise", () => {
-    const input = facts({
-      state: {
-        kind: "fallback",
-        reason: "no-wp",
-        detail: "x",
-        sudoNoise: true,
-      },
-    });
-    expect(identityCheck(input).detail).toContain(
-      "Fix: add the host's name to /etc/hosts.",
-    );
-    expect(
-      identityCheck(facts({ state: site("0022", true) })).detail,
-    ).toContain("/etc/hosts");
-    expect(identityCheck(facts()).detail).not.toContain("/etc/hosts");
+  test("sudo's host lookup: a wait of a second or more is a warning and an issue in any state; less, or none, says nothing", () => {
+    const slow = { kind: "unresolved", waitMs: 20_086 } as const;
+    const line =
+      "Every sudo call waits about 20.1 s for this host's own name, which does not resolve: site " +
+      "commands and root steps run, each that much slower.";
+    const issue =
+      "every sudo call waits about 20.1 s for this host's own name, which does not resolve; nothing is required: the run goes on, slower, until it does";
+    for (const state of [
+      site(),
+      { kind: "fallback", reason: "no-wp", detail: "x" },
+      { kind: "disabled", reason: "config" },
+    ] as const) {
+      const input = facts({ state, sudoLookup: slow });
+      const check = identityCheck(input);
+      expect(check.detail.split("\n")).toContain(line);
+      expect(check.warning).toBe(true);
+      const slowIssue = identityIssues(input).find(
+        (found) => found.what === issue,
+      );
+      // Nothing to fix: no fix line for the banner to put under it.
+      expect(slowIssue).toEqual({ what: issue });
+    }
+    for (const sudoLookup of [
+      undefined,
+      { kind: "resolves" },
+      { kind: "unresolved", waitMs: 0 },
+      { kind: "unresolved", waitMs: 999 },
+    ] as const) {
+      const input = facts(sudoLookup === undefined ? {} : { sudoLookup });
+      expect(identityCheck(input).detail).not.toMatch(/host's own name/);
+      expect(identityCheck(input).warning).toBeUndefined();
+      expect(identityIssues(input)).toEqual([]);
+    }
+    // Never advice to edit the host: the run absorbs the noise and only reports the wait.
+    const said = [
+      identityCheck(facts({ sudoLookup: slow })).detail,
+      ...identityIssues(facts({ sudoLookup: slow })).flatMap((found) => [
+        found.what,
+        found.fix ?? "",
+      ]),
+    ].join("\n");
+    expect(said).not.toMatch(/\/etc\/hosts|Fix:/);
   });
 });
 

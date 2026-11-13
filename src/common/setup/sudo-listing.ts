@@ -1,3 +1,5 @@
+import { withoutSudoNoise } from "../wp/sudo-noise";
+
 /**
  * What `sudo -n -l` says about one setting the site identity depends on: whether sudo writes the
  * command lines it runs to the system log (`log_allowed`, on by default). Site commands run through
@@ -105,7 +107,7 @@ function runasEntries(
 }
 
 /**
- * Reads `sudo -n -l`'s answer.
+ * Reads `sudo -n -l`'s answer. sudo's unresolvable-host line (`../wp/sudo-noise.ts`) is ignored.
  *
  * @param result - its exit code and output, run as the SSH user with `LC_ALL=C`.
  * @param runAs - the names the identity goes by (its user name, and `#uid` when sudo is given one):
@@ -127,7 +129,8 @@ export function parseSudoListing(
   runAs: readonly string[],
 ): SudoListing {
   if (result.exitCode !== 0) {
-    const said = result.stderr
+    // sudo's unresolvable-host line is no refusal: alone, sudo said nothing this parser knows.
+    const said = withoutSudoNoise(result.stderr)
       .split("\n")
       .map((line) => line.replace(/\r$/, ""))
       .filter((line) => line.trim() !== "");

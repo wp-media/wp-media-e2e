@@ -75,7 +75,6 @@ const IS_WEB: SiteIdentityVerdict = {
 const RAN_WWW: RunProbeOutcome = {
   kind: "ran",
   identity: WWW,
-  sudoNoise: false,
 };
 
 /** An `auto` site whose every probe says yes: `site`. */
@@ -111,7 +110,6 @@ test("auto, every probe passing: site, running as the probe's identity with the 
     target: { user: "www-data", group: "www-data" },
     identity: WWW,
     umask: "0022",
-    sudoNoise: false,
   });
 });
 
@@ -282,7 +280,6 @@ test("a hand-built runAs naming root, or past the id range, is fallback/no-ident
     expect(decided.kind === "fallback" ? decided.detail : "").toMatch(
       /^\[wp\/site-identity\] transport\.runAs /,
     );
-    expect("sudoNoise" in decided).toBe(false);
   }
   // A valid declared identity goes on to the run probe, as declared.
   expect(decideIdentityState({ ...noProbe, runAs: "www-data:33" })).toEqual({
@@ -290,42 +287,6 @@ test("a hand-built runAs naming root, or past the id range, is fallback/no-ident
     probe: "run",
     target: { user: "www-data", group: "33" },
   });
-});
-
-test("the run probe's hostname noise is carried into the state it decides, absent before it ran", () => {
-  expect(
-    state({ ...AUTO, runProbe: { ...RAN_WWW, sudoNoise: true } }),
-  ).toMatchObject({
-    kind: "site",
-    sudoNoise: true,
-  });
-  expect(
-    state({
-      ...AUTO,
-      runProbe: {
-        kind: "failed",
-        reason: "no-sudo",
-        detail: "sudo: a password is required",
-        sudoNoise: true,
-      },
-    }),
-  ).toMatchObject({ kind: "fallback", reason: "no-sudo", sudoNoise: true });
-  for (const runProbe of [
-    { kind: "ran", identity: undefined, sudoNoise: true },
-    { kind: "ran", identity: { ...WWW, uid: 0 }, sudoNoise: true },
-    { kind: "ran", identity: UBUNTU, sudoNoise: true },
-  ] as const) {
-    expect(state({ ...AUTO, runProbe })).toMatchObject({
-      kind: "fallback",
-      sudoNoise: true,
-    });
-  }
-  expect(
-    state({ ...AUTO, runProbe: { ...RAN_WWW, sudoNoise: false } }),
-  ).toMatchObject({
-    sudoNoise: false,
-  });
-  expect("sudoNoise" in state({ ...AUTO, verdict: undefined })).toBe(false);
 });
 
 /** One row per fallback reason: the inputs, and what the detail must say. */
@@ -344,7 +305,6 @@ const FALLBACKS: readonly (readonly [
         kind: "failed",
         reason: "no-sudo",
         detail: "sudo: a password is required",
-        sudoNoise: false,
       },
     },
     /password is required/,
@@ -358,7 +318,6 @@ const FALLBACKS: readonly (readonly [
         kind: "failed",
         reason: "no-wp",
         detail: "wp: not found",
-        sudoNoise: false,
       },
     },
     /wp: not found/,
@@ -372,7 +331,6 @@ const FALLBACKS: readonly (readonly [
         kind: "failed",
         reason: "no-root-access",
         detail: "can't cd",
-        sudoNoise: false,
       },
     },
     /can't cd/,
@@ -425,7 +383,6 @@ const FALLBACKS: readonly (readonly [
         kind: "failed",
         reason: "no-identity",
         detail: "sudo: unknown user www",
-        sudoNoise: false,
       },
     },
     /unknown user/,
@@ -435,7 +392,7 @@ const FALLBACKS: readonly (readonly [
     "the identity is uid 0 on the host",
     {
       ...AUTO,
-      runProbe: { kind: "ran", identity: { ...WWW, uid: 0 }, sudoNoise: false },
+      runProbe: { kind: "ran", identity: { ...WWW, uid: 0 } },
     },
     /root on this host/,
   ],
@@ -444,7 +401,7 @@ const FALLBACKS: readonly (readonly [
     "the identity's group is gid 0 on the host",
     {
       ...AUTO,
-      runProbe: { kind: "ran", identity: { ...WWW, gid: 0 }, sudoNoise: false },
+      runProbe: { kind: "ran", identity: { ...WWW, gid: 0 } },
     },
     /root on this host/,
   ],
@@ -512,7 +469,6 @@ const FALLBACKS: readonly (readonly [
       runProbe: {
         kind: "ran",
         identity: { ...WWW, uid: 34 },
-        sudoNoise: false,
       },
     },
     /sudo ran as www-data\(34\):www-data\(33\)/,
@@ -520,7 +476,7 @@ const FALLBACKS: readonly (readonly [
   [
     "probe-mismatch",
     "sudo ran as someone else",
-    { ...AUTO, runProbe: { kind: "ran", identity: UBUNTU, sudoNoise: false } },
+    { ...AUTO, runProbe: { kind: "ran", identity: UBUNTU } },
     /sudo ran as ubuntu\(1000\):ubuntu\(1000\), not www-data:www-data/,
   ],
   [
@@ -531,7 +487,6 @@ const FALLBACKS: readonly (readonly [
       runProbe: {
         kind: "ran",
         identity: { ...WWW, gid: 50, group: "staff" },
-        sudoNoise: false,
       },
     },
     /not www-data:www-data/,
@@ -541,7 +496,7 @@ const FALLBACKS: readonly (readonly [
     "id printed nothing",
     {
       ...AUTO,
-      runProbe: { kind: "ran", identity: undefined, sudoNoise: false },
+      runProbe: { kind: "ran", identity: undefined },
     },
     /printed no identity/,
   ],
@@ -565,7 +520,7 @@ test("a declared identity is compared by name, or by id when declared as digits"
     outcome({
       ...AUTO,
       runAs,
-      runProbe: { kind: "ran", identity, sudoNoise: false },
+      runProbe: { kind: "ran", identity },
     });
 
   expect(declared("www-data:www-data", WWW)).toBe("site");
@@ -624,7 +579,7 @@ const PROBES: readonly (readonly [
   [
     "ran",
     { stdout: `e2e-run-probe\n${ID_LINE}`, stderr: "", exitCode: 0 },
-    { kind: "ran", identity: WWW, sudoNoise: false },
+    { kind: "ran", identity: WWW },
   ],
   [
     "ran, with sudo's hostname noise on stderr and a banner faking root before the mark",
@@ -633,7 +588,7 @@ const PROBES: readonly (readonly [
       stderr: "sudo: unable to resolve host twin: Name or service not known",
       exitCode: 0,
     },
-    { kind: "ran", identity: WWW, sudoNoise: true },
+    { kind: "ran", identity: WWW },
   ],
   [
     "BusyBox's id without names",
@@ -652,13 +607,12 @@ const PROBES: readonly (readonly [
         groupIds: [33],
         groupNames: [],
       },
-      sudoNoise: false,
     },
   ],
   [
     "id failed",
     { stdout: "e2e-run-probe", stderr: "id: oops", exitCode: 91 },
-    { kind: "ran", identity: undefined, sudoNoise: false },
+    { kind: "ran", identity: undefined },
   ],
   [
     "wp failed",
@@ -671,7 +625,6 @@ const PROBES: readonly (readonly [
       kind: "failed",
       reason: "no-wp",
       detail: "/bin/sh: 1: wp: not found",
-      sudoNoise: false,
     },
   ],
   [
@@ -681,7 +634,6 @@ const PROBES: readonly (readonly [
       kind: "failed",
       reason: "probe-mismatch",
       detail: "exit 137",
-      sudoNoise: false,
     },
   ],
   [
@@ -695,7 +647,6 @@ const PROBES: readonly (readonly [
       kind: "failed",
       reason: "no-root-access",
       detail: "exit 0",
-      sudoNoise: false,
     },
   ],
   [
@@ -710,7 +661,6 @@ const PROBES: readonly (readonly [
       kind: "failed",
       reason: "no-sudo",
       detail: "sudo: a password is required",
-      sudoNoise: true,
     },
   ],
   [
@@ -720,7 +670,6 @@ const PROBES: readonly (readonly [
       kind: "failed",
       reason: "no-sudo",
       detail: "sh: 1: sudo: not found",
-      sudoNoise: false,
     },
   ],
   [
@@ -730,7 +679,6 @@ const PROBES: readonly (readonly [
       kind: "failed",
       reason: "no-identity",
       detail: "sudo: unknown user www",
-      sudoNoise: false,
     },
   ],
   [
@@ -740,7 +688,6 @@ const PROBES: readonly (readonly [
       kind: "failed",
       reason: "no-identity",
       detail: "sudo: unknown group wwx",
-      sudoNoise: false,
     },
   ],
   [
@@ -754,7 +701,6 @@ const PROBES: readonly (readonly [
       kind: "failed",
       reason: "no-root-access",
       detail: "/bin/sh: 1: cd: can't cd to /var/www/html",
-      sudoNoise: false,
     },
   ],
   [
@@ -764,7 +710,6 @@ const PROBES: readonly (readonly [
       kind: "failed",
       reason: "no-root-access",
       detail: "exit 1",
-      sudoNoise: false,
     },
   ],
 ];

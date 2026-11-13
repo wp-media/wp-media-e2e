@@ -42,8 +42,9 @@ import type { SiteConfig, SshTransport } from "../config/types";
  * The pre-flight's site identity over a server that runs what it is sent, with a web server serving
  * the identity probe from the same root:
  * - a site with `runAs` false (every live site today) gets no probe file, no `sudo -n -l`, no WP-CLI
- *   config read: only the login-shell round-trip and the WordPress login's check are new, both
- *   read-only, and the exact command list is pinned;
+ *   config read: only the login-shell round-trip, the WordPress login's check and the timed
+ *   `sudo -n true` are new, all read-only, and the exact command list is pinned;
+ * - sudo's unresolvable-host line on every call reaches no check, decision or banner;
  * - an `auto` site is probed, its verdict registered here and written for workers, and reported;
  * - the login shell is the one gate: a shell that changes a quoted string fails the site before any
  *   probe or heal;
@@ -106,6 +107,7 @@ test.beforeEach(() => {
   server.removeProgram("printf");
   server.removeProgram("getent");
   server.removeProgram("env");
+  server.sudoNoise(false);
 });
 
 test.afterEach(() => {
@@ -145,7 +147,7 @@ const named = (
 const probeFilesLeft = (): string[] =>
   readdirSync(server.root).filter((name) => name.startsWith("e2e-identity-"));
 
-test("runAs false (today's live sites): no probe, no sudo listing, no config read — two new read-only commands, exactly", async () => {
+test("runAs false (today's live sites): no probe, no sudo listing, no config read — three new read-only commands, exactly", async () => {
   const site = siteWith({ runAs: false });
   const before = server.commands.length;
   const requestsBefore = web.requests.length;
@@ -173,6 +175,9 @@ test("runAs false (today's live sites): no probe, no sudo listing, no config rea
     sshCommandLine(root, "id", []),
     // New: the WordPress login's check (`wp eval`, plugins and theme skipped), read-only.
     sshCommandLine(root, "wp", wpUserCheckArgs(LOGIN)),
+    // New: sudo's host lookup, timed in English (root steps go through sudo); quiet, so no second
+    // call. The same `sudo -n true` the elevation probe above runs.
+    sshCommandLine("/", "env", ["LC_ALL=C", "sudo", "-n", "true"]),
   ]);
   const joined = sentSince(before).join("\n");
   for (const absent of [
@@ -185,8 +190,11 @@ test("runAs false (today's live sites): no probe, no sudo listing, no config rea
   ]) {
     expect(joined).not.toContain(absent);
   }
-  // sudo only for the elevation probe the pre-flight always ran.
-  expect(server.sudoCalls().slice(sudoBefore)).toEqual([["-n", "true"]]);
+  // sudo only for the elevation probe the pre-flight always ran, and the host lookup's.
+  expect(server.sudoCalls().slice(sudoBefore)).toEqual([
+    ["-n", "true"],
+    ["-n", "true"],
+  ]);
   // An opt-out: noted on its check line, never in the banner.
   expect(result.identityIssues).toEqual([]);
 });
@@ -217,6 +225,98 @@ test("auto: the web server is asked, the verdict registered here, the site runs 
   expect(result.identityIssues?.map((issue) => issue.what)).toEqual([
     "whether sudo logs command lines is unknown (`sudo -n -l` gave no listing)",
   ]);
+});
+
+test("sudo's host line on every call: the same checks and decisions, none quoting it, no lookup warning when it costs nothing", async () => {
+  const quiet = await verifySite(
+    siteWith({ runAs: "auto" }),
+    0,
+    [],
+    undefined,
+    {
+      request,
+    },
+  );
+  resetSiteIdentityCaches();
+  resetOwnershipCaches();
+  resetElevationCaches();
+  resetWpUserCaches();
+  server.sudoNoise(true);
+  const before = server.commands.length;
+
+  const noisy = await verifySite(
+    siteWith({ runAs: "auto" }),
+    0,
+    [],
+    undefined,
+    {
+      request,
+    },
+  );
+
+  expect(noisy.checks).toEqual(quiet.checks);
+  expect(noisy.identityIssues).toEqual(quiet.identityIssues);
+  expect(noisy.elevation).toBe("available");
+  expect((await resolveSiteIdentity(noisy.transport)).kind).toBe("site");
+  expect(JSON.stringify(noisy)).not.toContain("resolve host");
+  // The noisy lookup was compared with a plain call: the only extra command.
+  expect(sentSince(before)).toContain(
+    sshCommandLine("/", "env", ["LC_ALL=C", "true"]),
+  );
+});
+
+test.describe("the host lookup is timed only where the run sends commands through sudo", () => {
+  /** The sudo calls a pre-flight of `site` made that ran plain `true` (the lookup's, the probe's). */
+  async function trueCalls(site: SiteConfig): Promise<string[][]> {
+    const before = server.sudoCalls().length;
+    await verifySite(site, 0, [], undefined, { request });
+    return server
+      .sudoCalls()
+      .slice(before)
+      .filter((call) => call.at(-1) === "true");
+  }
+
+  test("site with root opted out: timed as the identity, nothing run as root", async () => {
+    const site = siteWith({ runAs: "auto", elevate: false });
+    expect(await trueCalls(site)).toEqual([
+      ["-n", "-u", "www-data", "-g", "www-data", "true"],
+    ]);
+    expect((await resolveSiteIdentity(site.transport)).kind).toBe("site");
+  });
+
+  test("fallback with root opted out: the run sends nothing through sudo, so no lookup", async () => {
+    server.denySudo({ user: "www-data" });
+    try {
+      const site = siteWith({ runAs: "auto", elevate: false });
+      expect(await trueCalls(site)).toEqual([]);
+      expect((await resolveSiteIdentity(site.transport)).kind).toBe("fallback");
+    } finally {
+      server.denySudo(false);
+    }
+  });
+
+  test("fallback with sudo refused: only the elevation probe's call, no lookup", async () => {
+    server.denySudo(true);
+    try {
+      expect(await trueCalls(siteWith({ runAs: "auto" }))).toEqual([
+        ["-n", "true"],
+      ]);
+    } finally {
+      server.denySudo(false);
+    }
+  });
+
+  test("runAs false with root opted out: no sudo at all", async () => {
+    const before = server.sudoCalls().length;
+    await verifySite(
+      siteWith({ runAs: false, elevate: false }),
+      0,
+      [],
+      undefined,
+      { request },
+    );
+    expect(server.sudoCalls().slice(before)).toEqual([]);
+  });
 });
 
 test("auto: the locale is checked as the identity the probe decided, after it", async () => {

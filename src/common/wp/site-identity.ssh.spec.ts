@@ -126,7 +126,6 @@ test("auto with a verified owner: one run probe through the exact wrapper, then 
       groupNames: ["www-data"],
     },
     umask: "0002",
-    sudoNoise: false,
   });
   const argv = runProbeArgv(
     { user: "www-data", group: "www-data" },
@@ -185,7 +184,6 @@ test("sudo refusing the run probe is fallback/no-sudo", async () => {
     kind: "fallback",
     reason: "no-sudo",
     detail: "sudo: a password is required",
-    sudoNoise: false,
   });
 });
 
@@ -198,7 +196,6 @@ test("wp failing under sudo is fallback/no-wp", async () => {
     kind: "fallback",
     reason: "no-wp",
     detail: "wp: broken",
-    sudoNoise: false,
   });
 });
 

@@ -8,12 +8,10 @@ import {
   RUN_AS_NAME,
   RUN_AS_SCRIPT,
   quotesSudoDenial,
-  hasSudoNoise,
   isSudoName,
   isSudoRefusal,
   runAsArgv,
   sudoName,
-  withoutSudoNoise,
 } from "./run-as-argv";
 import { removeTempDir } from "../__fixtures__/temp-dir";
 
@@ -194,33 +192,6 @@ test.describe("the wrapper, run by /bin/sh", () => {
   });
 });
 
-test("sudo's leading unresolvable-host lines are removed from stderr, every other line kept", () => {
-  const noise = "sudo: unable to resolve host twin: Name or service not known";
-  const stderr = [
-    noise,
-    `${noise}\r`,
-    "Warning: something real",
-    "sudo: a password is required",
-  ].join("\n");
-
-  expect(withoutSudoNoise(stderr)).toBe(
-    "Warning: something real\nsudo: a password is required",
-  );
-  expect(hasSudoNoise(stderr)).toBe(true);
-  expect(hasSudoNoise("sudo: a password is required")).toBe(false);
-  expect(withoutSudoNoise("")).toBe("");
-  expect(withoutSudoNoise(noise)).toBe("");
-});
-
-test("the same line printed later is the program's own: kept, and not noise", () => {
-  const noise = "sudo: unable to resolve host twin: Name or service not known";
-  const programs = `Warning: real\n${noise}`;
-
-  expect(withoutSudoNoise(programs)).toBe(programs);
-  expect(hasSudoNoise(programs)).toBe(false);
-  expect(withoutSudoNoise(`${noise}\n${programs}`)).toBe(programs);
-});
-
 test.describe("isSudoRefusal", () => {
   const noise = "sudo: unable to resolve host twin: Name or service not known";
   /** sudo 1.9.15p5's explicit deny (rule `ALL, !/bin/sh`), as captured, host replaced. */
@@ -288,13 +259,4 @@ test("quotesSudoDenial: sudo's explicit deny on any line, either spelling; nothi
   ]) {
     expect(quotesSudoDenial(stderr)).toBe(false);
   }
-});
-
-test("only a whole line of sudo's noise counts: CRLF ends one, text before it is not noise", () => {
-  const crlf = "sudo: unable to resolve host twin: Name or service not known\r";
-  expect(hasSudoNoise(crlf)).toBe(true);
-  expect(withoutSudoNoise(`${crlf}\nreal`)).toBe("real");
-  const quoted = "Warning: sudo: unable to resolve host twin";
-  expect(hasSudoNoise(quoted)).toBe(false);
-  expect(withoutSudoNoise(quoted)).toBe(quoted);
 });

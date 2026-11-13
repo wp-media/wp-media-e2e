@@ -31,6 +31,7 @@ import {
 } from "./site-identity";
 import { HOSTILE_ARGUMENTS } from "../__fixtures__/hostile-arguments";
 import {
+  FAKE_SUDO_NOISE,
   PRINT_ARGV_PROGRAM,
   decodeArgv,
   startSshServer,
@@ -75,7 +76,7 @@ const runProbes = (): number =>
     .sudoCalls()
     .filter((argv) => argv.some((arg) => arg.includes("e2e-run-probe"))).length;
 
-/** sudo's line on a host missing its own name from `/etc/hosts`. */
+/** sudo's line for a host that cannot resolve its own name, as a program prints it itself. */
 const HOST_NOISE =
   "sudo: unable to resolve host twin-7: Name or service not known";
 
@@ -98,6 +99,7 @@ test.beforeAll(async () => {
     `echo 'real error' >&2; echo '${HOST_NOISE}' >&2; exit 0`,
   );
   started.addProgram("fails", "echo 'Error: not installed' >&2; exit 1");
+  started.addProgram("real-error", "echo 'real error' >&2; echo out; exit 3");
   started.addProgram("utf8", `cat '${utf8File}'; cat '${utf8File}' >&2`);
   started.addProgram("kill-me", "kill -TERM $$\n");
   // What a refusal by sudo looks like to `exec`, at once or once the file `$1` exists.
@@ -112,6 +114,7 @@ test.beforeEach(() => {
   resetSiteIdentityCaches();
   resetOwnershipCaches();
   server.denySudo(false);
+  server.sudoNoise(false);
 });
 
 test.afterEach(() => {
@@ -306,17 +309,54 @@ test.describe("the site state", () => {
     ]);
   });
 
-  test("sudo's unresolvable-host lines leave stderr; every other line, stdout and the exit stay", async () => {
-    const asSite = await exec(siteTransport(), "noisy", []);
-    const asTransport = await exec(server.transport(), "noisy", []);
+  test("sudo's unresolvable-host line leaves the stderr of every command sudo carries, as the site or root; the rest stays", async () => {
+    const transport = siteTransport();
+    // Resolved before sudo turns noisy: what is judged here is the commands, not the probes.
+    await resolveSiteIdentity(transport);
+    server.sudoNoise(true);
 
-    expect(asSite).toEqual({
-      stdout: "out",
-      stderr: "real error",
-      exitCode: 3,
+    const asSite = await exec(transport, "real-error", []);
+    const asRoot = await execElevated(transport, "real-error", []);
+    const siteFails = await exec(transport, "fails", []);
+
+    for (const result of [asSite, asRoot]) {
+      expect(result).toEqual({
+        stdout: "out",
+        stderr: "real error",
+        exitCode: 3,
+      });
+    }
+    expect(siteFails.stderr).toBe("Error: not installed");
+    // Without the fix the line was the first thing a refusal check, a message or a parse read.
+    expect(JSON.stringify([asSite, asRoot, siteFails])).not.toContain(
+      "unable to resolve host",
+    );
+  });
+
+  test("sudo's line on every call changes no decision: the run probe verifies site, a refusal still throws typed, root stays available", async () => {
+    server.sudoNoise(true);
+    resetElevationCaches();
+    const transport = siteTransport();
+
+    await expect(resolveSiteIdentity(transport)).resolves.toMatchObject({
+      kind: "site",
     });
-    // Stripped only under the wrapper: a transport's own command keeps what it printed.
-    expect(asTransport.stderr).toBe(`${HOST_NOISE}\nreal error`);
+    await expect(elevationSupport(transport)).resolves.toBe("available");
+    server.denySudo(true);
+    const refused = exec(transport, "fails", []);
+    await expect(refused).rejects.toBeInstanceOf(SiteIdentityRefusedError);
+    await expect(refused).rejects.not.toThrow(/resolve host/);
+  });
+
+  test("a command run as the transport's user keeps its stderr as printed: one running sudo itself sees sudo's line", async () => {
+    server.sudoNoise(true);
+    const transport = server.transport();
+
+    const own = await exec(transport, "noisy", []);
+    const sudo = await execAsTransport(transport, "sudo", ["-n", "true"]);
+
+    expect(own.stderr).toBe(`${HOST_NOISE}\nreal error`);
+    expect(sudo).toEqual({ stdout: "", stderr: FAKE_SUDO_NOISE, exitCode: 0 });
   });
 
   test("a killed command names the program, never sudo nor its arguments", async () => {
@@ -329,18 +369,21 @@ test.describe("the site state", () => {
     await expect(failure).rejects.not.toThrow(/sudo|SECRET/);
   });
 
-  test("a noise line the program prints after its own is kept; root's stderr is never touched", async () => {
+  test("the same line printed by the program after its own words is kept, as the site or root", async () => {
     const transport = siteTransport();
+    await resolveSiteIdentity(transport);
+    server.sudoNoise(true);
 
     const late = await exec(transport, "noisy-late", []);
-    const root = await execElevated(transport, "noisy", []);
+    const root = await execElevated(transport, "noisy-late", []);
 
-    expect(late).toEqual({
-      stdout: "",
-      stderr: `real error\n${HOST_NOISE}`,
-      exitCode: 0,
-    });
-    expect(root.stderr).toBe(`${HOST_NOISE}\nreal error`);
+    for (const result of [late, root]) {
+      expect(result).toEqual({
+        stdout: "",
+        stderr: `real error\n${HOST_NOISE}`,
+        exitCode: 0,
+      });
+    }
   });
 
   test("the program's own exit 1 is an answer, returned as one", async () => {

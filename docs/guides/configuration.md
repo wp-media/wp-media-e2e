@@ -152,7 +152,9 @@ alias is never run) ([the ssh command line](../architecture/wordpress-automation
 What an `ssh` site needs to reach the `site` state (`<ssh user>`: the transport's `username`). None
 fails a run (a fallback runs as the transport's user). The pre-flight's "Site identity" check names
 each one missing, with its fix; the run's banner lists only what keeps a site out of `site` (a
-fallback's reason, an unverified or different web identity) and sudo's logging.
+fallback's reason, an unverified or different web identity), sudo's logging, and a sudo that waits
+≥ 1 s per call on the host's own name (it does not resolve and the resolver does not answer; reported
+only, the suite drops sudo's `unable to resolve host` line itself, so `/etc/hosts` needs no entry).
 
 1. **Docroot owned by PHP's identity**: `chown -R <web user>:<web group> <docroot>`, and PHP (the
    PHP-FPM pool's `user`/`group`) runs as that pair. `"auto"` takes the owner of `wp-content` only
@@ -165,11 +167,9 @@ fallback's reason, an unverified or different web identity) and sudo's logging.
    `no-sudo`). The SSH user needs no membership in the web group.
 3. **`Defaults:<ssh user> !log_allowed`** beside it: sudo otherwise writes every command line,
    `--key=` values included, to the system log (warned from `sudo -n -l`).
-4. **The host's own name in `/etc/hosts`**: else every sudo call prints `unable to resolve host …`
-   (stripped from output, reported).
-5. **`wp` on sudo's `secure_path`** (e.g. `/usr/local/bin/wp`; `~/bin` is not on it): else `no-wp`.
-6. **The web user can traverse the root's parents** (search access on each): else `no-root-access`.
-7. **`transport.umask`** equal to the web server's (systemd's default `0022` unless the unit sets
+4. **`wp` on sudo's `secure_path`** (e.g. `/usr/local/bin/wp`; `~/bin` is not on it): else `no-wp`.
+5. **The web user can traverse the root's parents** (search access on each): else `no-root-access`.
+6. **`transport.umask`** equal to the web server's (systemd's default `0022` unless the unit sets
    another); the pre-flight warns when the web server reports a different one.
 
 In `site` the SSH user's `~/.wp-cli/config.yml` no longer applies (WP-CLI runs with the identity's
