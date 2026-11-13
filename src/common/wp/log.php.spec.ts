@@ -20,7 +20,7 @@ import type { ClearVerdict } from "./log";
 
 /**
  * The clearing snippet, run for real against real files: WordPress is stood in for by `ABSPATH` and
- * `WP_CONTENT_DIR`. Skipped where PHP is not installed (CI has none); the snippet also runs live on
+ * `WP_CONTENT_DIR`. Skipped where PHP is not installed; the snippet also runs live on
  * every cell. Ownership cannot change here (no root), so "the owner is kept" is proved by the inode
  * and mode surviving.
  */

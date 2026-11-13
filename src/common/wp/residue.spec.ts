@@ -108,6 +108,24 @@ test.describe("removeSiteResidue", () => {
     expect(existsSync(join(wpRoot, "wp-content/uploads/backwpup"))).toBe(false);
   });
 
+  test("removes a remove-only path, a file as well as a directory", async () => {
+    const cache = seed("wp-content/cache/wp-rocket");
+    mkdirSync(join(wpRoot, "wp-content/mu-plugins"), { recursive: true });
+    const licence = join(wpRoot, "wp-content/mu-plugins/e2e-licence.php");
+    writeFileSync(licence, "<?php\n");
+    const other = join(wpRoot, "wp-content/mu-plugins/keep.php");
+    writeFileSync(other, "<?php\n");
+
+    await removeSiteResidue(local, [
+      { path: "wp-content/cache/wp-rocket", prepare: false },
+      { path: "wp-content/mu-plugins/e2e-licence.php", prepare: false },
+    ]);
+
+    expect(existsSync(cache)).toBe(false);
+    expect(existsSync(licence)).toBe(false);
+    expect(existsSync(other)).toBe(true);
+  });
+
   // The site's own content must survive: the point is to remove one plugin's leftovers, not to
   // reset the install.
   test("leaves everything else alone", async () => {
@@ -496,6 +514,18 @@ test.describe("prepareSiteDataDirs", () => {
     expect(existsSync(dir)).toBe(true);
   });
 
+  // A cache or config folder keeps the modes the plugin under test chose: only removed, never opened.
+  test("skips a remove-only path, creating and opening nothing", async () => {
+    const kept = seed("wp-content/cache/min");
+    chmodSync(kept, 0o755);
+    await prepareSiteDataDirs(local, [
+      { path: "wp-content/cache/min", prepare: false },
+      { path: "wp-content/wp-rocket-config", prepare: false },
+    ]);
+    expect(mode(kept)).toBe("0755");
+    expect(existsSync(join(wpRoot, "wp-content/wp-rocket-config"))).toBe(false);
+  });
+
   test("prepares every declared path", async () => {
     await prepareSiteDataDirs(local, [
       "wp-content/uploads/backwpup",
@@ -800,8 +830,30 @@ test.describe("parseResidueDeclaration", () => {
       {
         kind: "path",
         path: "wp-content/uploads/backwpup",
+        prepare: true,
       },
     );
+  });
+
+  test("reads a remove-only path, normalised, never prepared", () => {
+    expect(
+      parseResidueDeclaration({
+        path: " wp-content/./cache/min/ ",
+        prepare: false,
+      }),
+    ).toEqual({ kind: "path", path: "wp-content/cache/min", prepare: false });
+  });
+
+  test("holds a remove-only path to the same rules as a plain one", () => {
+    expect(() =>
+      parseResidueDeclaration({
+        path: "wp-content/mu-plugins",
+        prepare: false,
+      }),
+    ).toThrow(/cannot be removed as leftover data.*WordPress itself owns/s);
+    expect(() =>
+      parseResidueDeclaration({ path: "../x", prepare: false }),
+    ).toThrow(/cannot be removed as leftover data/);
   });
 
   test("reads a family, its parent normalised", () => {
@@ -1237,6 +1289,24 @@ test.describe("prepareResolvedDataDirs", () => {
         DECLARED,
       ),
     ).rejects.toThrow(/"wp-content\/uploads\/somewhere-else".*never removed/s);
+    expect(existsSync(join(wpRoot, "wp-content/uploads"))).toBe(false);
+  });
+
+  // Its writer's modes are what is under test: a resolver naming it must not open it `0777`.
+  test("refuses a remove-only directory, leaving it and its siblings untouched", async () => {
+    const kept = seed("wp-content/cache/min");
+    chmodSync(kept, 0o755);
+    await expect(
+      prepareResolvedDataDirs(
+        local,
+        [
+          `wp-content/uploads/backwpup-restore-${TOKEN}`,
+          "wp-content/cache/min",
+        ],
+        [...DECLARED, { path: "wp-content/cache/min", prepare: false }],
+      ),
+    ).rejects.toThrow(/"wp-content\/cache\/min".*declared remove-only/s);
+    expect(mode(kept)).toBe("0755");
     expect(existsSync(join(wpRoot, "wp-content/uploads"))).toBe(false);
   });
 

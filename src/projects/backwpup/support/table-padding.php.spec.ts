@@ -13,7 +13,7 @@ import { REMOVE_PADDING_PHP, padTablesPhp } from "./table-padding";
  *
  * These snippets drop tables on real sites, so what is pinned is what they drop: only padding, and
  * every earlier padding before counting, so leftovers can never pile up. Skipped where PHP is not
- * installed (CI has none); the snippets also run live on every cell.
+ * installed; the snippets also run live on every cell.
  */
 
 const HARNESS = join(

@@ -3,6 +3,7 @@ import { test, expect } from "@playwright/test";
 import {
   getDebugLogOptions,
   getInstallOutputs,
+  getPrepareActivation,
   getPool,
   getSiteResidue,
   getSettleLeftovers,
@@ -10,6 +11,7 @@ import {
   readRouting,
   registerDebugLogOptions,
   registerInstallOutputs,
+  registerPrepareActivation,
   registerPool,
   registerSiteResidue,
   registerSettleLeftovers,
@@ -194,5 +196,15 @@ test.describe("install-outputs registry", () => {
       /"\/etc" cannot be declared as an install output: it is absolute/,
     );
     expect(getInstallOutputs("spec-bad-outputs")).toBeUndefined();
+  });
+});
+
+test.describe("activation-preparer registry", () => {
+  test("serves back the registered preparer, and nothing for a product without", () => {
+    const prepare = (): Promise<void> => Promise.resolve();
+    registerPrepareActivation("spec-prepare", prepare);
+    expect(getPrepareActivation("spec-prepare")).toBe(prepare);
+    registerPrepareActivation("spec-no-prepare", undefined);
+    expect(getPrepareActivation("spec-no-prepare")).toBeUndefined();
   });
 });

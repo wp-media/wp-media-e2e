@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -22,6 +23,7 @@ import { resetOwnershipCaches } from "../wp/ownership";
 import { DEFAULT_STAGING_DIR, PLUGINS_CATEGORY } from "../wp/staging";
 import {
   registerInstallOutputs,
+  registerPrepareActivation,
   registerSiteDataDirResolver,
   registerSiteDbResidue,
   registerSiteResidue,
@@ -394,6 +396,17 @@ test.describe("declaredResidue", () => {
     ).toBeUndefined();
   });
 
+  test("carries the product's activation preparer, and none for a product without", () => {
+    const prepare = (): Promise<void> => Promise.resolve();
+    registerPrepareActivation("prepare-spec-product", prepare);
+    expect(declaredResidue("prepare-spec-product").prepareActivation).toBe(
+      prepare,
+    );
+    expect(
+      declaredResidue("residue-spec-unregistered").prepareActivation,
+    ).toBeUndefined();
+  });
+
   test("carries the product's resolver for its runtime-named directories", () => {
     const resolve = (): Promise<readonly string[]> => Promise.resolve([]);
     registerSiteDataDirResolver("resolver-spec-product", resolve);
@@ -758,6 +771,29 @@ test.describe("installPluginUnderTest — install outputs", () => {
     expect(existsSync(join(wpRoot, "wp-content/e2e-cache"))).toBe(true);
   });
 
+  // The preparer's file must be neither swept nor recorded as an install output: database sweep,
+  // then the preparer, then the check before the install.
+  test("sweeps the database, then prepares activation, then checks the outputs", async () => {
+    seedDbResidue();
+    await installPluginUnderTest(local, artifact(), {
+      ...bothResidue(),
+      installOutputs: ["wp-content/e2e-cache"],
+      prepareActivation: () => {
+        appendFileSync(argvFile, "prepare-activation\n");
+        return Promise.resolve();
+      },
+    });
+
+    const calls = wpCalls();
+    const swept = calls.findLastIndex((c) => c.includes("leftover-footprint"));
+    const prepared = calls.indexOf("prepare-activation");
+    const checked = calls.indexOf("sh e2e-install-outputs");
+    expect(hasDbResidue()).toBe(false);
+    expect(swept).toBeGreaterThanOrEqual(0);
+    expect(prepared).toBeGreaterThan(swept);
+    expect(checked).toBeGreaterThan(prepared);
+  });
+
   test("a product that declares none runs no check, with or without an empty list", async () => {
     await installPluginUnderTest(local, artifact());
     await replacePluginUnderTest(local, artifact(), {
@@ -789,6 +825,53 @@ test.describe("installPluginUnderTest — install outputs", () => {
     expect(wpCalls().filter((c) => c.startsWith("sh "))).toEqual([
       "sh e2e-install-outputs",
     ]);
+  });
+});
+
+// What a product writes before activation (WP Rocket's licence) must be on the site before the
+// plugin activates, and after the old copy is gone; a preparer that fails must stop the install.
+test.describe("installPluginUnderTest — prepareActivation", () => {
+  /** A preparer that leaves its mark in the stub `wp`'s log, between the `wp` calls around it. */
+  const marking = (): Promise<void> => {
+    appendFileSync(argvFile, "prepare-activation\n");
+    return Promise.resolve();
+  };
+
+  test("runs after the old copy is removed and before the install", async () => {
+    seedInstalled();
+    await installPluginUnderTest(local, artifact(), {
+      ...files(),
+      prepareActivation: marking,
+    });
+
+    const calls = wpCalls();
+    const prepared = calls.indexOf("prepare-activation");
+    const uninstalled = calls.findIndex((c) =>
+      c.startsWith("plugin uninstall"),
+    );
+    const installed = calls.findIndex((c) => c.startsWith("plugin install "));
+    expect(uninstalled).toBeGreaterThanOrEqual(0);
+    expect(prepared).toBeGreaterThan(uninstalled);
+    expect(installed).toBeGreaterThan(prepared);
+  });
+
+  test("a reinstall part-way runs it too, once", async () => {
+    await replacePluginUnderTest(local, artifact(), {
+      ...files(),
+      prepareActivation: marking,
+    });
+    expect(wpCalls().filter((c) => c === "prepare-activation")).toHaveLength(1);
+  });
+
+  test("a preparer that fails ends the install before anything is installed", async () => {
+    await expect(
+      installPluginUnderTest(local, artifact(), {
+        ...files(),
+        prepareActivation: () =>
+          Promise.reject(new Error("licence refused by the site")),
+      }),
+    ).rejects.toThrow(/licence refused by the site/);
+    expect(wpCalls().some((c) => c.startsWith("plugin install "))).toBe(false);
   });
 });
 

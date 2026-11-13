@@ -93,11 +93,13 @@ export function normaliseResiduePath(declared: string): string {
 /**
  * One residue declaration, parsed: a path, or a family of directories the plugin names at runtime.
  *
- * A `family` matches the **directories** directly inside `parent` whose whole name `name` matches —
- * never a file, never a symbolic link, never anything deeper, never the parent itself.
+ * A `path` is prepared as a data directory after each install only when `prepare` is set (a plain
+ * string declaration; `{ path, prepare: false }` is only removed). A `family` matches the
+ * **directories** directly inside `parent` whose whole name `name` matches — never a file, never a
+ * symbolic link, never anything deeper, never the parent itself.
  */
 export type ResidueDeclaration =
-  | { readonly kind: "path"; readonly path: string }
+  | { readonly kind: "path"; readonly path: string; readonly prepare: boolean }
   | {
       readonly kind: "family";
       readonly parent: string;
@@ -138,7 +140,18 @@ export function parseResidueDeclaration(
   declared: SiteResidue,
 ): ResidueDeclaration {
   if (typeof declared === "string") {
-    return { kind: "path", path: normaliseResiduePath(declared) };
+    return {
+      kind: "path",
+      path: normaliseResiduePath(declared),
+      prepare: true,
+    };
+  }
+  if ("path" in declared) {
+    return {
+      kind: "path",
+      path: normaliseResiduePath(declared.path),
+      prepare: false,
+    };
   }
   const { parent, name } = declared;
   const refuse = (reason: string): Error =>
@@ -460,7 +473,8 @@ const DATA_DIR_MODE = "0777";
  * is why the mode is applied independently rather than left to it.
  *
  * A family is skipped: its directories have no name until the plugin picks one, so there is nothing
- * to create here — see {@link prepareResolvedDataDirs}.
+ * to create here — see {@link prepareResolvedDataDirs}. So is a remove-only path
+ * (`{ path, prepare: false }`): its writer's modes are what is under test.
  *
  * @param transport - the target site's transport.
  * @param paths - the product's declared paths, as {@link removeSiteResidue} takes them. Nothing to
@@ -479,7 +493,9 @@ export async function prepareSiteDataDirs(
   const relative = paths
     .map(parseResidueDeclaration)
     .flatMap((declaration) =>
-      declaration.kind === "path" ? [declaration.path] : [],
+      declaration.kind === "path" && declaration.prepare
+        ? [declaration.path]
+        : [],
     );
   if (relative.length === 0) return;
   const root = await wpRootDir(transport);
@@ -500,7 +516,7 @@ export async function prepareSiteDataDirs(
  * @param transport - the target site's transport.
  * @param resolved - what the product's resolver answered, relative to the WordPress root.
  * @param declared - the product's residue declarations, as {@link removeSiteResidue} takes them.
- * @throws Error if a resolved path is unusable or undeclared, or on anything
+ * @throws Error if a resolved path is unusable, undeclared or declared remove-only, or on anything
  * {@link prepareSiteDataDirs} throws for.
  */
 export async function prepareResolvedDataDirs(
@@ -525,6 +541,22 @@ export async function prepareResolvedDataDirs(
       `[wp/residue] the product resolved ${undeclared.map((path) => `"${path}"`).join(", ")} as a ` +
         "data directory, but none of its residue declarations covers it, so it would be prepared and " +
         "never removed. Declare it, or a family matching it, in `ProductConfig.siteResidue`.",
+    );
+  }
+  // A remove-only path keeps the modes its writer chose: preparing it would open it `0777` anyway.
+  const removeOnly = paths.filter((path) =>
+    declarations.some(
+      (declaration) =>
+        declaration.kind === "path" &&
+        !declaration.prepare &&
+        declaration.path === path,
+    ),
+  );
+  if (removeOnly.length > 0) {
+    throw new Error(
+      `[wp/residue] the product resolved ${removeOnly.map((path) => `"${path}"`).join(", ")} as a ` +
+        "data directory, but it is declared remove-only (`{ path, prepare: false }`), so it must " +
+        "never be created or opened. Drop it from the resolver, or declare it as a plain path.",
     );
   }
   await prepareSiteDataDirs(transport, paths);

@@ -163,6 +163,21 @@ test("registers the product's leftover settling for the preflight, in the buildi
   expect(registered).toBe(true);
 });
 
+test("registers the product's activation preparer, in the process building the config", async () => {
+  const file = (path: string): string => importable(join(REPO_ROOT, path));
+  const registered = (await runInChildNode(
+    `
+    const { createProductConfig } = await import(${file("src/common/config/project.ts")});
+    const { getPrepareActivation } = await import(${file("src/common/config/metadata.ts")});
+    const prepare = async () => {};
+    createProductConfig({ ...${JSON.stringify(PRODUCT)}, prepareActivation: prepare });
+    console.log(JSON.stringify(getPrepareActivation("demo") === prepare));
+    `,
+    { cwd: elsewhere, env: { RUN_ID: "run-1" } },
+  )) as boolean;
+  expect(registered).toBe(true);
+});
+
 test("registers the product's install outputs validated, and refuses an unusable one as it builds", async () => {
   const file = (path: string): string => importable(join(REPO_ROOT, path));
   const outcome = (await runInChildNode(

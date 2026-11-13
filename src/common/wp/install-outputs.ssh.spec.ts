@@ -1,8 +1,10 @@
 import { test, expect } from "@playwright/test";
 import {
   appendFileSync,
+  chmodSync,
   mkdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -27,7 +29,9 @@ import type { Transport } from "../config/types";
  * Install outputs over a server that runs what it is sent: one batched check before the install, one
  * after, and only what appeared in between is handed over (as root, through the ownership handover)
  * or, in the `site` state, verified with no root call. The fake `stat` answers per path, so an output
- * owned by someone else shows; the fake `sudo` records every call (root: no `-u`).
+ * owned by someone else shows, and the fake `find` walks the real tree asking it, so the reclaim
+ * check sees those owners too; the fake `sudo` records every call (root: no `-u`) and runs it, so a
+ * grant's `chmod -R` really changes modes here.
  */
 
 let server: SshTestServer;
@@ -72,6 +76,18 @@ answer=$([ -e '${owners}' ] && awk -v p="$p" 'substr($0, index($0, " ") + 1) == 
 [ "$answer" = - ] && { echo "stat: cannot read '$p'" >&2; exit 1; }
 echo "\${answer:-www-data:web:33:82}"`,
   );
+  // `find <path> ! -uid <uid> -print -quit`, the only shape the reclaim check sends (anything else
+  // fails): the real tree, links never followed, each entry's owner from the fake `stat`; one it
+  // cannot read fails the walk, as an unreadable folder fails `find`.
+  started.addProgram(
+    "find",
+    `[ "$#" -eq 6 ] && [ "$2" = "!" ] && [ "$3" = -uid ] && [ "$5" = -print ] && [ "$6" = -quit ] || {
+  echo "find (fake): unexpected arguments" >&2; exit 2; }
+/usr/bin/find "$1" | while IFS= read -r e; do
+  o=$(stat -c '%U:%G:%u:%g' -- "$e") || exit 1
+  [ "$(printf '%s' "$o" | cut -d: -f3)" = "$4" ] || { printf '%s\n' "$e"; exit 0; }
+done`,
+  );
 });
 
 test.beforeEach(() => {
@@ -109,6 +125,13 @@ function ownedBy(relative: string, answer: string): void {
     join(server.base, "owners"),
     `${answer} ${join(server.root, relative)}\n`,
   );
+}
+
+/** The permission bits of `relative` under the root, as `0644`. */
+function modeOf(relative: string): string {
+  return (statSync(join(server.root, relative)).mode & 0o777)
+    .toString(8)
+    .padStart(4, "0");
 }
 
 /** Creates `relative` under the root: a folder, or a file when it ends in `.php`. */
@@ -402,6 +425,148 @@ test.describe("handed over where commands run as the transport's user", () => {
     expect(chownedSince(from)).toEqual([
       join(server.root, "wp-content/cache/e2e-pages"),
     ]);
+  });
+
+  test("a leaf the transport's user owns whole is reclaimed; a shared parent it owns is left, its new child handed over", async () => {
+    create("wp-content/cache");
+    create("wp-content/advanced-cache.php");
+    create("wp-content/e2e-config");
+    writeFileSync(join(server.root, "wp-content/e2e-config/site.php"), "<?php");
+    ownedBy("wp-content/cache", "ubuntu:ubuntu:1000:1000");
+    ownedBy("wp-content/advanced-cache.php", "ubuntu:web:1000:82");
+    ownedBy("wp-content/e2e-config", "ubuntu:ubuntu:1000:1000");
+    ownedBy("wp-content/e2e-config/site.php", "ubuntu:ubuntu:1000:1000");
+    // Root's `chown` forgets the path's pinned answer, so the handover's re-read sees the site's.
+    const owners = join(server.base, "owners");
+    server.addProgram(
+      "chown",
+      `for p do :; done
+awk -v p="$p" 'substr($0, index($0, " ") + 1) != p' '${owners}' > '${owners}.t' && mv '${owners}.t' '${owners}'`,
+    );
+    const transport = server.transport({ runAs: false });
+    const from = server.sudoCalls().length;
+
+    const results = await cycle(transport, () => {
+      create("wp-content/cache/e2e-pages");
+    });
+
+    expect(results).toEqual([
+      {
+        path: "wp-content/cache/e2e-pages",
+        kind: "handed-over",
+        outcome: "normalized",
+      },
+      {
+        path: "wp-content/advanced-cache.php",
+        kind: "reclaimed",
+        outcome: "normalized",
+      },
+      {
+        path: "wp-content/e2e-config",
+        kind: "reclaimed",
+        outcome: "normalized",
+      },
+    ]);
+    expect(chownedSince(from)).toEqual([
+      join(server.root, "wp-content/cache/e2e-pages"),
+      join(server.root, "wp-content/advanced-cache.php"),
+      join(server.root, "wp-content/e2e-config"),
+    ]);
+    const said = warnings.join("\n");
+    expect(said).toMatch(
+      /"wp-content\/e2e-config" existed before the install, owned whole by the transport's user.*handed to the site's ownership/,
+    );
+    expect(said).toMatch(
+      /"wp-content\/cache" existed before the install, owned by the transport's user, but was left.*other declared outputs live beneath it/,
+    );
+  });
+
+  // A recursive handover reaches everything beneath: a shared parent's other files, a declared child
+  // someone else owns, a leaf holding another owner's file must all keep their owner and mode.
+  test("never reclaims a shared parent or a leaf holding another owner's entry: their contents keep their modes", async () => {
+    create("wp-content/cache");
+    create("wp-content/cache/e2e-min");
+    writeFileSync(
+      join(server.root, "wp-content/cache/other-plugin.php"),
+      "<?php",
+    );
+    create("wp-content/e2e-config");
+    writeFileSync(join(server.root, "wp-content/e2e-config/root.php"), "<?php");
+    chmodSync(join(server.root, "wp-content/cache/other-plugin.php"), 0o600);
+    chmodSync(join(server.root, "wp-content/cache/e2e-min"), 0o700);
+    chmodSync(join(server.root, "wp-content/e2e-config/root.php"), 0o600);
+    ownedBy("wp-content/cache", "ubuntu:ubuntu:1000:1000");
+    ownedBy("wp-content/cache/other-plugin.php", "ubuntu:ubuntu:1000:1000");
+    ownedBy("wp-content/cache/e2e-min", "root:root:0:0");
+    ownedBy("wp-content/e2e-config", "ubuntu:ubuntu:1000:1000");
+    ownedBy("wp-content/e2e-config/root.php", "root:root:0:0");
+    const transport = server.transport({ runAs: false });
+    const from = server.sudoCalls().length;
+
+    await expect(cycle(transport, () => undefined)).resolves.toEqual([]);
+
+    expect(rootCallsSince(from)).toEqual([]);
+    expect(modeOf("wp-content/cache/other-plugin.php")).toBe("0600");
+    expect(modeOf("wp-content/cache/e2e-min")).toBe("0700");
+    expect(modeOf("wp-content/e2e-config/root.php")).toBe("0600");
+    const said = warnings.join("\n");
+    expect(said).toMatch(
+      /"wp-content\/cache" existed before the install.*was left.*other declared outputs live beneath it/,
+    );
+    expect(said).toMatch(
+      /"wp-content\/e2e-config" existed before the install.*was left.*another user's, or could not be read/,
+    );
+  });
+
+  test("a leaf whose tree cannot be read whole is never reclaimed", async () => {
+    create("wp-content/e2e-config");
+    writeFileSync(join(server.root, "wp-content/e2e-config/x.php"), "<?php");
+    ownedBy("wp-content/e2e-config", "ubuntu:ubuntu:1000:1000");
+    ownedBy("wp-content/e2e-config/x.php", "-");
+    const transport = server.transport({ runAs: false });
+    const from = server.sudoCalls().length;
+
+    await expect(cycle(transport, () => undefined)).resolves.toEqual([]);
+    expect(rootCallsSince(from)).toEqual([]);
+    expect(warnings.join("\n")).toMatch(
+      /"wp-content\/e2e-config".*was left.*could not be read/,
+    );
+  });
+
+  test("a pre-existing output anyone else owns is never reclaimed, even with nothing new", async () => {
+    create("wp-content/cache");
+    ownedBy("wp-content/cache", "root:root:0:0");
+    create("wp-content/e2e-config");
+    const transport = server.transport({ runAs: false });
+    const from = server.sudoCalls().length;
+
+    await expect(cycle(transport, () => undefined)).resolves.toEqual([]);
+    expect(rootCallsSince(from)).toEqual([]);
+  });
+
+  test("the site state reclaims nothing: the identity cannot hand anything over", async () => {
+    create("wp-content/cache");
+    ownedBy("wp-content/cache", "ubuntu:ubuntu:1000:1000");
+    const transport = server.transport({ runAs: "www-data:web" });
+    expect((await resolveSiteIdentity(transport)).kind).toBe("site");
+    const from = server.sudoCalls().length;
+
+    await expect(cycle(transport, () => undefined)).resolves.toEqual([]);
+    expect(rootCallsSince(from)).toEqual([]);
+  });
+
+  test("without elevation a reclaim is skipped, and only the handover's own warning says so", async () => {
+    server.denySudo(true);
+    create("wp-content/e2e-config");
+    ownedBy("wp-content/e2e-config", "ubuntu:ubuntu:1000:1000");
+    const transport = server.transport({ runAs: false });
+
+    await expect(cycle(transport, () => undefined)).resolves.toEqual([
+      { path: "wp-content/e2e-config", kind: "reclaimed", outcome: "skipped" },
+    ]);
+    const said = warnings.join("\n");
+    expect(said).not.toMatch(/existed before the install/);
+    expect(said).toMatch(/file ownership cannot be corrected/);
   });
 
   test("nothing new: no handover, nothing as root", async () => {

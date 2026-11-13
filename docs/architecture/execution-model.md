@@ -429,14 +429,15 @@ product code: its debug-log preset (`registerDebugLogOptions` / `getDebugLogOpti
 JSON cannot hold), the paths it leaves on disk (`registerSiteResidue` / `getSiteResidue` — RegExps too,
 for runtime-named directory families), its database footprint (`registerSiteDbResidue` /
 `getSiteDbResidue` — would fit metadata, but one channel is easier to follow), how to ask its installed
-plugin for runtime-named data directories (`registerSiteDataDirResolver` / `getSiteDataDirResolver`)
-and how to stop work it may still run (`registerStopRunningWork` / `getStopRunningWork`) (functions: metadata could never carry them),
+plugin for runtime-named data directories (`registerSiteDataDirResolver` / `getSiteDataDirResolver`),
+what its install writes before activation (`registerPrepareActivation` / `getPrepareActivation`; WP
+Rocket's licence) and how to stop work it may still run (`registerStopRunningWork` / `getStopRunningWork`) (functions: metadata could never carry them),
 and what its activation writes outside its folder (`registerInstallOutputs` / `getInstallOutputs` — the one
-registry that validates as it registers, so a bad path fails the config build). The auth setup's preflight reads one more: how to settle what its killed runs left on a site (`registerSettleLeftovers` / `getSettleLeftovers`), run before the gates that damage could fail; the healthcheck never settles. Hooks read files, footprint, resolver and install outputs together through `declaredResidue(product)`
+registry that validates as it registers, so a bad path fails the config build). The auth setup's preflight reads one more: how to settle what its killed runs left on a site (`registerSettleLeftovers` / `getSettleLeftovers`), run before the gates that damage could fail; the healthcheck never settles. Hooks read files, footprint, resolver, install outputs and the activation preparer together through `declaredResidue(product)`
 (`hooks/plugin-lifecycle.ts`), as does a product step reinstalling mid-scenario, so the two never
 prepare or sweep different things. Unlike `getPool`, none throws — declaring none is legitimate and
 costs no round-trip: residue getters return an empty value, `getStopRunningWork`,
-`getSiteDataDirResolver`, `getInstallOutputs` and `getSettleLeftovers` return `undefined` ("nothing
+`getSiteDataDirResolver`, `getInstallOutputs`, `getPrepareActivation` and `getSettleLeftovers` return `undefined` ("nothing
 to ask").
 
 ## Artifact directories & lifecycle

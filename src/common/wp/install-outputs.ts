@@ -1,11 +1,12 @@
 import { posix } from "node:path";
 
-import { describeTarget, exec, wpRootDir } from "./exec";
+import { describeTarget, exec, execAsTransport, wpRootDir } from "./exec";
 import {
   matches,
   normalizeOwnership,
   ownershipOf,
   parseStatOwnership,
+  planOwnership,
 } from "./ownership";
 import { resolveSiteIdentity } from "./site-identity";
 import { withinBudget } from "../deadline";
@@ -24,10 +25,20 @@ import type { Transport } from "../config/types";
  * so each one the install **created** goes through {@link normalizeOwnership}. In `site` the identity
  * wrote them; they are only verified, and a mismatch is warned about.
  *
- * Only what is new is touched: an output that existed before the install (a shared
- * `wp-content/cache`, another plugin's, an earlier run's) is the site's, and a recursive handover of
- * it would take whatever else lives there. Nothing here creates or removes an output — removal is
- * residue's — and nothing here throws: like ownership, it is housekeeping and never fails a scenario.
+ * Only what is new is touched, with one exception. An output that existed before the install is
+ * the site's, and a recursive handover of it would take whatever else lives there — unless it is
+ * owned by the **transport's user** where a handover is due (`planOwnership` → `grant`), most likely
+ * left by a run killed before its handover. Then it is handed over like a new one (`reclaimed`,
+ * warned once it was), but only when that is all a handover can reach: never a declared output with
+ * others declared beneath it (a shared parent such as `wp-content/cache`, where other plugins write
+ * too; its new children are handed over one by one), and only when its **whole tree** is that
+ * user's ({@link RECLAIM_CHECK_SCRIPT}), so another owner's file inside keeps its owner and mode.
+ * What fails either rule is left and warned about. Removing such leftovers before the install was
+ * the alternative; it would delete what is not declared as residue (`advanced-cache.php`,
+ * `wp-content/cache`) or not ours, and a reinstall part-way must not delete a scenario's data. In
+ * `site` nothing is reclaimed: the identity cannot hand anything over. Nothing here creates or
+ * removes an output — removal is residue's — and nothing here throws: like ownership, it is
+ * housekeeping and never fails a scenario.
  * Validation of the declaration lives in `./paths.ts` (`normaliseInstallOutputs`).
  */
 
@@ -60,6 +71,25 @@ for p do
   fi
 done`;
 
+/** A name for `$0` of the reclaim check's shell. */
+const RECLAIM_CHECK_NAME = "e2e-install-outputs-reclaim";
+
+/**
+ * The reclaim check, run as the transport's user: `sh -c <this> <name> <uid> <absolute paths…>`
+ * prints the 1-based index of each path whose whole tree — itself and everything beneath, never
+ * following a symbolic link — is owned by `uid`. A tree holding another owner's entry, or one `find`
+ * could not read whole (it then exits non-zero), is not printed: "unknown" never reads as "ours".
+ * Paths arrive as arguments, never in the script; absolute, so none can be read as an option.
+ */
+export const RECLAIM_CHECK_SCRIPT = `uid=$1
+shift
+i=0
+for p do
+  i=$((i + 1))
+  other=$(find "$p" ! -uid "$uid" -print -quit 2>/dev/null) || continue
+  if [ -z "$other" ]; then printf '%s\\n' "$i"; fi
+done`;
+
 /** One output found on the site: a symbolic link, or an entry with its owner when readable. */
 export type FoundOutput =
   | { readonly kind: "symlink" }
@@ -79,12 +109,21 @@ export type OutputsBefore =
     }
   | undefined;
 
-/** What {@link settleInstallOutputs} did with one new output. */
+/** What {@link settleInstallOutputs} did with one new (or reclaimed) output. */
 export type InstallOutputResult =
   /** Fallback/disabled: given to {@link normalizeOwnership}, with its outcome. */
   | {
       readonly path: string;
       readonly kind: "handed-over";
+      readonly outcome: OwnershipOutcome;
+    }
+  /**
+   * Fallback/disabled: existed before the install, owned by the transport's user while a handover is
+   * due — left by this suite —, so given to {@link normalizeOwnership} too (warned).
+   */
+  | {
+      readonly path: string;
+      readonly kind: "reclaimed";
       readonly outcome: OwnershipOutcome;
     }
   /**
@@ -150,6 +189,153 @@ export function newOutputs(
   after: OutputsFound,
 ): readonly string[] {
   return outputs.filter((path) => after.has(path) && !existing.has(path));
+}
+
+/**
+ * The outputs present both before and after the install, as entries (never a symbolic link) whose
+ * owner was read — the only pre-existing ones {@link reclaimable} may reclaim.
+ *
+ * @param outputs - the declared outputs.
+ * @param existing - those present before the install.
+ * @param after - those present after it.
+ */
+export function keptEntries(
+  outputs: readonly string[],
+  existing: ReadonlySet<string>,
+  after: OutputsFound,
+): readonly string[] {
+  return outputs.filter((path) => {
+    const found = after.get(path);
+    return (
+      existing.has(path) && found?.kind === "entry" && found.owner !== undefined
+    );
+  });
+}
+
+/**
+ * Of `kept`, those owned by the transport's user (by uid) while {@link planOwnership} says a handover
+ * is due (`grant`) and they are not already the site's — what only this suite can have written.
+ *
+ * @param uid - the transport's user's uid.
+ * @param target - the ownership the site expects.
+ * @param kept - pre-existing entries, from {@link keptEntries}.
+ * @param after - what the check after the install read.
+ */
+export function ownedByTransportUser(
+  uid: number,
+  target: SiteOwnership,
+  kept: readonly string[],
+  after: OutputsFound,
+): readonly string[] {
+  return kept.filter((path) => {
+    const found = after.get(path);
+    const owner = found?.kind === "entry" ? found.owner : undefined;
+    return owner?.uid === uid && !matches(owner, target);
+  });
+}
+
+/**
+ * Of `candidates`, those with another declared output beneath them — shared parents, which a
+ * recursive handover must never take, since what else lives there is not the suite's.
+ *
+ * @param candidates - normalised relative paths that could be reclaimed.
+ * @param outputs - every declared output, normalised.
+ */
+export function sharedParents(
+  candidates: readonly string[],
+  outputs: readonly string[],
+): readonly string[] {
+  return candidates.filter((path) =>
+    outputs.some((other) => coveringPath(other, [path]) !== undefined),
+  );
+}
+
+/**
+ * Reads {@link RECLAIM_CHECK_SCRIPT}'s output: the paths it printed, in the order given. Lines that
+ * are not an index of `paths` are ignored.
+ *
+ * @param stdout - what the check printed.
+ * @param paths - the paths it was given, in order.
+ */
+export function parseReclaimCheck(
+  stdout: string,
+  paths: readonly string[],
+): readonly string[] {
+  const printed = new Set(
+    stdout
+      .split("\n")
+      .filter((line) => /^\d+$/.test(line.trim()))
+      .map((line) => Number(line.trim())),
+  );
+  return paths.filter((_, index) => printed.has(index + 1));
+}
+
+/**
+ * What may be reclaimed on this site: of `kept`, those the transport's user left
+ * ({@link ownedByTransportUser}) that are no shared parent ({@link sharedParents}) and whose whole
+ * tree is that user's ({@link RECLAIM_CHECK_SCRIPT}); each one left out for either rule is warned
+ * about. Asks {@link planOwnership} (memoised probes, never privileged) only when something
+ * pre-existing could qualify.
+ *
+ * @param transport - the site's transport.
+ * @param outputs - every declared output.
+ * @param kept - pre-existing entries, from {@link keptEntries}.
+ * @param after - what the check after the install read.
+ * @throws Error if a command could not run (transport failure), as {@link execAsTransport}.
+ */
+async function reclaimable(
+  transport: Transport,
+  outputs: readonly string[],
+  kept: readonly string[],
+  after: OutputsFound,
+): Promise<readonly string[]> {
+  if (kept.length === 0) return [];
+  const plan = await planOwnership(transport);
+  if (plan.kind !== "grant") return [];
+  const uid = plan.identity.uid;
+  const left = ownedByTransportUser(uid, plan.target, kept, after);
+  const parents = new Set(sharedParents(left, outputs));
+  for (const path of parents) {
+    notReclaimed(transport, path, "other declared outputs live beneath it");
+  }
+  const leaves = left.filter((path) => !parents.has(path));
+  if (leaves.length === 0) return [];
+  const whole = new Set(await wholeTreesOwned(transport, uid, leaves));
+  for (const path of leaves) {
+    if (whole.has(path)) continue;
+    notReclaimed(
+      transport,
+      path,
+      "something inside it is another user's, or could not be read",
+    );
+  }
+  return leaves.filter((path) => whole.has(path));
+}
+
+/**
+ * Runs {@link RECLAIM_CHECK_SCRIPT} as the transport's user (whom it asks about), on the absolute
+ * paths composed from the site's root as every check here does.
+ *
+ * @param transport - the site's transport.
+ * @param uid - the transport's user's uid.
+ * @param paths - normalised relative paths, non-empty.
+ * @returns those whose whole tree `uid` owns; none when the check exited non-zero.
+ * @throws Error if the command could not run (transport failure).
+ */
+async function wholeTreesOwned(
+  transport: Transport,
+  uid: number,
+  paths: readonly string[],
+): Promise<readonly string[]> {
+  const root = await wpRootDir(transport);
+  const result = await execAsTransport(transport, "sh", [
+    "-c",
+    RECLAIM_CHECK_SCRIPT,
+    RECLAIM_CHECK_NAME,
+    String(uid),
+    ...paths.map((path) => posix.join(root, path)),
+  ]);
+  return result.exitCode === 0 ? parseReclaimCheck(result.stdout, paths) : [];
 }
 
 /**
@@ -298,11 +484,14 @@ async function settle(
       return [];
     }
     const created = newOutputs(before.outputs, before.existing, after);
-    if (created.length === 0) return [];
+    const kept = keptEntries(before.outputs, before.existing, after);
+    if (created.length === 0 && kept.length === 0) return [];
     const state = await resolveSiteIdentity(transport);
-    return state.kind === "site"
-      ? verifyOwned(transport, created, after, state)
-      : await handOver(transport, created, after);
+    if (state.kind === "site") {
+      return verifyOwned(transport, created, after, state);
+    }
+    const reclaimed = await reclaimable(transport, before.outputs, kept, after);
+    return await handOver(transport, created, reclaimed, after);
   } catch (error) {
     unchecked(transport, "after", errorMessage(error));
     return [];
@@ -344,23 +533,27 @@ function verifyOwned(
 }
 
 /**
- * Every other state: each new output to {@link normalizeOwnership}, which is recursive — so one
- * inside a new output handed over is covered by the outermost such output, costs nothing and carries
- * its outcome. A symbolic link is never handed over, nor covers (`chmod` would follow it).
+ * Every other state: each new output, and each reclaimed one, to {@link normalizeOwnership}, which is
+ * recursive — so one inside another handed over is covered by the outermost such output, costs
+ * nothing and carries its outcome. A symbolic link is never handed over, nor covers (`chmod` would
+ * follow it).
  *
  * @param transport - the site's transport.
  * @param created - the new outputs.
+ * @param reclaimed - pre-existing outputs left by the transport's user ({@link reclaimable}).
  * @param after - what the check after the install read.
  */
 async function handOver(
   transport: Transport,
   created: readonly string[],
+  reclaimed: readonly string[],
   after: OutputsFound,
 ): Promise<readonly InstallOutputResult[]> {
   const links = new Set(
     created.filter((path) => after.get(path)?.kind === "symlink"),
   );
-  const entries = created.filter((path) => !links.has(path));
+  const old = new Set(reclaimed);
+  const entries = [...created.filter((path) => !links.has(path)), ...reclaimed];
   // Every uncovered output first, so a covered one can carry its outcome whatever the declared order.
   const outcomes = new Map<string, OwnershipOutcome>();
   for (const path of entries) {
@@ -368,15 +561,41 @@ async function handOver(
       outcomes.set(path, await normalizeOwnership(transport, path));
     }
   }
-  return created.map((path): InstallOutputResult => {
+  // Said only once one was handed over: where none can be (no elevation), the handover's own
+  // warning already says why, once.
+  for (const path of reclaimed) {
+    if (outcomes.get(path) !== "normalized") continue;
+    warn(
+      transport,
+      `"${path}" existed before the install, owned whole by the transport's user — most likely ` +
+        "left by a run stopped before its handover —; it was handed to the site's ownership like a " +
+        "new output",
+    );
+  }
+  return [...created, ...reclaimed].map((path): InstallOutputResult => {
     if (links.has(path)) return symlinkLeft(transport, path);
     const by = outermostCovering(path, entries);
     // Set above for every uncovered entry; "failed" only to satisfy the type.
     const outcome = outcomes.get(by ?? path) ?? "failed";
-    return by === undefined
-      ? { path, kind: "handed-over", outcome }
-      : { path, kind: "covered", by, outcome };
+    if (by !== undefined) return { path, kind: "covered", by, outcome };
+    return { path, kind: old.has(path) ? "reclaimed" : "handed-over", outcome };
   });
+}
+
+/**
+ * Warns that a pre-existing output owned by the transport's user was not reclaimed, and why.
+ *
+ * @param transport - the site's transport.
+ * @param path - the output.
+ * @param why - the rule it failed, without a final period.
+ */
+function notReclaimed(transport: Transport, path: string, why: string): void {
+  warn(
+    transport,
+    `"${path}" existed before the install, owned by the transport's user, but was left with that ` +
+      `ownership: ${why}, so a recursive handover would take what is not the suite's. The web ` +
+      "server may be unable to write it; hand it over by hand if it is the plugin's",
+  );
 }
 
 /**

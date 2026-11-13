@@ -19,7 +19,7 @@ import type { PluginDirState } from "./plugin-dir";
  * snippet uses of it: `ABSPATH`, `WP_PLUGIN_DIR`, `wp_json_encode`, and a `get_plugins()` that walks
  * the plugins folder as core's does (`wp-admin/includes/plugin.php`): a top-level `.php` file, or one
  * directly inside a top-level folder (followed through a link, as `is_dir` does), that holds a
- * `Plugin Name:` header; dot-names skipped. Skipped where PHP is not installed (CI has none); the
+ * `Plugin Name:` header; dot-names skipped. Skipped where PHP is not installed; the
  * snippet also runs live on every cell.
  */
 

@@ -4,6 +4,7 @@ import type { ScanDebugLogOptions } from "../wp/log";
 import type { SiteDbResidue } from "../wp/db-residue";
 import type {
   Edition,
+  PrepareActivation,
   ResolveSiteDataDirs,
   SiteConfig,
   SettleLeftovers,
@@ -149,7 +150,7 @@ export function registerSiteResidue(
  * The residue paths for a product, or an empty list when it declares none.
  *
  * Never throws: unlike a missing site pool, "this product leaves nothing behind" is a legitimate
- * state — WP Rocket declares none today — and the teardown then does nothing at all.
+ * state, and the teardown then does nothing at all.
  */
 export function getSiteResidue(product: string): readonly SiteResidue[] {
   return siteResidue.get(product) ?? [];
@@ -239,6 +240,38 @@ export function getSiteDataDirResolver(
   product: string,
 ): ResolveSiteDataDirs | undefined {
   return siteDataDirResolvers.get(product);
+}
+
+// Per-process registry: product -> what its install writes right before activating the plugin. A
+// function, so this is its only channel.
+const activationPreparers = new Map<string, PrepareActivation>();
+
+/**
+ * Registers what a product's `@plugin` install writes before it activates the plugin
+ * (`ProductConfig.prepareActivation`). Called while building the config, in each process. A product
+ * whose plugin needs nothing first is not registered.
+ *
+ * @param product - the product's name.
+ * @param prepare - its preparer, or `undefined`.
+ */
+export function registerPrepareActivation(
+  product: string,
+  prepare: PrepareActivation | undefined,
+): void {
+  if (prepare === undefined) return;
+  activationPreparers.set(product, prepare);
+}
+
+/**
+ * A product's activation preparer, or `undefined` when it declares none — the install then runs
+ * nothing for it. Never throws, for the same reason as {@link getSiteResidue}.
+ *
+ * @param product - the product's name.
+ */
+export function getPrepareActivation(
+  product: string,
+): PrepareActivation | undefined {
+  return activationPreparers.get(product);
 }
 
 // Per-process registry: product -> how to stop the work it may still be doing on a site. A function,

@@ -25,6 +25,7 @@ import {
 import { stageAndInstallPlugin } from "../wp/staging";
 import {
   getInstallOutputs,
+  getPrepareActivation,
   getSiteDataDirResolver,
   getSiteDbResidue,
   getSiteResidue,
@@ -38,6 +39,7 @@ import type { FoundDbResidue, SiteDbResidue } from "../wp/db-residue";
 import type { TestInfo } from "@playwright/test";
 import type { ResolvedArtifact } from "../artifacts/types";
 import type {
+  PrepareActivation,
   ResolveSiteDataDirs,
   SiteResidue,
   StopRunningWork,
@@ -79,6 +81,11 @@ export interface DeclaredResidue {
    * Not leftovers to remove: the outputs the install hands over when it created them.
    */
   readonly installOutputs?: readonly string[] | undefined;
+  /**
+   * What the install writes right before it activates the plugin — `ProductConfig.prepareActivation`.
+   * What it writes is declared in {@link files}, so the teardown removes it.
+   */
+  readonly prepareActivation?: PrepareActivation | undefined;
 }
 
 /** A product that declares neither kind of leftover; every step below then costs nothing. */
@@ -97,6 +104,7 @@ export function declaredResidue(product: string): DeclaredResidue {
     db: getSiteDbResidue(product),
     resolveDataDirs: getSiteDataDirResolver(product),
     installOutputs: getInstallOutputs(product),
+    prepareActivation: getPrepareActivation(product),
   };
 }
 
@@ -270,9 +278,10 @@ export function extendedTimeout(current: number): number {
  * @param report - the scenario to attach a cleared plugin folder's report to; without it, the report
  * is only printed.
  * @throws Error if the artifact's slug is unusable, if work left running would not stop, if the
- * removal, the install, asking the plugin for its runtime-named directories or the directory
- * preparation fails (an undeclared one included), or {@link PluginActivationFailedError} if the
- * plugin is not active afterwards. Ownership normalisation is best-effort and never throws.
+ * removal, the product's `prepareActivation`, the install, asking the plugin for its runtime-named
+ * directories or the directory preparation fails (an undeclared one included), or
+ * {@link PluginActivationFailedError} if the plugin is not active afterwards. Ownership
+ * normalisation is best-effort and never throws.
  */
 export async function installPluginUnderTest(
   transport: Transport,
@@ -378,9 +387,9 @@ async function removeOldCopy(
 }
 
 /**
- * The install on a site the old copy has left: sweep its database footprint, install and activate
- * the artifact, hand over (or verify) the outputs its activation created outside its folder, then
- * prepare its data directories — see {@link installPluginUnderTest}.
+ * The install on a site the old copy has left: sweep its database footprint, write what the product
+ * needs before activation (`prepareActivation`), install and activate the artifact, hand over (or
+ * verify) the outputs its activation created outside its folder, then prepare its data directories — see {@link installPluginUnderTest}.
  *
  * @param transport - the target site's transport.
  * @param artifact - the resolved artifact under test.
@@ -394,6 +403,12 @@ async function installFresh(
   // After the old copy's removal: a plugin removed by path after its uninstall failed leaves exactly
   // the rows this sweep takes.
   await sweepDbResidue(transport, residue.db, "before");
+  // On the clean site, before the outputs are recorded: what it writes is the suite's, never an
+  // install output. A failure ends the install — a plugin activated without what it needs (WP
+  // Rocket unlicensed writes no `WP_CACHE`) would be tested in a state no scenario expects.
+  if (residue.prepareActivation !== undefined) {
+    await residue.prepareActivation(transport);
+  }
   // Right before the install, so an output present now is the site's (or an earlier run's), never
   // this install's: only what the install creates is handed over. No command when none is declared.
   const outputsBefore = await recordInstallOutputs(

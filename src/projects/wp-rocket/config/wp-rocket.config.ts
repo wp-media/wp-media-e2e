@@ -3,6 +3,12 @@ import { fileURLToPath } from "node:url";
 
 import { loadSites } from "../../../common/config/sites";
 import { WP_ROCKET_LOG_OPTIONS } from "../support/debug-log";
+import { WP_ROCKET_SITE_DB_RESIDUE } from "../support/db-residue";
+import { writeLicencePlugin } from "../support/licence";
+import {
+  WP_ROCKET_INSTALL_OUTPUTS,
+  WP_ROCKET_SITE_RESIDUE,
+} from "../support/residue";
 import type {
   ProductArtifacts,
   ProductConfig,
@@ -35,7 +41,8 @@ const artifacts: ProductArtifacts = {
 /**
  * WP Rocket product configuration. Globs are repo-root-relative (the Playwright
  * config entry that consumes this lives at the repo root). WP Rocket has no
- * external-service configuration.
+ * external-service configuration: its licence is a dummy one that passes the offline check
+ * (`support/licence.ts`).
  */
 export const wpRocket: ProductConfig = {
   name: "wp-rocket",
@@ -52,4 +59,10 @@ export const wpRocket: ProductConfig = {
   sites: loadSites(configDir),
   artifacts,
   debugLog: WP_ROCKET_LOG_OPTIONS,
+  // Activation writes `WP_CACHE` only for a licensed copy: the dummy licence's must-use plugin goes
+  // in first, and the teardown removes it with the rest of the residue.
+  prepareActivation: (transport) => writeLicencePlugin(transport),
+  installOutputs: WP_ROCKET_INSTALL_OUTPUTS,
+  siteResidue: WP_ROCKET_SITE_RESIDUE,
+  siteDbResidue: WP_ROCKET_SITE_DB_RESIDUE,
 };

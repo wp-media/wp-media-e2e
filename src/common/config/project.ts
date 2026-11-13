@@ -21,6 +21,7 @@ import {
   registerPool,
   registerSettleLeftovers,
   registerSiteDataDirResolver,
+  registerPrepareActivation,
   registerInstallOutputs,
   registerSiteDbResidue,
   registerSiteResidue,
@@ -243,6 +244,10 @@ export function createProductConfig(
   // And for how to ask the installed plugin for the data directories it names at runtime, which the
   // shared install prepares beside the declared ones — a function, so this is its only channel too.
   registerSiteDataDirResolver(product.name, product.resolveSiteDataDirs);
+
+  // And for what the install writes before it activates the plugin (WP Rocket's licence) — a
+  // function too.
+  registerPrepareActivation(product.name, product.prepareActivation);
 
   // And for how to stop work it may still be doing on a site, which the shared teardown asks for
   // before it removes the plugin — a function, so this registry is its only possible channel.
