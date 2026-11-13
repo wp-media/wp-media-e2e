@@ -1,5 +1,7 @@
 import { posix } from "node:path";
 
+import { withoutSudoNoise } from "./sudo-noise";
+
 /**
  * The command line that runs one program as a site's identity: `sudo` to the user and group, then a
  * constant `/bin/sh` wrapper that sets the umask and enters the working directory before `exec`ing the
@@ -126,47 +128,6 @@ export function runAsArgv(
     file,
     ...args,
   ];
-}
-
-/**
- * The line `sudo` adds to stderr on every call when the host cannot resolve its own name. It changes
- * neither the exit code nor stdout, but whoever reads stderr (a refusal's reason, WP-CLI's notices)
- * would read it as the command's own. `sudo` prints it before anything else, so only a **leading** run
- * of such lines is sudo's: the same text later on is the program's own and stays.
- */
-const HOSTNAME_NOISE = /^sudo: unable to resolve host .*$/;
-
-/**
- * How many of `lines` open with sudo's hostname noise.
- *
- * @param lines - stderr split on `\n` (a trailing `\r` is ignored).
- */
-function leadingNoise(lines: readonly string[]): number {
-  const first = lines.findIndex(
-    (line) => !HOSTNAME_NOISE.test(line.replace(/\r$/, "")),
-  );
-  return first === -1 ? lines.length : first;
-}
-
-/**
- * `stderr` without the leading run of sudo's unresolvable-hostname lines.
- *
- * @param stderr - a command's stderr, run through `sudo`.
- * @returns the same text from the first other line on (every later line kept as printed).
- */
-export function withoutSudoNoise(stderr: string): string {
-  const lines = stderr.split("\n");
-  return lines.slice(leadingNoise(lines)).join("\n");
-}
-
-/**
- * Whether `stderr` opens with sudo's unresolvable-hostname noise, for a report naming the fix (the
- * host's name in `/etc/hosts`).
- *
- * @param stderr - a command's stderr, run through `sudo`.
- */
-export function hasSudoNoise(stderr: string): boolean {
-  return leadingNoise(stderr.split("\n")) > 0;
 }
 
 /**

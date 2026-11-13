@@ -7,13 +7,8 @@ import { errorMessage } from "../guards";
 import { printableLine } from "../text";
 import { execAsTransport, installKey, wpRootDir } from "./transport-exec";
 import { parseIdentity, probeSiteOwnership } from "./owner-probe";
-import {
-  hasSudoNoise,
-  isSudoName,
-  quotesSudoDenial,
-  runAsArgv,
-  withoutSudoNoise,
-} from "./run-as-argv";
+import { isSudoName, quotesSudoDenial, runAsArgv } from "./run-as-argv";
+import { withoutSudoNoise } from "./sudo-noise";
 import type { RunAs, ServerMode, Transport } from "../config/types";
 import type { ExecResult } from "./transport-exec";
 import type { SiteOwnership } from "./owner-probe";
@@ -89,8 +84,6 @@ export type IdentityState =
       readonly identity: RunIdentity;
       /** The umask commands get, four octal digits. */
       readonly umask: string;
-      /** The run probe's stderr held sudo's unresolvable-host line: the host's name is missing from `/etc/hosts`. */
-      readonly sudoNoise: boolean;
     }
   | {
       readonly kind: "same-user";
@@ -105,8 +98,6 @@ export type IdentityState =
       readonly reason: FallbackReason;
       /** One printable line saying what was seen; never a credential. */
       readonly detail: string;
-      /** Present when the run probe ran: whether its stderr held sudo's unresolvable-host line. */
-      readonly sudoNoise?: boolean;
     }
   | {
       readonly kind: "disabled";
@@ -150,21 +141,16 @@ export function runProbeArgv(
   return runAsArgv(target, umask, root, "/bin/sh", ["-c", RUN_PROBE_SCRIPT]);
 }
 
-/**
- * What the run probe found. `sudoNoise`: its stderr held sudo's unresolvable-host line (the host's
- * name is missing from `/etc/hosts`), kept so a report names the fix without probing again.
- */
+/** What the run probe found. */
 export type RunProbeOutcome =
   /** It ran in the root with `wp` working; the ids `id` printed (`undefined`: unreadable). */
   | {
       readonly kind: "ran";
       readonly identity: RunIdentity | undefined;
-      readonly sudoNoise: boolean;
     }
   /** It did not run (or ran but failed), and why, as a fallback reason. */
   | {
       readonly kind: "failed";
-      readonly sudoNoise: boolean;
       readonly reason: Extract<
         FallbackReason,
         | "no-sudo"
@@ -198,7 +184,6 @@ const UNKNOWN_ACCOUNT = /^sudo: unknown (?:user|group)\b/m;
  * @param result - what {@link runProbeArgv} returned.
  */
 export function classifyRunProbe(result: ExecResult): RunProbeOutcome {
-  const sudoNoise = hasSudoNoise(result.stderr);
   const stderr = withoutSudoNoise(result.stderr).trim();
   const lines = result.stdout.split("\n");
   const mark = lines.findIndex((line) => line.trim() === RUN_PROBE_MARK);
@@ -212,7 +197,7 @@ export function classifyRunProbe(result: ExecResult): RunProbeOutcome {
    */
   const failed = (
     reason: Extract<RunProbeOutcome, { kind: "failed" }>["reason"],
-  ): RunProbeOutcome => ({ kind: "failed", reason, detail: said, sudoNoise });
+  ): RunProbeOutcome => ({ kind: "failed", reason, detail: said });
   if (mark !== -1) {
     if (result.exitCode === WP_FAILED) return failed("no-wp");
     if (result.exitCode !== 0 && result.exitCode !== ID_FAILED) {
@@ -222,7 +207,7 @@ export function classifyRunProbe(result: ExecResult): RunProbeOutcome {
       result.exitCode === 0
         ? runIdentityFrom(lines.slice(mark + 1).join("\n"))
         : undefined;
-    return { kind: "ran", identity, sudoNoise };
+    return { kind: "ran", identity };
   }
   if (UNKNOWN_ACCOUNT.test(stderr)) return failed("no-identity");
   if (
@@ -456,31 +441,21 @@ function afterRunProbe(
   wanted: Wanted,
   umask: string | undefined,
 ): IdentityState {
-  const { sudoNoise } = outcome;
   if (outcome.kind === "failed") {
-    return fallback(outcome.reason, outcome.detail, sudoNoise);
+    return fallback(outcome.reason, outcome.detail);
   }
   const { identity } = outcome;
   if (identity === undefined) {
-    return fallback(
-      "probe-mismatch",
-      "`id` printed no identity under sudo",
-      sudoNoise,
-    );
+    return fallback("probe-mismatch", "`id` printed no identity under sudo");
   }
   if (identity.uid === 0 || identity.gid === 0) {
-    return fallback(
-      "no-identity",
-      "the identity is root on this host",
-      sudoNoise,
-    );
+    return fallback("no-identity", "the identity is root on this host");
   }
   if (!isWanted(identity, wanted)) {
     return fallback(
       "probe-mismatch",
       `sudo ran as ${idsOf(identity.user, identity.uid, identity.group, identity.gid)}, not ` +
         `${wanted.target.user}:${wanted.target.group}`,
-      sudoNoise,
     );
   }
   return {
@@ -488,7 +463,6 @@ function afterRunProbe(
     target: wanted.target,
     identity,
     umask: umask ?? "0022",
-    sudoNoise,
   };
 }
 
@@ -555,19 +529,9 @@ export function idsOf(
  *
  * @param reason - why.
  * @param detail - what was seen.
- * @param sudoNoise - the run probe's, when it ran (else the field is absent).
  */
-function fallback(
-  reason: FallbackReason,
-  detail: string,
-  sudoNoise?: boolean,
-): IdentityState {
-  return {
-    kind: "fallback",
-    reason,
-    detail,
-    ...(sudoNoise !== undefined ? { sudoNoise } : {}),
-  };
+function fallback(reason: FallbackReason, detail: string): IdentityState {
+  return { kind: "fallback", reason, detail };
 }
 
 // ── Messages ─────────────────────────────────────────────────────────────────────────────────────

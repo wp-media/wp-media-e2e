@@ -45,6 +45,7 @@ import type {
 } from "./site-identity-report";
 import { parseSudoListing } from "./sudo-listing";
 import type { SudoListing } from "./sudo-listing";
+import { probeSudoLookup, sudoLookupAs } from "./sudo-lookup";
 import { describePluginDir, inspectPluginDirs } from "../wp/plugin-dir";
 import {
   blameCellPlugin,
@@ -1136,7 +1137,7 @@ export async function verifySite(
   const plan = await planOwnership(site.transport);
   checks.push(...checkFileOwnership(plan, elevation));
   checks.push(elevationCheck(elevation, plan));
-  const facts = await gatherIdentityFacts(site.transport, web);
+  const facts = await gatherIdentityFacts(site.transport, web, elevation);
   checks.push(identityCheck(facts));
   const pluginDirs =
     slugs.length === 0
@@ -1189,14 +1190,17 @@ async function probeWebVerdict(
  * Everything the "Site identity" check reports. Read-only: the state (its probes, memoised for the
  * process), the WordPress login's check (one `wp eval`, plugins and theme skipped), and — only where
  * the site asks for an identity — `sudo -n -l` (where site commands do or would go through `sudo`) and
- * whether the SSH user has a WP-CLI config (in the `site` state).
+ * whether the SSH user has a WP-CLI config (in the `site` state); and wherever the run sends commands
+ * through sudo (`site`, or root steps), what the host's name costs each call ({@link sudoLookupAs}).
  *
  * @param transport - the site's transport, verified.
  * @param web - the web probe's outcome, when it ran.
+ * @param elevation - the site's elevation support: `available` means root steps go through sudo.
  */
 async function gatherIdentityFacts(
   transport: Transport,
   web: WebProbeOutcome | undefined,
+  elevation: ElevationSupport,
 ): Promise<IdentityFacts> {
   let state: IdentityFacts["state"];
   try {
@@ -1219,6 +1223,11 @@ async function gatherIdentityFacts(
     : undefined;
   const wpCliConfig =
     state.kind === "site" ? await hasWpCliConfig(transport) : undefined;
+  const lookupAs = sudoLookupAs(transport.mode, state, elevation);
+  const sudoLookup =
+    lookupAs === undefined
+      ? undefined
+      : await probeSudoLookup(transport, lookupAs);
   return {
     mode: transport.mode,
     runAs: effectiveRunAs(transport),
@@ -1227,6 +1236,7 @@ async function gatherIdentityFacts(
     ...(wpUser === undefined ? {} : { wpUser }),
     ...(sudo === undefined ? {} : { sudo }),
     ...(wpCliConfig === undefined ? {} : { wpCliConfig }),
+    ...(sudoLookup === undefined ? {} : { sudoLookup }),
   };
 }
 

@@ -144,6 +144,10 @@ const ssh2 = createRequire(import.meta.url)("ssh2") as Ssh2;
 
 // ── The fake programs ─────────────────────────────────────────────────────────────────────────────
 
+/** sudo 1.9.15p5's line for a host that cannot resolve its own name, as the fake `sudo` prints it. */
+export const FAKE_SUDO_NOISE =
+  "sudo: unable to resolve host site-test: Name or service not known";
+
 /** How long a command may run before it is killed (SIGKILL) by default: past any spec's own need. */
 export const COMMAND_TIMEOUT_MS = 20_000;
 
@@ -156,8 +160,11 @@ export const COMMAND_TIMEOUT_MS = 20_000;
  * for (a rule that allows root but not that user); otherwise it `exec`s the rest as the current user.
  * With `$E2E_FAKE_SUDO_DENY.explicit` present it refuses as an explicit deny rule does instead
  * (sudo 1.9.15p5's measured message, no `sudo:` prefix, quoting the whole command, newlines kept).
+ * While `$E2E_FAKE_SUDO_DENY.noise` exists, it first prints the line a host that cannot resolve its
+ * own name adds to every sudo call ({@link FAKE_SUDO_NOISE}).
  */
 const FAKE_SUDO = `#!/bin/sh
+if [ -e "$E2E_FAKE_SUDO_DENY.noise" ]; then echo '${FAKE_SUDO_NOISE}' >&2; fi
 line=
 for arg in "$@"; do
   line="$line:$(printf '%s' "$arg" | od -An -v -tx1 | tr -d ' \\n')"
@@ -330,6 +337,13 @@ export interface SshTestServer {
     deny: boolean | { readonly user: string },
     how?: "no-rule" | "explicit",
   ): void;
+  /**
+   * Makes the fake `sudo` open every call's stderr with {@link FAKE_SUDO_NOISE} (`true`), as on a host
+   * that cannot resolve its own name, or not (`false`, the default).
+   *
+   * @param on - whether it does.
+   */
+  sudoNoise(on: boolean): void;
   /**
    * An ssh transport for this server, rooted at {@link root}. Its host is never resolved: connect
    * through {@link steerNodeSsh}.
@@ -609,6 +623,11 @@ async function listen(
       else writeFileSync(layout.sudoDeny, deny === true ? "" : deny.user);
       if (deny !== false && how === "explicit") writeFileSync(explicit, "");
       else rmSync(explicit, { force: true });
+    },
+    sudoNoise(on) {
+      const noise = `${layout.sudoDeny}.noise`;
+      if (on) writeFileSync(noise, "");
+      else rmSync(noise, { force: true });
     },
     transport: (overrides = {}) => ({
       mode: "ssh",

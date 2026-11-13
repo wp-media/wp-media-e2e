@@ -35,7 +35,7 @@ src/
 │   ├── config/             # env, sites loading (+ run-as.ts: an ssh site's runAs/umask parsing and defaults), run-context, run-id.ts (RUN_ID, a run's report folder), run-env.ts (run-setting variable names), cell pin, drain, metadata, devices, file-owner rule, config factory, output.ts (palettes and printers for setup lines and scripts: `E2E_OUTPUT`-aware; a worker's never coloured)
 │   ├── reporting/          # the suite's reporters (cell notice, results stream, terminal + its sink/lines/worker-output/mode/live-block/live-session/failure-block, run facts, summary), their pure parts, report retention (retention, report-tree, run-pruning, prune-command), page-loads.ts (a failed scenario's lost requests), one run's Allure report (allure-report: temp output + rename, traces strip/keep, analytics loader removed by allure-analytics, one history line per run by allure-history; allure-results, allure-errors, allure-command for `report:allure`), one run's download bundle (report-bundle: `report/` and/or `report.tar.gz`, one `<name>/` inside; bundle-manifest, bundle-landing, bundle-errors), child-group.ts (Allure and `tar` in a process group of their own: only the caller's abort stops them — SIGTERM, then SIGKILL after 5 s —, never a Ctrl-C or SIGHUP to its group)
 │   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ends a saved login)
-│   ├── setup/              # the auth setup's preflight (+ cell-plugin.ts: a broken copy of the cell's plugin; login-shell.ts: the POSIX login-shell gate; site-identity-report.ts: the "Site identity" check and banner issues, pure; sudo-listing.ts: `sudo -n -l`'s `log_allowed`, pure; identity-verdicts.ts: a worker's read of `site-identity.json`), elevation/ownership/identity banners, site info, check-lines.ts (one ✓/✗/→ check list for preflight, artifacts and healthcheck), healthcheck-lines.ts (the healthcheck's output, pure)
+│   ├── setup/              # the auth setup's preflight (+ cell-plugin.ts: a broken copy of the cell's plugin; login-shell.ts: the POSIX login-shell gate; site-identity-report.ts: the "Site identity" check and banner issues, pure; sudo-listing.ts: `sudo -n -l`'s `log_allowed`, pure; sudo-lookup.ts: what the host's unresolvable name costs each sudo call; identity-verdicts.ts: a worker's read of `site-identity.json`), elevation/ownership/identity banners, site info, check-lines.ts (one ✓/✗/→ check list for preflight, artifacts and healthcheck), healthcheck-lines.ts (the healthcheck's output, pure)
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
 │   ├── guards.ts           # type guards for narrowing `unknown`
 │   ├── text.ts             # string helpers: escapeRegExp, escapeHtml, redactSecrets/maskValues (credentials), maskSiteUrl (a baseURL shown safely), siteLabel (its host·port·path, for a progress row), withoutControls (well-formed, no escape or control), plain (one line: + no Cf, combining marks capped at 8), printableLine/printableLines (someone else's text to print: plain then masked, indent kept)
@@ -46,8 +46,8 @@ src/
 │   ├── pages/              # cross-product page objects (plugins, site-health) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm + warm-lines.ts its output, pin)
-│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/), raw Allure results, a stub Allure CLI and a stop at a chosen check (allure.ts), a web server serving the identity probe (probe-web-server.ts), a FIFO's blocked reader released, or fed chunk by chunk, within a deadline, or a FIFO tapped to prove nothing was written through a path (fifo.ts), a `dd` taking `conv=excl` where the runner's (BSD) lacks it (excl-dd.ts), a `.tar.gz` listed from its raw headers (tar-listing.ts), an in-process SSH server that runs what it is sent, with a recording fake `sudo` (ssh-server.ts; `denySudo` all or one `-u` user), the option parsing every fake `sudo` shares (fake-sudo.ts), arguments that must survive every command line (hostile-arguments.ts), the SSH twins' gate, sites, variants, `resetTwin` and the cross-worker lock `withTwin` (ssh-twins.ts: `E2E_SSH_TWINS=1`), a shell command that dies with its spawner even on SIGKILL (tether.ts; `php -S` and the SSH server's commands)
-│   └── wp/                 # WordPress over WP-CLI (exec — exec/wpCli by identity state, wpCli's `--user` in wp-user — over transport-exec, php + php-literal, staging + site-staging (the `site` state's inbox), plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, install-outputs, ownership + owner-probe, paths, cache, db, teardown, errors; site-identity + web-identity + run-as-argv: who site commands run as)
+│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/), raw Allure results, a stub Allure CLI and a stop at a chosen check (allure.ts), a web server serving the identity probe (probe-web-server.ts), a FIFO's blocked reader released, or fed chunk by chunk, within a deadline, or a FIFO tapped to prove nothing was written through a path (fifo.ts), a `dd` taking `conv=excl` where the runner's (BSD) lacks it (excl-dd.ts), a `.tar.gz` listed from its raw headers (tar-listing.ts), an in-process SSH server that runs what it is sent, with a recording fake `sudo` (ssh-server.ts; `denySudo` all or one `-u` user, `sudoNoise` its unresolvable-host line), the option parsing every fake `sudo` shares (fake-sudo.ts), arguments that must survive every command line (hostile-arguments.ts), the SSH twins' gate, sites, variants, `resetTwin` and the cross-worker lock `withTwin` (ssh-twins.ts: `E2E_SSH_TWINS=1`), a shell command that dies with its spawner even on SIGKILL (tether.ts; `php -S` and the SSH server's commands)
+│   └── wp/                 # WordPress over WP-CLI (exec — exec/wpCli by identity state, wpCli's `--user` in wp-user — over transport-exec, php + php-literal, staging + site-staging (the `site` state's inbox), plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, install-outputs, ownership + owner-probe, paths, cache, db, teardown, errors; site-identity + web-identity + run-as-argv: who site commands run as; sudo-noise: sudo's `unable to resolve host` line removed)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
     └── <product>/
@@ -384,17 +384,19 @@ is-installed` passes — a WordPress that cannot boot (old PHP, DB down, a fatal
    gate failure throws a formatted report and skips the scenarios. Four **reports, never gates**: **File
    ownership** (the same `planOwnership` decision `normalizeOwnership` acts on, so report and action
    agree), **Elevation** (passwordless `sudo`?), **Site identity** (state, fallback reason + fix, the
-   web server's identity and umask vs the run's, the WordPress login's `--user` check, sudo's
-   unresolvable-host noise → `/etc/hosts`, `!log_allowed` from `sudo -n -l` where site commands do or
-   would go through sudo, the SSH user's `~/.wp-cli/config.yml` in `site`, a world-writable umask; ⚠
-   when any line warns) and **Plugin folders** (a folder WordPress lists no
+   web server's identity and umask vs the run's, the WordPress login's `--user` check, `!log_allowed`
+   from `sudo -n -l` where site commands do or would go through sudo, the SSH user's
+   `~/.wp-cli/config.yml` in `site`, a world-writable umask, each sudo call's wait on a host name that
+   does not resolve (only from 1 s, `setup/sudo-lookup.ts`; never advice to edit the host); ⚠ when any
+   line warns) and **Plugin folders** (a folder WordPress lists no
    plugin in at the slug the cell installs, which its next `@plugin` scenario removes). No report fails a site for a property of
    the host; the one exception is an unparsable `transport.fileOwner` (our config, unreadable).
    Reports fold into banners per run
    ([`setup/elevation-report.ts`](src/common/setup/elevation-report.ts)): elevation, silent when every site can
    elevate or opted out, naming the ownership cost only where a handover was needed; leftover plugin
    folders; site identity, silent when every site is `site`/`same-user`, verified over HTTP, and its
-   sudo keeps command lines out of its log, or opted out (`runAs: false`: noted on its check line only).
+   sudo keeps command lines out of its log, or opted out (`runAs: false`: noted on its check line only)
+   — except a sudo call waiting ≥ 1 s on the host's name, listed in any state (headed "to note", no fix).
 2. **Authentication** ([`authenticate.ts`](src/common/auth/authenticate.ts)), per real site: end the
    session the cell's previous run saved (`auth/session.ts`: that token only, that host only, via
    `WP_Session_Tokens`), log in once through the UI, save `storageState`. A failing or timed-out
@@ -479,9 +481,12 @@ automatically, and that verification **must not** be skipped. Mirrored as a comm
   function), the login shell POSIX. A signal kill throws `CommandKilledError` on every transport.
 - **Who runs it:** `exec`/`wpCli` follow the site's identity state (`wp/site-identity.ts`): in `site`,
   `exec 'sudo' '-n' '-u' <u> '-g' <g> '--' '/bin/sh' '-c' <wrapper> …` (umask and `cd` inside,
-  sudo's leading hostname noise stripped from stderr, errors name the program, never `sudo`; a
+  errors name the program, never `sudo`; a
   refusal by `sudo` after verification throws `SiteIdentityRefusedError` and forgets the state);
-  every other state sends today's line byte for byte. **Probes and checks about the SSH user use `execAsTransport`**, never
+  every other state sends today's line byte for byte. **sudo's `unable to resolve host …` line** (a
+  host that cannot resolve its own name, every call) is removed from stderr wherever sudo carries a
+  command (site, root; `wp/sudo-noise.ts`); `execAsTransport` keeps stderr as printed, so a caller
+  running `sudo` itself strips it (run probe, `sudo -n -l`). **Probes and checks about the SSH user use `execAsTransport`**, never
   `exec` (`stat`, `id`, `getent`, `sudo -n true`, `readlink -f`, docker `pwd`): `wp/transport-exec.ts`
   (re-exported by `wp/exec.ts`), `wp/owner-probe.ts`, `site-identity.ts` and `web-identity.ts` never
   load `exec.ts`/`ownership.ts` (`layering.spec.ts`). Root stays `execElevated`; `wp` is never root.

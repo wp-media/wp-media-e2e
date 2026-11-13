@@ -45,7 +45,6 @@ const SITE_STATE: IdentityState = {
     groupNames: ["www-data"],
   },
   umask: "0022",
-  sudoNoise: false,
 };
 
 const DISABLED: IdentityState = { kind: "disabled", reason: "config" };

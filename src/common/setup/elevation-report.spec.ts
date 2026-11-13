@@ -378,6 +378,34 @@ test.describe("renderIdentityWarning", () => {
     ]);
   });
 
+  test("an issue with nothing to fix gets no fix line; only such issues head the banner 'to note'", () => {
+    const NOTE = {
+      what: "every sudo call waits about 20.1 s; nothing is required",
+    };
+    expect(
+      renderIdentityWarning([identitySite("a.test", [NOTE])])?.split("\n"),
+    ).toEqual([
+      "",
+      "  ⚠  SITE IDENTITY — 1 site(s) to note",
+      "",
+      "     https://a.test  [ssh: ubuntu@a.test]",
+      "       • every sudo call waits about 20.1 s; nothing is required",
+      "",
+      "     None of these fails a site — a fallback runs as the transport's user, handing files",
+      '     over as before; the rest run as their "Site identity" check says, which says more.',
+      "",
+    ]);
+    // Beside an issue to fix, the banner needs attention; the note still has no arrow.
+    const mixed = renderIdentityWarning([
+      identitySite("a.test", [NOTE]),
+      identitySite("b.test", [ISSUE]),
+    ]);
+    expect(mixed).toContain("SITE IDENTITY — 2 site(s) need attention");
+    expect(mixed?.split("\n").filter((line) => line.includes("→"))).toEqual([
+      "         → add the rule",
+    ]);
+  });
+
   test("one address over two transports is two installs, each listed", () => {
     const banner = renderIdentityWarning([
       identitySite("a.test", [ISSUE]),

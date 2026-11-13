@@ -1,6 +1,6 @@
 # Phase 12 — Run as the site: the web server's identity for every site command
 
-Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8, 12.9 and 12.10 done 2026-11-12; 12.11's non-live part done 2026-11-12 (live rollout and default next). Parent:
+Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8, 12.9 and 12.10 done 2026-11-12; 12.11's non-live part done 2026-11-12, 12.11b 2026-11-13 (live rollout and default next). Parent:
 [e2e-modernization-plan.md](e2e-modernization-plan.md) (§3 phase table). Reverses that plan's §8.2
 rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of WP Rocket's port
 ([phase-6 plan §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket)).
@@ -72,7 +72,7 @@ the checks to repeat on the twins. Re-measure when in doubt.
 | F5 | **Pre-existing:** node-ssh's `exec` drops an empty-string argument (`shell-escape@0.2.0`: `wp option update x ""` → `wp option update x `). It runs `cd <cwd> ; <cmd>`, so a missing `cwd` runs the command in `$HOME` (`node_modules/node-ssh/lib/cjs/index.js:279-280`). |
 | F6 | Under sudo: `HOME=/var/www`; `PATH` = secure_path (`/usr/local/bin/wp` found, `~/bin/wp` not); cwd kept; environment dropped unless passed through `env VAR=…`. |
 | F7 | WP-CLI writes nothing to `HOME` for zip installs, `eval`, `option`, `plugin list`. Only download installs try `/var/www/.wp-cli/cache`: they warn, then succeed. |
-| F8 | An unresolvable hostname makes every sudo call add `sudo: unable to resolve host …` to **stderr**. Exit codes and stdout are unchanged. |
+| F8 | An unresolvable hostname makes every sudo call add `sudo: unable to resolve host <name>[: <reason>]` to **stderr** (`Name or service not known`, or `Temporary failure in name resolution` when no resolver answers; other `sudo:` warnings, e.g. a world-writable `sudo.conf`, may precede it). Exit codes and stdout are unchanged. Cost per call (sudo 1.9.15, 2026-11-13, ubuntu:24.04 and the twins): ~4 ms when the resolver answers or refuses; **~20 s** when it never answers (glibc's 5 s × 2 attempts, A and AAAA; 2 s with `timeout:1 attempts:1`). The suite absorbs the line itself, never asking for the host to change (12.11b). |
 | F9 | sudo + wrapper add ≤ 10 ms per call (83–88 ms → 87–98 ms per round-trip). |
 | F10 | A killed runner leaves the remote command running, with or without sudo (as today). Only the same identity, or root, can kill it. |
 | F11 | `--user=<login>`: `get_current_user_id()` is that user, also with `--skip-plugins --skip-themes`. No database change from the flag. A missing login → exit 1 `Error: Invalid user ID, email or login: '<login>'` from every WordPress-loading command. `core is-installed`, `cli info`, `core version`, `config get` and `db query` ignore it. Re-measured 2026-11-11 (twins, WP-CLI 2.12, PHP 8.5): the login quoted raw (`'o'b"$(id)'`), after 53 PHP 8.5 `Deprecated:` lines on stderr; `--user` runs `Fetchers\User::get_check` in `Runner` (ID if numeric — warning when also a login —, email if email-shaped then login, else login; `Invalid user login: '…'` under `WP_CLI_FORCE_USER_LOGIN`); `ADMIN`, `QA@Example.Test` and `1` all resolve the admin (MySQL's case-insensitive match). |
@@ -462,9 +462,9 @@ fields in `types.ts`. No command reads them yet: 12.3 reads `effectiveRunAs`/`ef
 ### 12.3 — `wp/site-identity.ts` (done 2026-11-10)
 
 Three modules, documented in [wordpress-automation.md](../architecture/wordpress-automation.md#site-identity-wpsite-identityts):
-- `wp/site-identity.ts`: `IdentityState` (`site` with `target`/`identity`/`umask`/`sudoNoise`;
-  `same-user` `mode`|`transport-user`; `fallback` `reason`+`detail` (+`sudoNoise` once the run probe
-  ran); `disabled` `config`|`as-transport-user`),
+- `wp/site-identity.ts`: `IdentityState` (`site` with `target`/`identity`/`umask`;
+  `same-user` `mode`|`transport-user`; `fallback` `reason`+`detail`; `disabled`
+  `config`|`as-transport-user`),
   `decideIdentityState` (pure: state, or the next probe `site`|`run`), `FALLBACK_REASONS` (what +
   fix), `describeIdentityState`, `runProbeArgv`, `classifyRunProbe`, `runIdentityFrom`,
   `resolveSiteIdentity` (memo per `installKey`+`runAs`+`umask`, shared promise, a throw rethrown and
@@ -472,8 +472,8 @@ Three modules, documented in [wordpress-automation.md](../architecture/wordpress
 - `wp/web-identity.ts`: `PROBE_PHP`, `WRITE_SCRIPT`/`ROOT_WRITE_SCRIPT`, `writeFailure`, `probeWebIdentity`, `sweepProbeFiles`, `checkWebIdentity`,
   `webVerdict`, `writeSiteIdentityFile`/`readSiteIdentityFile`/`parseSiteIdentityFile`.
 - `wp/run-as-argv.ts` (pure, imports nothing of `wp/`): `RUN_AS_SCRIPT`, `RUN_AS_NAME`, `runAsArgv`, `sudoName`/
-  `isSudoName` (`#id` for digits), `withoutSudoNoise`/`hasSudoNoise` (F8) — 12.4's argv, built here so
-  the run probe uses the exact wrapper.
+  `isSudoName` (`#id` for digits) — 12.4's argv, built here so the run probe uses the exact wrapper.
+  F8's `withoutSudoNoise`/`hasSudoNoise` live in `wp/sudo-noise.ts` (12.11b).
 - `ownership.ts` exports `probeSiteOwnership` (unmemoised, throws); the fake `sudo` exports
   `$E2E_FAKE_SUDO_USER`/`$E2E_FAKE_SUDO_GROUP` so a fake `id` answers as the identity. Spec fixtures:
   `probe-web-server.ts` (HTTP/HTTPS, gzip/chunked replies), `excl-dd.ts` (a `conv=excl` `dd` where the
@@ -524,7 +524,7 @@ root (ubuntu outside the group, 755 root), `fpm-fcgi` www-data 33:33 umask `0022
 (`sftp_twin(1002):www-data(33)`); `no-sudo` → `no-sudo`; `no-wp` → `no-wp` (`/bin/sh: 1: wp: not
 found`). The sweep removed a 2 h-old root-owned probe (escalated) and kept a fresh one; no allowed
 `COMMAND=` line in the sudo log (`!log_allowed`); no probe file left. After the audit fixes (nginx
-`site`): `owner-is-web` → `site` (`sudoNoise: false`) through the real sudo and the new wrapper; with
+`site`): `owner-is-web` → `site` through the real sudo and the new wrapper; with
 `readlink` slowed 0.8 s and a `www-data` watcher planting a symlink to a root-read FIFO, 3/3 planted,
 3/3 `not-writable` (`dd: … File exists`), 0 bytes through; the old `set -C` line, same plant, delivered
 its payload.
@@ -540,8 +540,7 @@ Documented in [wordpress-automation.md → Transport & exec](../architecture/wor
   `ownership.ts`). `transport-exec`, `run-as-argv`, `owner-probe`, `site-identity`, `web-identity`
   never load `exec.ts`/`ownership.ts` at run time (`layering.spec.ts`, type-only imports not followed).
 - **Line in `site`:** `exec <runAsArgv quoted>` (no outer `cd`); stderr through `withoutSudoNoise`
-  (the **leading** run of noise lines only) under the wrapper only (root's `sudo -n --` line and
-  stderr and the transport's untouched); messages name the program. Output: `onStdout`/`onStderr`
+  (root's too since 12.11b; the transport's untouched); messages name the program. Output: `onStdout`/`onStderr`
   buffers decoded once. A `sudo` refusal after verification (`isSudoRefusal`: exit 1, stderr only
   `sudo:` lines and/or the unprefixed, multi-line `Sorry, user … is not allowed to execute '…'`)
   throws `SiteIdentityRefusedError` (program + site, no stderr: sudo quotes the command) and
@@ -607,8 +606,8 @@ Left open (owners named):
 - **12.7 (decided: kept):** `ownership.ts`'s `warnOnce` dedupes per install + reason across states
   (an `asTransportUser` copy shares an install's warnings). In `site` only `bad-input`/`bad-owner` can
   warn (state-independent text); every other state warns the same text and fix for the same reason.
-- **12.9 (done):** the `wp --info` gate's hint names the identity in `site`; root's sudo lines keep
-  the hostname noise (only the wrapper strips it; the report's `/etc/hosts` fix covers both).
+- **12.9 (done):** the `wp --info` gate's hint names the identity in `site`. (Root's sudo stderr kept
+  F8's line until 12.11b, which strips it there too.)
 - **Known limit:** a program run as the site that itself exits 1 printing only `sudo:` lines is read
   as sudo's refusal (none of the suite's does).
 - **12.9 (decided: gate, kept):** transport-level and root commands still start with `cd -- <cwd>` as
@@ -906,7 +905,7 @@ Documented in AGENTS.md ("Auth fixture / setup" step 1, healthcheck) and
 - **Check content** (`setup/site-identity-report.ts`, pure): state (`describeIdentityState`, fallback
   with fix), web identity/umask/SAPI vs docroot, run-vs-web mismatch (declared `runAs`), web umask ≠
   run umask, world-writable umask (`umask & 0o002 === 0`), the `--user` check (an unmemoised
-  `wp --skip-plugins --skip-themes eval` of `wpUserCheckArgs`), F8 noise → `/etc/hosts`, `sudo -n -l`
+  `wp --skip-plugins --skip-themes eval` of `wpUserCheckArgs`), F8's per-call wait (≥ 1 s; 12.11b), `sudo -n -l`
   in `site`/`fallback` (§ variant table wants it in `owner-not-web`), `~/.wp-cli/config.yml` in `site`.
   ⚠ (`CheckResult.warning`, rendered by `checkLines`) when a line warns; `disabled` is a note.
 - **`sudo -n -l` parser** (`setup/sudo-listing.ts`, `env LC_ALL=C`): `Matching Defaults` entries split on
@@ -1111,7 +1110,6 @@ Documented in AGENTS.md ("Auth fixture / setup" step 1, healthcheck) and
   - `ubuntu ALL=(ALL) NOPASSWD: ALL` (`(ALL:ALL)` only if the group is not one of the web user's,
     F1);
   - `Defaults:ubuntu !log_allowed` (F19);
-  - the hostname in `/etc/hosts`;
   - `wp` in `/usr/local/bin`;
   - the PHP-FPM pool user = the docroot owner.
 - Modernization plan §8.2 records the reversal; §8.4's `runWpAs` obligation closed.
@@ -1160,26 +1158,26 @@ Documented in AGENTS.md ("Auth fixture / setup" step 1, healthcheck) and
     run poll end to poll end, and the spec's lower bound is exact (release time − call time).
     12 workers: before 4/100 failed; after 600/600, and 100/100 beside 24 CPU hogs and file churn;
     the old `withTwin` fails the new spec 100/100.
-  - **Default `"auto"`: ready-to-apply checklist** (measured by flipping it in an isolated copy:
-    `test:unit` 7 failures, 6 of them the specs below, the 7th the flake above, since fixed):
+  - **Default `"auto"`: ready-to-apply checklist** (re-measured 2026-11-13 after 12.11b by flipping it
+    in an isolated copy: `test:unit` 5 failures, exactly the 5 specs in step 3, 5962 passed):
     1. Before merging: every real `ssh` site not yet switched gets an explicit `"runAs": false` in its
        git-ignored sites file (this checkout's and the orchestrator servers'), or the flip switches it
        unchecked. Placeholder examples and the twin overlays (explicit `"auto"`) need nothing.
     2. `src/common/config/run-as.ts`: `DEFAULT_SSH_RUN_AS = "auto"`; reword its TSDoc (no longer "moves
        only after…": absent now asks for the identity, verified by the pre-flight, `false` opts out).
        Other TSDoc calling `false` the default or absent `disabled`: `identity-verdicts.ts:15`
-       (module doc), `site-identity-report.ts:72` (`asksForIdentity`), `wp/site-identity.ts:318`
+       (module doc), `site-identity-report.ts:79` (`asksForIdentity`), `wp/site-identity.ts:303`
        (`decideIdentityState` rule 2).
     3. Specs pinning the old default (deliberate re-pins, explained in the commit, not loosened):
-       `run-as.spec.ts:27-29` (expect `"auto"`); `identity-verdicts.spec.ts:88` (absent now reads the
-       verdict file: move it from the "never read" case to the `auto` one);
-       `site-identity-report.spec.ts:512` (`asksForIdentity`: absent asks);
-       `exec.site.ssh.spec.ts:309` (its as-transport baseline is `server.transport()`: give it
-       `runAs: false`); `housekeeping.site.ssh.spec.ts:315/331` ("runAs absent" expects `disabled`:
-       now `fallback/unverified` with no verdict — keep the case, expect that, or declare `false`);
-       `site-identity.ssh.spec.ts:329-331` (comment and `disabled` → declare `false`). Still passing
-       but relabel: `staging.site.ssh.spec.ts:435/566` and `exec.site.ssh.spec.ts:164` "runAs absent"
-       (now `fallback/unverified`, still today's line).
+       `run-as.spec.ts:28` (expect `"auto"`, line 29); `identity-verdicts.spec.ts:88` (absent now reads
+       the verdict file and warns, line 95: move it from the "never read" case to the `auto` one);
+       `site-identity-report.spec.ts:537` (`asksForIdentity`, line 541: absent asks);
+       `housekeeping.site.ssh.spec.ts:315/331` ("runAs absent" expects `disabled`: now
+       `fallback/unverified` with no verdict — keep the case, expect that, or declare `false`);
+       `site-identity.ssh.spec.ts:306` (comment and `disabled` at 327 → declare `false`). Still passing
+       but relabel: `staging.site.ssh.spec.ts:435/566` and `exec.site.ssh.spec.ts:167` "runAs absent"
+       (now `fallback/unverified`, still today's line). `exec.site.ssh.spec.ts`'s as-transport noise
+       case (12.11b replaced the old baseline there) no longer fails.
     4. Docs: AGENTS.md "Site identity fields" (drop "keep real sites at `false`…", default `"auto"`);
        configuration.md `runAs` (absent = `"auto"`; `false` the opt-out; drop the "keep at `false`"
        sentence); wordpress-automation.md Transport & exec ("`runAs` absent or `false`" → "`runAs:
@@ -1195,6 +1193,65 @@ Documented in AGENTS.md ("Auth fixture / setup" step 1, healthcheck) and
     risk — a `false` forgotten after its server was fixed — is better met by the rollout (step 1
     above lists each such site; remove each `false` as its cell switches) than by a permanent warning
     every live run would carry. Revisit if an opted-out site is ever found forgotten.
+
+### 12.11b — Recover from sudo's hostname line in-project (done 2026-11-13)
+
+- **Decision (user, 2026-11-13):** the `/etc/hosts` fix is dropped from the plan, docs and the
+  pre-flight's advice. The suite runs on many servers over time and nobody edits each one's
+  `/etc/hosts`: the project absorbs F8 itself.
+- **Audit — every consumer of sudo's output:** the `site` wrapper (already stripped); `execElevated`
+  over `ssh`/`local` — ownership grant (`chmod`/`chown` messages), residue (`find`, `chown`, retries,
+  messages), staging/site-staging removal messages, `debug.log` read/clear fallbacks, the web probe's
+  root write (`writeFailure`) and removal, BackWPup's content copy (`benignCopyWarnings`: tar's exit 1
+  with only benign warnings **was refused** with sudo's line first — the restore not run — a real
+  outcome change) and its leftover claim (`mv` message); `sudo -n true` (exit only); the run probe
+  (stripped itself); `sudo -n -l`'s parser (a lone line read as a refusal). All stripped now: in
+  `transport-exec.ts` for every command it routes through sudo, in the parser for `sudo -n -l`; the
+  run probe already was. `execAsTransport` stays raw (documented).
+- **Stripper** (`wp/sudo-noise.ts`): only `^sudo: unable to resolve host \S.*$` lines among sudo's
+  leading `sudo:` lines (a world-writable `sudo.conf` warning can precede it, measured); everything
+  else byte for byte; the untranslated text only (sudo localises it under a locale it has a catalogue
+  for: measured with `language-pack-de-base` and `LANG=de_DE.UTF-8`; known limit: a server whose SSH
+  sessions run under such a locale keeps the line in what it reports).
+- **Cost and report:** F8's measurements. `sudoNoise` is gone from the state and run probe (no fix
+  to name). Instead the pre-flight times one sudo call only where the run sends commands through sudo
+  (`sudoLookupAs`, pure): `site` → `env LC_ALL=C sudo -n -u <user> -g <group> true` (never root, so a
+  site opting out of root or refused it runs nothing as root); else elevation `available` → `env
+  LC_ALL=C sudo -n true` (what the elevation probe already ran); `docker`, or a site with neither
+  (`fallback`/`disabled`/`same-user` without root) → none (the run pays no wait there, so none is
+  reported). Only when the line shows, `env LC_ALL=C true` for the round trip. `LC_ALL=C`: sudo
+  translates the line under a locale it has a catalogue for. ≥ 1 s per call is a ⚠ line in the "Site
+  identity" check and a banner note in any state (no fix line; a banner of only notes is headed "to
+  note"); below it, nothing. Cost per site per run: one round trip (two when the line shows); a
+  silent resolver makes the timed call itself wait ~20 s, as every other sudo call the pre-flight
+  and run make does.
+- **New commands on a live `runAs: false` site:** elevation `available` → `env LC_ALL=C sudo -n true`
+  as the SSH user from `/` (root runs `true`, the same call the elevation probe already makes), plus
+  `env LC_ALL=C true` only when sudo prints the host line; elevation `disabled`/`unavailable` → none.
+  Both read-only (pinned in `preflight.identity.ssh.spec.ts`). Every other change only strips stderr.
+- **English for every sudo-routed command — rejected (measured 2026-11-13, ubuntu:24.04, sudo
+  1.9.15p5, `language-pack-de-base`):** sudo's `env_check` passes `LANG`/`LC_*` to the command (not
+  in `env_keep`; `env LC_ALL=C sudo -n -u www-data -g www-data env` shows `LC_ALL=C`), so the change
+  reaches `wp`, PHP and tar. `LC_ALL=C` turns tar's listing of `café.txt` into `caf\303\251.txt`
+  (`wp/archive.ts` parses listings); PHP's own locale is unaffected (`C.UTF-8` either way).
+  `LC_MESSAGES=C` keeps names but loses to a session's `LC_ALL` (measured: still German), and either
+  changes the line every non-`site` state sends byte for byte (root steps on `runAs: false` sites).
+  The limit stays: a session under a translated locale keeps sudo's line in stderr (quoted in
+  messages, never a wrong pass). **Deferred (latent, pre-existing):** under such a locale tar's own
+  warnings are translated too (`Datei … nicht gefunden`), so the content copy's `benignCopyWarnings`
+  refuses a copy that only raced a changing file — fail-safe (the restore is not run); fix with the
+  content copy's own tar under `LC_MESSAGES=C` if a translated host appears.
+- **Tests:** `sudo-noise.spec.ts` (forms, CRLF, preceding warnings, later lines kept, nothing else
+  touched), `sudo-lookup.spec.ts`, `sudo-listing.spec.ts`, `site-identity-report.spec.ts`; the fake
+  `sudo`s (in-process SSH server, local, the content copy's host) gained a noise switch:
+  `exec.site.ssh`, `exec`, `content-copy`, `preflight.identity.ssh` prove identical outcomes and clean
+  messages; `sudo-noise.ssh-twins.spec.ts` does it on real sudo (hostname removed, resolver refusing:
+  same checks/issues as resolvable, clean `ls` errors as site and root; resolver silent: the wait
+  reported, ~2 s). Without the fixes the root, listing, copy and stripper specs fail. Audit fixes
+  (2026-11-13): `sudoLookupAs` every mode × state × elevation, the in-process gate (`site` with root
+  opted out → as the identity; `fallback` without root, `runAs: false` without root → no lookup),
+  `LC_ALL=C` pinned, the banner's note without a fix line; each mutant (old gate, no `site` branch,
+  always root, no `docker` exclusion, no `LC_ALL=C`) fails them.
 
 ### 12.12 — WP Rocket declarations and licence
 
@@ -1314,7 +1371,7 @@ Documented in AGENTS.md ("Auth fixture / setup" step 1, healthcheck) and
 | The identity changes mid-process | Probe throws propagate; probes never go through the resolver; separate caches (§2.1). |
 | sudo's forced umask `0002` (F3) | The wrapper sets it; the twin spec asserts stub modes. |
 | sudoers refuses a group (F1) and says "a password is required" (F2) | The run probe uses the exact wrapper; the report names `(ALL:ALL)`. |
-| Hostname noise in stderr (F8) | Stripped in `runSsh` under the wrapper; the pre-flight names the fix. |
+| Hostname noise in stderr (F8) | Stripped from every command sudo carries (site, root over `ssh`/`local`); callers running sudo themselves strip it; unit, in-process and twin specs prove identical outcomes and clean messages (12.11b). A resolver that never answers costs each call its timeout: measured and reported from 1 s, never failed. |
 | Private files servable once owned by the web user | The private folder leaves the docroot in `site` (12.10); the record too (12.15). Staging still holds plugin zips (not secret); 6J keeps the staging area off the web. |
 | `--user` changes plugin behaviour or breaks mid-run (live at 12.6's merge, before 12.10) | No DB writes from the flag (F11); BackWPup `cli-reads`/`cli-runs` identical with and without it on `legacy-777` (12.6); retry and a later re-check on the exact error (§2.3); 12.10 checks the BackWPup places it could touch. |
 | A BackWPup scenario silently depends on two users | 12.10's baseline-versus-new comparison; a new skip or failure blocks the phase. |

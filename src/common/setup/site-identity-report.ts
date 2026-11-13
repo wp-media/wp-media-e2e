@@ -16,18 +16,22 @@ import { describeWpUserDrop } from "../wp/wp-user";
 import type { WpUserCheck } from "../wp/wp-user";
 import type { CheckResult } from "./preflight";
 import type { SudoListing } from "./sudo-listing";
+import { slowSudoLookup } from "./sudo-lookup";
+import type { SudoLookup } from "./sudo-lookup";
 
 /**
  * The pre-flight's "Site identity" report: who a site's commands run as, whether the web server was
- * seen running as the same identity, and what a host still lacks (`!log_allowed`, `/etc/hosts`, a
- * safe umask). Pure: the facts are gathered by `preflight.ts`, rendered here as one check (never a
- * gate) and as the issues the run-level banner lists (`elevation-report.ts`).
+ * seen running as the same identity, what a host still lacks (`!log_allowed`, a safe umask), and
+ * what its sudo costs when the host's own name does not resolve. Pure: the facts are gathered by
+ * `preflight.ts`, rendered here as one check (never a gate) and as the issues the run-level banner
+ * lists (`elevation-report.ts`).
  *
  * The banner is silent when every site runs as its identity (`site`) or already is it (`same-user`),
  * that identity is the web server's as seen over HTTP, and sudo, where site commands go through it,
  * keeps their command lines out of its log — or opted out (`runAs` false: `disabled`, a choice, not a
- * fault). Everything else the check reports (umask, WP-CLI's `--user`, a WP-CLI config that no longer
- * applies) stays on the site's own lines.
+ * fault) — and no sudo call waits a second or more on the host's own name (any state: root steps use
+ * sudo too). Everything else the check reports (umask, WP-CLI's `--user`, a WP-CLI config that no
+ * longer applies) stays on the site's own lines.
  */
 
 /** The check's name in reports. */
@@ -58,12 +62,15 @@ export interface IdentityFacts {
   readonly sudo?: SudoListing;
   /** Whether the SSH user has `~/.wp-cli/config.yml`; asked only in the `site` state. */
   readonly wpCliConfig?: boolean;
+  /** What the host's name costs each sudo call; asked only where the run sends commands through sudo. */
+  readonly sudoLookup?: SudoLookup;
 }
 
 /** One thing the banner lists for a site: what is wrong, and how to fix it. */
 export interface IdentityIssue {
   readonly what: string;
-  readonly fix: string;
+  /** How to fix it; absent when nothing is required (`what` then says so). */
+  readonly fix?: string;
 }
 
 /**
@@ -362,14 +369,12 @@ function notes(facts: IdentityFacts): Note[] {
     }
   }
   if (facts.wpUser !== undefined) lines.push(wpUserLine(facts.wpUser));
-  if (
-    (state.kind === "site" || state.kind === "fallback") &&
-    state.sudoNoise === true
-  ) {
+  const wait = slowSudoLookup(facts.sudoLookup);
+  if (wait !== undefined) {
     lines.push(
       warn(
-        "sudo cannot resolve this host's name and says so on every call (the suite drops the line). " +
-          "Fix: add the host's name to /etc/hosts.",
+        `Every sudo call waits ${wait} for this host's own name, which does not resolve: site ` +
+          "commands and root steps run, each that much slower.",
       ),
     );
   }
@@ -406,7 +411,8 @@ export function identityCheck(facts: IdentityFacts): CheckResult {
 /**
  * What the run-level banner lists for a site; empty when the site needs nothing (the banner's
  * silence: `site`/`same-user`, the web server seen running as that identity, and sudo, where it
- * matters, not logging command lines; or `disabled`, an opt-out).
+ * matters, not logging command lines; or `disabled`, an opt-out — and sudo not slowed by the host's
+ * name).
  *
  * @param facts - the site's facts.
  */
@@ -454,6 +460,12 @@ export function identityIssues(facts: IdentityFacts): IdentityIssue[] {
           ? "sudo logs every command line it runs, `--key=` values included"
           : "whether sudo logs command lines is unknown (`sudo -n -l` gave no listing)",
       fix: LOG_FIX,
+    });
+  }
+  const wait = slowSudoLookup(facts.sudoLookup);
+  if (wait !== undefined) {
+    issues.push({
+      what: `every sudo call waits ${wait} for this host's own name, which does not resolve; nothing is required: the run goes on, slower, until it does`,
     });
   }
   return issues;

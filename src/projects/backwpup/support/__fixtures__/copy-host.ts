@@ -48,7 +48,13 @@ import type { LocalTransport } from "../../../../common/config/types";
  *   `race-old` — the same, unstamped; `gone` — another run claimed and settled it; `fail` — the
  *   rename fails, source kept; `swap` — it succeeds, then the claimed directory is swapped for a link;
  *   `shrink` — it succeeds, and the whole copy is gone from it.
+ * - `H_SUDO_NOISE`: `sudo` opens every call's stderr with the line a host that cannot resolve its own
+ *   name adds ({@link SUDO_NOISE}).
  */
+
+/** sudo's line for a host that cannot resolve its own name. */
+export const SUDO_NOISE =
+  "sudo: unable to resolve host web1: Name or service not known";
 
 /** The boot id the stubbed host reports as current. */
 export const BOOT = "11111111-1111-4111-8111-111111111111";
@@ -86,6 +92,7 @@ const ENV = [
   "H_SWAP_TOKEN",
   "H_SWAP_TOKEN_ON_TF",
   "H_SUDO_REFUSE_MAKE",
+  "H_SUDO_NOISE",
 ];
 
 /** A stubbed host and a scratch WordPress root on it. */
@@ -128,7 +135,8 @@ export function copyHost(): CopyHost {
   stub(
     binDir,
     "sudo",
-    `${SKIP_SUDO_OPTIONS}
+    `[ -n "\${H_SUDO_NOISE:-}" ] && echo '${SUDO_NOISE}' >&2
+${SKIP_SUDO_OPTIONS}
 case "$1" in
   true) exit 0 ;;
   du) [ -n "\${COPY_DU_EMPTY:-}" ] && exit 1; printf '%s\\t%s\\n' "\${COPY_DU_KB:-1000}" "$4"; exit 0 ;;

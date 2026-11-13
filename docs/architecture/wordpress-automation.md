@@ -80,10 +80,7 @@ not set it), which `wpCli` passes as `--user` ([below](#wordpress-runs-as-the-si
   '-c' <RUN_AS_SCRIPT> 'e2e-run-as' <umask> <cwd> <file> <args…>` (`runAsArgv`; numeric halves `#id`),
   **no outer `cd`**: the wrapper sets the umask and enters `cwd` as the identity, so the SSH user needs
   no access to it; a `cwd` it cannot enter runs nothing (`e2e-run-as: …: cd: can't cd …`). `wp` and
-  every program must be on sudo's `secure_path`. stderr loses sudo's **leading** `unable to resolve
-  host …` lines (a host missing its own name from `/etc/hosts`; stdout and exit unchanged; the same
-  line printed later is the program's and stays), which `parseCliNotices`, `describeExit` and
-  `evalPhp` errors would read as the command's. Root's line and stderr are unchanged. A refusal by
+  every program must be on sudo's `secure_path`. A refusal by
   `sudo` itself after the state was verified (exit 1, stderr wholly sudo's: `sudo:` lines and/or its
   explicit deny `Sorry, user … is not allowed to execute '<command>' …`, unprefixed and spanning as
   many lines as the arguments hold newlines; a rule changed mid-run; `isSudoRefusal`) is no exit of
@@ -91,6 +88,22 @@ not set it), which `wpCli` passes as `--user` ([below](#wordpress-runs-as-the-si
   `SiteIdentityRefusedError` (program and site only: sudo's deny quotes the arguments) and forgets
   the resolution it ran on (`forgetSiteIdentity(transport, promise)`: never a newer one, so commands
   in flight cause one re-resolution, not one each), which the next command resolves again.
+- **sudo's unresolvable-host line** ([`wp/sudo-noise.ts`](../../src/common/wp/sudo-noise.ts)): a host
+  that cannot resolve its own name makes sudo 1.9.15 print `sudo: unable to resolve host <name>[:
+  <reason>]` on every call (stdout and exit unchanged). The suite never asks for the host to be fixed:
+  `withoutSudoNoise` removes it wherever sudo carries a command — the `site` line and root over
+  `ssh`/`local` (`docker` uses `-u 0:0`) — else `parseCliNotices`, `describeExit`, `evalPhp` errors,
+  `stderr || stdout` messages and the content copy's benign-warning check would read it as the
+  command's. Only sudo's leading `sudo:` lines are searched (a world-writable `sudo.conf` warning can
+  precede it, measured), only the untranslated text matches, every other byte stays. `execAsTransport`
+  returns stderr as printed: the run probe and `sudo -n -l`'s parser run sudo themselves and strip it;
+  the pre-flight's lookup timing only detects it. The line costs ~4 ms when the resolver answers or
+  refuses; a resolver that never answers makes **every** sudo call wait (glibc defaults: ~20 s,
+  measured), which the pre-flight times and reports from 1 s, never failing the site
+  (`setup/sudo-lookup.ts`): only where the run sends commands through sudo (`sudoLookupAs`: `site` →
+  `env LC_ALL=C sudo -n -u <user> -g <group> true`, never root; else elevation `available` → `env
+  LC_ALL=C sudo -n true`; never `docker`, nor a site with neither), plus `env LC_ALL=C true` for the
+  round trip only when the line shows. `LC_ALL=C`: a translated line would not be recognised.
 - **No command is handed input.** node-ssh ends the channel's input, `local` passes
   `stdin: "ignore"`, `docker exec` without `-i` attaches none. A `[y/n]` prompt (WP-CLI's `confirm()`,
   shown by a destructive command without `--yes`) therefore reads end-of-input and declines at once,
@@ -796,8 +809,7 @@ command (`setup/identity-verdicts.ts`: `auto` sites only; missing, stale, invali
   `sudo:` refusal, sudo's explicit deny (detail `SUDO_DENIED`, never its text: it quotes the
   command) or no sudo → `no-sudo`; `sudo: unknown user|group` → `no-identity`; no mark
   otherwise (the wrapper's `cd`) → `no-root-access`; exit 92 → `no-wp`; other ids → `probe-mismatch`;
-  uid/gid 0 → `no-identity`. `sudoNoise` (on the outcome, and on the `site`/`fallback` state it
-  decides) records the noise line for a report's `/etc/hosts` fix.
+  uid/gid 0 → `no-identity`.
 - `auto` needs the pre-flight's verdict, given to the process with `registerSiteIdentityVerdicts`
   (forgets states already resolved for those installs). With none, `unverified` at once, before any
   probe (no `stat`/`id`: none could change it); else `owner-is-web` for the owner read now, or

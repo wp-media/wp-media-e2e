@@ -16,6 +16,7 @@ import {
   dockerCpArgv,
   elevationSupport,
   exec,
+  execAsTransport,
   execElevated,
   describeTarget,
   installKey,
@@ -345,6 +346,10 @@ test.describe("whyItDidNotExit", () => {
   });
 });
 
+/** sudo's line for a runner that cannot resolve its own name. */
+const LOCAL_SUDO_NOISE =
+  "sudo: unable to resolve host runner: Temporary failure in name resolution";
+
 /**
  * Elevation, split the way the code is: the **invocation** is pure argv and checked as such, while
  * the **capability probe** is exercised against a fake `sudo` on `PATH`.
@@ -354,8 +359,12 @@ test.describe("whyItDidNotExit", () => {
  * root because probe results are cached per target.
  */
 
-/** Answers the `sudo -n true` probe, then runs the command; `FAKE_SUDO_DENY=1` refuses everything. */
+/**
+ * Answers the `sudo -n true` probe, then runs the command; `FAKE_SUDO_DENY=1` refuses everything;
+ * `FAKE_SUDO_NOISE=1` first prints the line a host that cannot resolve its own name adds to each call.
+ */
 const FAKE_SUDO = `#!/usr/bin/env bash
+if [ "$FAKE_SUDO_NOISE" = "1" ]; then echo '${LOCAL_SUDO_NOISE}' >&2; fi
 if [ "$FAKE_SUDO_DENY" = "1" ]; then exit 1; fi
 ${SKIP_SUDO_OPTIONS}
 if [ "$1" = "true" ]; then exit 0; fi
@@ -493,6 +502,27 @@ test.describe("execElevated", () => {
     await expect(
       execElevated(freshLocal(false), "rm", ["-rf", "/tmp/nothing"]),
     ).rejects.toThrow(/elevate: false/);
+  });
+
+  test("local: sudo's unresolvable-host line leaves root's stderr; the transport's own sudo call keeps it", async () => {
+    const original = process.env.PATH;
+    process.env.PATH = sudoPath;
+    process.env.FAKE_SUDO_NOISE = "1";
+    try {
+      const transport = freshLocal();
+      await expect(
+        execElevated(transport, "sh", [
+          "-c",
+          "echo out; echo 'real error' >&2; exit 3",
+        ]),
+      ).resolves.toEqual({ stdout: "out", stderr: "real error", exitCode: 3 });
+      await expect(
+        execAsTransport(transport, "sudo", ["-n", "true"]),
+      ).resolves.toEqual({ stdout: "", stderr: LOCAL_SUDO_NOISE, exitCode: 0 });
+    } finally {
+      process.env.PATH = original;
+      delete process.env.FAKE_SUDO_NOISE;
+    }
   });
 });
 

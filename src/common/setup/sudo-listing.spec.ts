@@ -173,6 +173,29 @@ test.describe("parseSudoListing", () => {
     }
   });
 
+  test("sudo's unresolvable-host line decides nothing: alone it is no refusal, beside a listing it changes none", () => {
+    const noise =
+      "sudo: unable to resolve host web1: Temporary failure in name resolution";
+    expect(
+      parseSudoListing({ exitCode: 1, stdout: "", stderr: noise }, []),
+    ).toEqual({ kind: "unreadable" });
+    expect(
+      parseSudoListing(
+        { exitCode: 1, stdout: "", stderr: `${noise}\nenv: something else` },
+        [],
+      ),
+    ).toEqual({ kind: "unreadable" });
+    expect(
+      parseSudoListing(
+        {
+          ...ok(listing(`${BASE}, !log_allowed`)),
+          stderr: `${noise}\n`,
+        },
+        [],
+      ),
+    ).toEqual({ kind: "listed", logAllowed: false });
+  });
+
   test("CRLF line ends read as LF", () => {
     expect(
       parseSudoListing(

@@ -6,7 +6,8 @@ import { execa } from "execa";
 import { NodeSSH } from "node-ssh";
 
 import { CommandKilledError } from "./errors";
-import { runAsArgv, withoutSudoNoise } from "./run-as-argv";
+import { runAsArgv } from "./run-as-argv";
+import { withoutSudoNoise } from "./sudo-noise";
 
 import type {
   DockerTransport,
@@ -83,6 +84,11 @@ import type { SudoTarget } from "./run-as-argv";
  *  - **Never interactive.** `sudo -n` fails immediately rather than waiting on a password prompt, so
  *    a host without passwordless sudo reports that instead of hanging a run.
  *  - **Refusable per site** (`transport.elevate: false`), and reported once per target when used.
+ *
+ * **stderr never carries sudo's unresolvable-host line** from a command this module routes through
+ * `sudo` (root over `ssh`/`local`, the site's identity): a host that cannot resolve its own name adds
+ * one to every call, and a caller would read it as the command's own words (`./sudo-noise.ts`).
+ * {@link execAsTransport} returns stderr as printed: a caller running `sudo` itself removes it.
  *
  * Running a command is not enough on its own: WP-CLI reads files from the **site's**
  * filesystem, so anything a test hands to `wp` (a plugin zip, a WXR import, a DB dump) must
@@ -267,10 +273,13 @@ async function runLocal(
   const [command, commandArgs, label] = elevate
     ? ["sudo", sudoArgv(file, args), `sudo ${file}`]
     : [file, args, file];
-  return runExeca(label, command, commandArgs, {
+  const result = await runExeca(label, command, commandArgs, {
     cwd: options.cwd ?? transport.rootDir,
     stdin: "ignore",
   });
+  return elevate
+    ? { ...result, stderr: withoutSudoNoise(result.stderr) }
+    : result;
 }
 
 /**
@@ -562,7 +571,8 @@ export function decodeOutput(chunks: readonly Buffer[]): string {
 }
 
 /**
- * The line `runSsh` sends, and whether stderr carries `sudo`'s hostname noise to strip.
+ * The line `runSsh` sends, and whether `sudo` carries it (its stderr then loses sudo's
+ * unresolvable-host line).
  *
  * @param file - the program.
  * @param args - its arguments.
@@ -575,19 +585,19 @@ function sshLineFor(
   args: string[],
   cwd: string,
   as: ExecAs,
-): { readonly line: string; readonly wrapped: boolean } {
+): { readonly line: string; readonly viaSudo: boolean } {
   switch (as.kind) {
     case "transport":
-      return { line: sshCommandLine(cwd, file, args), wrapped: false };
+      return { line: sshCommandLine(cwd, file, args), viaSudo: false };
     case "root":
       return {
         line: sshCommandLine(cwd, "sudo", sudoArgv(file, args)),
-        wrapped: false,
+        viaSudo: true,
       };
     case "site":
       return {
         line: sshWrappedLine(runAsArgv(as.target, as.umask, cwd, file, args)),
-        wrapped: true,
+        viaSudo: true,
       };
     default: {
       const exhaustive: never = as;
@@ -601,9 +611,9 @@ function sshLineFor(
 /**
  * Runs one command over SSH, in the WordPress root unless `options.cwd` says otherwise, as `as` says.
  *
- * Messages name `file`, the program asked for — never `sudo`, which only carries it. Under the site's
- * wrapper, stderr loses `sudo`'s `unable to resolve host` lines (a host missing from its own
- * `/etc/hosts` adds one to every call): whoever reads stderr would take them for the command's own.
+ * Messages name `file`, the program asked for — never `sudo`, which only carries it. As root or the
+ * site's identity, stderr loses `sudo`'s `unable to resolve host` line (a host that cannot resolve its
+ * own name adds one to every call): whoever reads stderr would take it for the command's own.
  *
  * @throws {@link CommandKilledError} when a signal ended the command; Error if the line is refused
  * ({@link sshCommandLine}, {@link runAsArgv}), the connection could not be opened, or it was lost or
@@ -616,7 +626,7 @@ async function runSsh(
   options: ExecOptions,
   as: ExecAs,
 ): Promise<ExecResult> {
-  const { line, wrapped } = sshLineFor(
+  const { line, viaSudo } = sshLineFor(
     file,
     args,
     options.cwd ?? transport.rootDir,
@@ -662,7 +672,7 @@ async function runSsh(
     const errors = decodeOutput(stderr);
     return {
       stdout: stripFinalNewline(decodeOutput(stdout)),
-      stderr: stripFinalNewline(wrapped ? withoutSudoNoise(errors) : errors),
+      stderr: stripFinalNewline(viaSudo ? withoutSudoNoise(errors) : errors),
       exitCode: result.code,
     };
   });
@@ -783,7 +793,8 @@ async function dispatch(
  * @param file - the program.
  * @param args - its arguments.
  * @param options - see {@link ExecOptions}.
- * @returns the outcome; see this module's header for what throws.
+ * @returns the outcome, stderr as printed: a caller running `sudo` itself passes it through
+ * `withoutSudoNoise` (`./sudo-noise.ts`); see this module's header for what throws.
  */
 export function execAsTransport(
   transport: Transport,
@@ -979,7 +990,7 @@ export function resetElevationCaches(): void {
  *
  * Callers are expected to have tried unprivileged first and to have checked
  * {@link elevationSupport}; this does not probe, so a target without sudo simply returns sudo's own
- * non-zero result. The first use against a target is announced once, because a suite quietly running
+ * non-zero result. stderr never holds sudo's unresolvable-host line (this module's header). The first use against a target is announced once, because a suite quietly running
  * commands as root would be the wrong kind of surprise.
  *
  * @throws Error if the site declared `transport.elevate: false` — the opt-out is authoritative, so
