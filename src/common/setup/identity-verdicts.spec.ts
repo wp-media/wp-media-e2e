@@ -85,14 +85,38 @@ test.describe("registerRunVerdict", () => {
     expect(warnings).toEqual([]);
   });
 
-  test("runAs false, absent or declared: the file is never read, nothing said", async () => {
+  test("runAs false or declared: the file is never read, nothing said", async () => {
     // A file that would warn if read.
     writeFileSync(join(dir, SITE_IDENTITY_FILE), "not json");
-    for (const runAs of [false, undefined, "www-data:www-data"] as const) {
+    for (const runAs of [false, "www-data:www-data"] as const) {
       await register(siteWith(runAs));
     }
     expect(registered).toEqual([]);
     expect(warnings).toEqual([]);
+  });
+
+  test("an absent runAs is auto: its verdict is read and registered, silently", async () => {
+    const site = siteWith();
+    await writeSiteIdentityFile(
+      dir,
+      "run-1",
+      new Map([[installKey(site.transport), VERDICT]]),
+    );
+
+    await register(site);
+
+    expect(registered).toEqual([
+      new Map([[installKey(site.transport), VERDICT]]),
+    ]);
+    expect(warnings).toEqual([]);
+  });
+
+  test("an absent runAs is auto: without its verdict file it is warned once", async () => {
+    await register(siteWith());
+
+    expect(registered).toEqual([]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("no verdict file");
   });
 
   test("an auto site without its verdict: warned once, the address masked, nothing registered", async () => {

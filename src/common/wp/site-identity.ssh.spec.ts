@@ -323,9 +323,9 @@ test("an as-today copy is disabled without a command, and never reads the origin
     kind: "disabled",
     reason: "config",
   });
-  // No runAs over ssh: today's default, false.
+  // No runAs over ssh is `auto`, the default: the same install's resolved state, not `disabled`.
   await expect(resolveSiteIdentity(server.transport())).resolves.toMatchObject({
-    kind: "disabled",
+    kind: "site",
   });
   expect(server.commands.length).toBe(sent);
 });

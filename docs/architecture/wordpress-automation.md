@@ -11,7 +11,7 @@ Two modules, one API (`exec.ts` re-exports all of [`transport-exec.ts`](../../sr
   below), `execElevated` (root) — plus transfer, root and path resolution.
 - **`exec.ts`** adds `exec`/`wpCli`: they resolve the [site identity](#site-identity-wpsite-identityts)
   state and run as the identity in `site`, as the transport's user in every other state — **byte for
-  byte the line sent before the identity existed** (`runAs` absent or `false`, `docker`/`local`,
+  byte the line sent before the identity existed** (`runAs: false`, `docker`/`local`,
   every `fallback`; pinned in `exec.site.ssh.spec.ts`).
 - **Probes run as the transport's user**, never through `exec`: `stat`/`id`/`getent`/`id -u`
   (`owner-probe.ts`), `sudo -n true` (`elevationSupport`), docker `pwd`, `readlink -f`

@@ -53,8 +53,8 @@ npm run healthcheck:ui    # same checks, browser visible (watch a login, debug a
 ```
 
 Checks every configured site across **all** products, cells and pools (`healthcheck.ts`): transport,
-WP-CLI, a real installed WordPress, a POSIX login shell, who site commands run as (a site with
-`runAs` `"auto"` or `"user:group"` has its web server probed; nothing is written but the probe's short-lived file), a working
+WP-CLI, a real installed WordPress, a POSIX login shell, who site commands run as (an `ssh` site with
+`runAs` absent — the default, `"auto"` —, `"auto"` or `"user:group"` has its web server probed; nothing is written but the probe's short-lived file), a working
 UI login. Output is grouped per product; each site is
 checked independently and printed as soon as it finishes (✔/✘/⚠), listing every check it ran, with the
 failing check and a hint on failure. Styled on a terminal only (`NO_COLOR`, `E2E_OUTPUT=plain` and a

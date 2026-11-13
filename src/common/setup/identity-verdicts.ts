@@ -12,8 +12,8 @@ import type { SiteIdentityFileRead } from "../wp/web-identity";
  * it before its first site command and gives this process its site's verdict. Without one, an `auto`
  * site runs as the transport's user (`fallback/unverified`), and the worker says why once.
  *
- * Only `auto` needs a verdict: a site with `runAs` false (the default) or a declared
- * `"user:group"` reads nothing here.
+ * Only `auto` (also what an absent `runAs` means) needs a verdict: a site with `runAs` false or a
+ * declared `"user:group"` reads nothing here.
  */
 
 /**

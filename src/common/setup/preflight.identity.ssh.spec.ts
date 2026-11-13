@@ -41,7 +41,7 @@ import type { SiteConfig, SshTransport } from "../config/types";
 /**
  * The pre-flight's site identity over a server that runs what it is sent, with a web server serving
  * the identity probe from the same root:
- * - a site with `runAs` false (every live site today) gets no probe file, no `sudo -n -l`, no WP-CLI
+ * - a site opted out with `runAs` false gets no probe file, no `sudo -n -l`, no WP-CLI
  *   config read: only the login-shell round-trip, the WordPress login's check and the timed
  *   `sudo -n true` are new, all read-only, and the exact command list is pinned;
  * - sudo's unresolvable-host line on every call reaches no check, decision or banner;
@@ -147,7 +147,7 @@ const named = (
 const probeFilesLeft = (): string[] =>
   readdirSync(server.root).filter((name) => name.startsWith("e2e-identity-"));
 
-test("runAs false (today's live sites): no probe, no sudo listing, no config read — three new read-only commands, exactly", async () => {
+test("runAs false (opted out): no probe, no sudo listing, no config read — three new read-only commands, exactly", async () => {
   const site = siteWith({ runAs: false });
   const before = server.commands.length;
   const requestsBefore = web.requests.length;

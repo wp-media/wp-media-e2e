@@ -24,10 +24,10 @@ const SSH: Transport = {
 const DOCKER: Transport = { mode: "docker", container: "c" };
 const LOCAL: Transport = { mode: "local", rootDir: "/srv/wp" };
 
-// The rollout switch: every ssh site without `runAs` keeps today's behaviour until it moves.
-test("an ssh site without runAs runs as its transport user by default", () => {
-  expect(DEFAULT_SSH_RUN_AS).toBe(false);
-  expect(effectiveRunAs(SSH)).toBe(false);
+// The default: an ssh site without `runAs` asks for the web server's identity; `false` opts out.
+test("an ssh site without runAs asks for the web server's identity by default", () => {
+  expect(DEFAULT_SSH_RUN_AS).toBe("auto");
+  expect(effectiveRunAs(SSH)).toBe("auto");
 });
 
 test("a declared runAs wins over the default", () => {

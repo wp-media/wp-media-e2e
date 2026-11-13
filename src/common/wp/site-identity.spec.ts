@@ -2,6 +2,7 @@ import { test, expect } from "@playwright/test";
 
 import {
   FALLBACK_REASONS,
+  RUN_AS_OPT_OUT,
   asTransportUser,
   SUDO_DENIED,
   classifyRunProbe,
@@ -810,6 +811,19 @@ test("every state is described in one line, a fallback with its reason, detail a
     );
     expect(line).not.toContain("\n");
   }
+});
+
+// `runAs` defaults to `"auto"`: a host that cannot meet the checklist must be told how to opt out,
+// or it is warned on every run. `probe-mismatch` (sudo misbehaving) is looked into instead.
+test("every fallback fix but probe-mismatch's ends with the runAs opt-out", () => {
+  for (const [reason, { fix }] of Object.entries(FALLBACK_REASONS)) {
+    if (reason === "probe-mismatch") {
+      expect(fix).not.toContain(RUN_AS_OPT_OUT);
+    } else {
+      expect(fix.endsWith(RUN_AS_OPT_OUT)).toBe(true);
+    }
+  }
+  expect(RUN_AS_OPT_OUT).toContain('`"runAs": false`');
 });
 
 // ── As today ─────────────────────────────────────────────────────────────────────────────────────
