@@ -247,8 +247,30 @@ export interface SiteResidueFamily {
   readonly name: RegExp;
 }
 
-/** Something a product leaves on a site's filesystem: a path, or a family of directories. */
-export type SiteResidue = string | SiteResidueFamily;
+/**
+ * A path removed after every scenario but **never prepared** as a data directory — see
+ * {@link ProductConfig.siteResidue}. For what the plugin (or the suite for it) writes with its own
+ * modes: a cache folder, a config folder, a file. A plain string path is instead created up front and
+ * opened to both users, which would change the modes the plugin under test chose.
+ */
+export interface SiteResidueRemoveOnly {
+  /** Relative to the WordPress root, under the same rules as a plain path. */
+  readonly path: string;
+  /** Always `false`: the one thing that tells this apart from a plain path. */
+  readonly prepare: false;
+}
+
+/**
+ * Something a product leaves on a site's filesystem: a data directory (a plain path, prepared before
+ * and removed after), a path only removed, or a family of directories.
+ */
+export type SiteResidue = string | SiteResidueRemoveOnly | SiteResidueFamily;
+
+/**
+ * Writes what the plugin needs on the site **before** it is installed and activated — see
+ * {@link ProductConfig.prepareActivation}. Rejects when it could not, which fails the install.
+ */
+export type PrepareActivation = (transport: Transport) => Promise<void>;
 
 /**
  * Asks the installed plugin for the data directories it names at runtime — see
@@ -298,7 +320,10 @@ export interface ProductConfig {
    *
    * Each path must be relative, must not escape the WordPress root, and must not name a directory
    * WordPress itself owns — validated at removal time, so a typo fails loudly instead of deleting
-   * a site. Directories a plugin creates with names it picks at runtime are declared as a
+   * a site. A plain string is also a **data directory**: created after every install and opened to
+   * both users (`0777`, handed to the site). What must keep the modes its writer chose — a cache or
+   * config folder, a file — is a {@link SiteResidueRemoveOnly} (`{ path, prepare: false }`), only
+   * removed. Directories a plugin creates with names it picks at runtime are declared as a
    * {@link SiteResidueFamily} — their parent and an anchored name pattern — and found on the site
    * when it is cleaned. Omit when a product leaves nothing behind.
    */
@@ -324,6 +349,14 @@ export interface ProductConfig {
    * directory has a fixed name.
    */
   readonly resolveSiteDataDirs?: ResolveSiteDataDirs;
+  /**
+   * What the `@plugin` install writes for this product right before it installs and activates the
+   * plugin — after the old copy and its database footprint are gone, before the install outputs are
+   * recorded. WP Rocket's licence must-use plugin: activation only writes `WP_CACHE` for a licensed
+   * copy. Whatever it writes must be declared in {@link siteResidue}, so the teardown removes it, and
+   * handed to the site's ownership (`normalizeOwnership`). Omit when the plugin needs nothing first.
+   */
+  readonly prepareActivation?: PrepareActivation;
   /**
    * What this product leaves in a site's **database** when its files are removed without its own
    * uninstall ever running — the option fragments and tables the shared scenario hooks sweep

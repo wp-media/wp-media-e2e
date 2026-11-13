@@ -56,7 +56,7 @@ src/
         ├── features/       # *.feature (Gherkin)
         ├── pages/          # page objects (+ locator-contract specs)
         ├── steps/          # product-specific steps
-        └── support/        # debug-log presets, leftover declarations (files + database), REST barriers, WP-CLI readers, the CLI-under-test runner, running-job probes and stop, site setup
+        └── support/        # debug-log presets, leftover declarations (files + database), WP Rocket's licence must-use plugin, REST barriers, WP-CLI readers, the CLI-under-test runner, running-job probes and stop, site setup
 
 orchestrator/               # runs cells in loops. Layout and design: docs/plans/orchestrator-phase-0.5-plan.md §5, §4
 │                           # suite-imports.json (suite modules it may import) + import-boundary.spec.ts; config.example.json
@@ -279,13 +279,17 @@ lives in a sibling module, unit-testable without it.
   attachment; after a failed uninstall `debug.log` is cleared again, that fatal is an earlier run's); sweep its leftover **database
   footprint** (`ProductConfig.siteDbResidue`: options, tables, roles, capabilities — keyed off what is
   on the site, never off whether the plugin is installed; activation's `add_role()` keeps a leftover
-  role as it is); note which **install outputs** exist (`ProductConfig.installOutputs`: what
-  activation writes outside the plugin's folder; one batched check, none when undeclared); stage
+  role as it is); write what the product needs before activation (`ProductConfig.prepareActivation`:
+  WP Rocket's dummy-licence must-use plugin, `support/licence.ts`, declared as residue; a failure
+  ends the install; `wp-config.php` never edited); note which **install outputs** exist
+  (`ProductConfig.installOutputs`: what activation writes outside the plugin's folder; one batched
+  check, none when undeclared); stage
   and install the cell's artifact with `--activate`, its files handed to the **site's** ownership;
   **re-assert the active state**, never inferred from the exit code; hand over each install output
   the install **created** (`normalizeOwnership`; in `site` only verified as the identity's, warned
-  otherwise; one that existed — a shared parent — never touched; bounded at 30 s;
-  `wp/install-outputs.ts`); create the declared data directories (`ProductConfig.siteResidue`, and `resolveSiteDataDirs` for
+  otherwise; one that existed — a shared parent — never touched, unless outside `site` the transport's
+  user owns its whole tree and no declared output lies beneath it: a killed run's, reclaimed; bounded at 30 s;
+  `wp/install-outputs.ts`); create the declared data directories (`ProductConfig.siteResidue`'s plain paths — `{ path, prepare: false }` is only removed —, and `resolveSiteDataDirs` for
   names the plugin picks at runtime, e.g. BackWPup's `uploads/backwpup-restore-<20 hex>`), opened
   `0777` in **every** state (outside `site` WP-CLI and the web server may be two users, and so are a `site`
   scenario opting back to the SSH user and the web server) and handed to the site's ownership. The edition is
@@ -683,7 +687,7 @@ this file goes in the right `docs/` file, linked from the [Documentation map](#d
 - The config factory (`createProductConfig`) or its project pairs.
 - The metadata/credential registry (`registerPool`, `routingMetadata`) and the per-process policy
   registries (`registerDebugLogOptions`, `registerSiteResidue`, `registerSiteDbResidue`,
-  `registerSiteDataDirResolver`, `registerInstallOutputs`, `registerStopRunningWork`,
+  `registerSiteDataDirResolver`, `registerInstallOutputs`, `registerPrepareActivation`, `registerStopRunningWork`,
   `registerSettleLeftovers`).
 - Artifact directories, `RUN_ID`, the `*_ROOT` env vars.
 - The drain (`config/drain.ts`, `E2E_INTERNAL_STOP_FILE`, `drainGate`) and its escalation signals.

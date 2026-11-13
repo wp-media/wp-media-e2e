@@ -504,7 +504,9 @@ directories** on the QA cell before this existed.
 
 - A product declares them as `ProductConfig.siteResidue` (paths relative to the WP root); the `@plugin`
   teardown clears them after every tagged scenario, reading the per-process registry (no product
-  import).
+  import). A plain string is also a data directory the Before prepares (below); `{ path, prepare:
+  false }` (`SiteResidueRemoveOnly`) is only removed — for what keeps its writer's modes (WP Rocket's
+  cache and config folders) or is a file (its licence must-use plugin).
 - `removeSiteResidue(transport, paths)` validates **every** path before removing any, removes them,
   and **confirms they are gone** rather than trusting `rm -rf`'s exit code. Every path is attempted;
   the error names all survivors.
@@ -540,8 +542,8 @@ directories** on the QA cell before this existed.
   does not stop the other paths; it fails the teardown afterwards. `resolveSiteResidue` answers what
   the declarations name now. A family names nothing to create, so preparation skips it.
 - `prepareSiteDataDirs(transport, paths)` is the other half, run by the **Before** hook on the same
-  list: per path it creates the directory, opens it `0777` to every user sharing the docroot (in
-  `site` too: a scenario opting back to the SSH user writes there as well), then
+  list (plain paths only): per path it creates the directory, opens it `0777` to every user sharing
+  the docroot (in `site` too: a scenario opting back to the SSH user writes there as well), then
   hands it to the site's ownership with `normalizeOwnership` (`unnecessary` in `site`: the identity
   created it, and what a root `mkdir` made is handed back to the identity first,
   `handBackWhatRootMakes`). The mode is a floor that holds where ownership cannot be fixed; the correction adds the owner
@@ -769,9 +771,17 @@ present after but not before:
 - a symbolic link: left alone in every state, warned (`chmod` would follow it).
 - `transport.fileOwner: false` outside `site`: neither check runs (nothing would be handed over).
 
-An output that existed before — a shared parent such as `wp-content/cache`, an earlier run's — is never
-touched: declare its children too. Never throws; a failed check warns and hands nothing over; the
-settle step is bounded (`SETTLE_BUDGET_MS`, 30 s ≈ 7 handovers of ~5 round trips): past it the install
+An output that existed before — a shared parent such as `wp-content/cache` — is never touched: declare
+its children too. **Except one owned by the transport's user** (by uid, not already the site's, while
+`planOwnership` says `grant`; most likely a run killed before its handover), handed over like a new one
+(`reclaimed`, warned once done; skipped silently where the handover itself warns, e.g. no sudo) only
+when the recursion takes nothing else: never one with another declared output beneath it (a shared
+parent), and only when its whole tree is that user's (`RECLAIM_CHECK_SCRIPT`: `find <p> ! -uid <uid>
+-print -quit` as the transport's user prints nothing and exits 0); otherwise left, warned. Never in
+`site`. Chosen over removing declared residue
+before the install, which would miss outputs that are not residue (`advanced-cache.php`,
+`wp-content/cache`) and must never run on a part-way reinstall. Never throws; a failed check warns and
+hands nothing over; the settle step is bounded (`SETTLE_BUDGET_MS`, 30 s ≈ 7 handovers of ~5 round trips): past it the install
 goes on, warned, and the step ends on its own. Undeclared: no command at all. Validation
 (`normaliseInstallOutputs`) lives in `wp/paths.ts`, so the config build loads no command module. Nothing here creates or removes an output: removal is `siteResidue`'s. As for the
 plugin's own files, fallback's `o+rwX` grant (SSH user outside the group) makes handed-over PHP files

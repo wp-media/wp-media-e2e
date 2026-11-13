@@ -25,8 +25,8 @@ import {
 import type { LocalTransport } from "../../../common/config/types";
 
 // A stub `wp` on PATH answers as the site would, over the real exec layer, and logs each call so a
-// test can tell whether the site was asked at all. The PHP itself is run against a fake `$wpdb`, and
-// live, outside the unit suite — CI has no PHP.
+// test can tell whether the site was asked at all. The PHP itself is run against a fake `$wpdb` in
+// `table-padding.php.spec.ts` (skipped where PHP is not installed), and live on every cell.
 const STUB_WP = `#!/usr/bin/env bash
 printf '%s\\n' "$1" >> "$WP_STUB_LOG"
 case "$*" in

@@ -1,6 +1,6 @@
 # Phase 12 — Run as the site: the web server's identity for every site command
 
-Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8, 12.9 and 12.10 done 2026-11-12; 12.11 (live rollout, default `"auto"`) and 12.11b done 2026-11-13; Part B next. Parent:
+Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8, 12.9 and 12.10 done 2026-11-12; 12.11 (live rollout, default `"auto"`), 12.11b and 12.12 done 2026-11-13; 12.13 next. Parent:
 [e2e-modernization-plan.md](e2e-modernization-plan.md) (§3 phase table). Reverses that plan's §8.2
 rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of WP Rocket's port
 ([phase-6 plan §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket)).
@@ -870,9 +870,9 @@ Documented in [wordpress-automation.md → Install outputs](../architecture/word
 - **Kept as before:** fallback's `o+rwX` grant (SSH user outside the group) makes handed-over PHP files
   world-writable, as for plugin files; the pre-flight names the fix (group membership).
 - **Limits:** an output a plugin writes *inside* a pre-existing undeclared folder is not seen (declare
-  it); an output an earlier killed/failed run left counts as existing and is never handed over (the
-  Before sweeps only DB residue; 12.12 decides); handovers are one `normalizeOwnership` each (~5
-  round trips; batching is 12.12's); the `no-sudo` twin cannot tell the outputs' skipped handover from the plugin folder's (same
+  it); an output an earlier killed run left is reclaimed only when the transport's user owns its whole
+  tree and no declared output lies beneath it (12.12);
+  handovers are one `normalizeOwnership` each (~5 round trips; not batched, 12.12 measured); the `no-sudo` twin cannot tell the outputs' skipped handover from the plugin folder's (same
   warning, deduplicated) — the fake-server specs prove the call.
 
 ### 12.9 — Pre-flight, healthcheck, reports (done 2026-11-12)
@@ -1197,36 +1197,109 @@ Documented in AGENTS.md ("Auth fixture / setup" step 1, healthcheck) and
   `LC_ALL=C` pinned, the banner's note without a fix line; each mutant (old gate, no `site` branch,
   always root, no `docker` exclusion, no `LC_ALL=C`) fails them.
 
-### 12.12 — WP Rocket declarations and licence
+### 12.12 — WP Rocket declarations and licence (done 2026-11-13)
 
-- `wp-rocket.config.ts`:
-  - `installOutputs`: `wp-content/advanced-cache.php`, `wp-content/cache`,
-    `wp-content/cache/{wp-rocket,min,busting,critical-css,used-css,fonts,background-css}`,
-    `wp-content/wp-rocket-config`.
-  - `siteResidue`: the seven cache folders and `wp-content/wp-rocket-config` (S6).
-    `wp-content/cache` and `advanced-cache.php` are 12.15's.
-  - `siteDbResidue`: from `WPRocketUninstall.php` at the ref under test, plus the refusal transient
-    `<n>_donotdeactivaterocket` as a name pattern (S2).
-- Licence (S1): a must-use plugin `wp-content/mu-plugins/e2e-wp-rocket-licence.php`, written by the
-  suite before activation, removed in the After hook and declared as residue.
-  - It adds `pre_get_rocket_option_consumer_key`, `_consumer_email` and `_secret_key` filters,
-    values embedded with `phpLiteral`.
-  - Default: a dummy key (8 characters, `secret_key = crc32(email)`): the check is offline.
-  - A real key from `.env` (`WPR_CONSUMER_KEY`, `WPR_CONSUMER_EMAIL`, through `env.ts`) only when a
-    scenario needs remote features. Only then add `WPR_[A-Z0-9_]+` to `SECRET_NAME_PATTERN`, its
-    message, the orchestrator guide, the phase-0.5 plan §4 and AGENTS' orchestrator entry.
-  - `wp-config.php` is never edited for the licence.
-  - Measure on a twin first that the filters license (`WP_CACHE` written, pages cached).
-- Tests: declarations; the mu-plugin's PHP through a stub; its removal.
-- Deferred from 12.8's audit:
-  - Outputs left by an earlier killed/failed run read as "existing" and are never handed over. WP
-    Rocket must also declare its outputs as `siteResidue`; decide here whether the Before removes
-    declared file residue before `recordInstallOutputs`, or pre-existing outputs owned by the
-    transport's user are handed over.
-  - Batch the handovers (one root `chmod`/`chown`/re-read for all new outputs) if WP Rocket's measured
-    settle approaches `SETTLE_BUDGET_MS`.
-- Done: a twin install in `site` shows outputs verified and caching; in `no-sudo`, new outputs
-  handed over.
+Read at `develop` @ 9788d19 (3.24.1-beta2, APVM); S1, S2, S5, S6 still hold there.
+- **Declarations** (`src/projects/wp-rocket/support/`):
+  - `installOutputs` (`residue.ts`): `advanced-cache.php`, `cache`, the seven `cache/*` folders,
+    `wp-rocket-config`. Measured (licensed, CLI activation): `advanced-cache.php`,
+    `cache/{wp-rocket,min,busting,critical-css}`, `wp-rocket-config`; `background-css` appears on a
+    later request.
+  - `siteResidue`: the seven cache folders, `wp-rocket-config` and the licence file, all
+    **remove-only** (below). `cache` and `advanced-cache.php` stay 12.15's.
+  - `siteDbResidue` (`db-residue.ts`): 47 WP Rocket-specific fragments (`wp_rocket_`, `rocketcdn`,
+    `donotdeactivaterocket`, one per `rocket_…`/`wpr_…` family its source reads or writes — never bare
+    `rocket_`/`wpr_`, which take Lazy Load by WP Rocket's and Royal Elementor Addons' options); they
+    cover every option/transient of `WPRocketUninstall` but `plugin_family_dismiss_promote_imagify`
+    (Imagify's plugin family writes it too; the sweep runs with WP Rocket absent), its tables' version
+    and `_exists` rows, background-process rows, per-user transients (`declarations.spec.ts`); the 8
+    BerlinDB tables (`wp_wpr_*`, measured); the 10 `rocket_*` capabilities on `administrator`
+    (`Capabilities/Manager.php`, measured). No role. Measured: a deactivate + uninstall leaves none of
+    it; a lost plugin folder leaves 20 options, 8 tables, 10 grants, all swept. Not swept (by design):
+    user meta `rocket_boxes`, post meta `_rocket_exclude_*`, the 18 cron hooks its uninstall clears
+    (in core's `cron`, which the sweep protects), Action Scheduler's tables/options (shared library,
+    the uninstall keeps them too), core rows.
+- **Contradiction found → `SiteResidueRemoveOnly`:** every plain `siteResidue` path is also a data
+  directory the Before creates `0777` and hands over (`prepareSiteDataDirs`). WP Rocket's folders
+  would lose their `0755` and the licence file would be `mkdir`ed. `{ path, prepare: false }` is only
+  removed (`parseResidueDeclaration` → `prepare`); plain strings unchanged.
+- **Licence (S1):** `ProductConfig.prepareActivation` (new registry; `installFresh` runs it after the
+  DB sweep, before `recordInstallOutputs`; a failure ends the install). WP Rocket's
+  `writeLicencePlugin` (`licence.ts`): removes a leftover copy (residue removal, escalating), then
+  `evalPhp` (`--skip-plugins --skip-themes`, as the site's commands run) writes
+  `wp-content/mu-plugins/e2e-wp-rocket-licence.php` (refused when `WPMU_PLUGIN_DIR` is elsewhere;
+  `wp_mkdir_p` when missing), then `normalizeOwnership` on the file. The file: `ABSPATH` guard, three
+  `pre_get_rocket_option_*` filters; key and email via `phpLiteral`, `secret_key = hash('crc32', email)`
+  computed in PHP (PHP's `crc32`, not `crc32b`). Dummy `E2EDUMMY` / `e2e-licence@example.invalid`.
+  `wp-config.php` never edited.
+  - Measured (twin `site`, 2026-11-13): without it activation writes no `WP_CACHE`; with it
+    `rocket_valid_key()` is true and `WP_CACHE` is written. **Pages are cached only after an admin
+    request** writes `wp-rocket-config/<host>.php` (activation over WP-CLI writes no config file nor
+    `wp_rocket_settings`): 12.13's job; the twin spec makes that request itself.
+  - A `mu-plugins` folder it creates stays (empty after the teardown); outside `site` it stays the
+    transport user's (`0755`, readable): `normalizeOwnership` refuses `wp-content/mu-plugins`
+    (protected). Accepted: WordPress never writes there.
+  - **Real key:** no scenario needs a remote feature yet, so no `WPR_*` variable and no
+    `SECRET_NAME_PATTERN` change. When one does: `RocketLicence` from `WPR_CONSUMER_KEY`/
+    `WPR_CONSUMER_EMAIL` via `env.ts`, plus the secret-pattern, guide, phase-0.5 §4 and AGENTS updates
+    listed in this sub-phase's original plan (git history). A real key reaches the site in a staged
+    file, never in `wp eval`'s argv (`ps`, sudo's log).
+- **Deferred 12.8 item, decided — reclaim, not pre-removal:** a pre-existing output owned by the
+  transport's uid (not already the site's) while `planOwnership` is `grant` is handed over like a new
+  one (`reclaimed`; warned once `normalized`, silent when the handover is skipped and warns itself),
+  only when the recursion reaches nothing else: no declared output beneath it (a shared parent such as
+  `cache` is left, its new children handed over one by one) and its whole tree that uid's
+  (`RECLAIM_CHECK_SCRIPT`, one `find <p> ! -uid <uid> -print -quit` per candidate in one `sh` as the
+  transport's user; non-zero or unreadable → not ours). Either refusal is warned. Never in `site`.
+  Why: removing declared residue before the install would miss non-residue outputs
+  (`advanced-cache.php`, `cache`), delete more than ownership needs, and must not run on a part-way
+  reinstall.
+- **Batching: not needed.** Whole `@plugin` install on `legacy-777` (record, licence, install,
+  settle of 3 new + 2 reclaimed outputs): 4.0 s apache, 4.3 s nginx — settle far under
+  `SETTLE_BUDGET_MS` (30 s). Real cells (~0.8 s/round trip): ≈ 3 handovers × 5 ≈ 12 s worst.
+- **Done, proved on the twins** (`lifecycle.ssh-twins.spec.ts`, 8 green, both stacks): `site` —
+  licensed, outputs `www-data:www-data` with no install-outputs warning, footer + a cached file, the
+  teardown leaves no declared file or row; a lost plugin folder's rows swept; `legacy-777` — outputs
+  and the licence `sftp_twin:www-data`, ubuntu-owned `advanced-cache.php`/`cache/wp-rocket` reclaimed,
+  ubuntu-owned `cache` (shared parent) and `cache/min` (holding root's `0600` file) left as they were,
+  caching.
+  **Plan's "`no-sudo`: new outputs handed over" is impossible** (no sudo, nothing can chown): proved
+  instead that the handover is attempted and refused with the elevation warning, outputs
+  `ubuntu:ubuntu`, licensed (`WP_CACHE`), teardown clean.
+- **Specs:** `declarations.spec.ts` (14: validation, uninstall-list coverage, refusal transient,
+  core/Action Scheduler untouched, remove-only, wiring, licence validation and literal-only
+  embedding, preparation/removal on a local root); `licence.php.spec.ts` (7, real PHP through
+  `__fixtures__/licence-harness.php`, skipped where PHP is not installed: `php -l`, filter answers vs PHP's own
+  `hash('crc32')`, hostile email, no-op outside WordPress, write/replace/refuse a moved
+  `WPMU_PLUGIN_DIR`); `install-outputs.spec.ts` +4 (`keptEntries`, `ownedByTransportUser`);
+  `install-outputs.ssh.spec.ts` +4 (reclaim with a covered child, other owner, `site`, no sudo);
+  `plugin-lifecycle.spec.ts` +4 (registry carry, order after removal/before install, reinstall,
+  failure stops the install); `residue.spec.ts` +4 (remove-only parse/rules/prepare/remove);
+  `metadata.spec.ts` +1, `project.spec.ts` +1. Changed: `residue.spec.ts` "reads a string as a path"
+  (the parsed shape gained `prepare: true`).
+- **Audit fixes (2026-11-13, each reproduced first):** (1, medium) reclaim decided on the top-level
+  owner only, so its `chmod -R`/`chown -Rh` opened another plugin's `0600` file in an ubuntu-owned
+  `cache` to `0666` and a root `0700` declared child to `0777`: now the two rules above; (2) no spec
+  pinned `prepareActivation` between the DB sweep and the outputs check; (3)
+  `prepareResolvedDataDirs` would open a resolved path declared remove-only: refused before anything
+  is created; (4, medium) bare `rocket_`/`wpr_` fragments swept other plugins' options
+  (`rocket_lazyload_options`, `wpr_google_map_api_key`, …): replaced by specific ones; (5)
+  `plugin_family_dismiss_promote_imagify` dropped (shared with Imagify); (6) "CI has no PHP" removed
+  from 5 spec comments (ubuntu runners ship it); (7, 8) plan/TSDoc lines above. Specs:
+  `install-outputs.spec.ts` +6 (`sharedParents`, `parseReclaimCheck`, the script on this machine's
+  `sh`/`find`: whole tree, other uid, unreadable, a link never walked); `install-outputs.ssh.spec.ts`
+  +2 (a fake `find` over the fake `stat`; the fake `sudo` runs the grant, so modes are real): a shared
+  parent and a leaf holding root's file keep every mode, no root call; an unreadable tree is left;
+  `plugin-lifecycle.spec.ts` +1 (sweep → preparer → check); `residue.spec.ts` +1 (remove-only
+  refused, modes kept); `declarations.spec.ts` +2 (source-read names reached; other plugins'
+  options left). Changed: `install-outputs.ssh.spec.ts` "reclaimed; its new children covered" (now
+  `cache` is a shared parent: left, its child `handed-over`, a whole-tree leaf `reclaimed`) and "without
+  elevation" (`cache` → leaf `e2e-config`, same rule); `declarations.spec.ts` "reaches every option"
+  (`plugin_family_…` now expected unswept, item 5); twin legacy-777 case (above: `cache` can no
+  longer be reclaimed by rule; `cache/wp-rocket` added as a reclaimable leftover and `cache/min` with
+  root's file as one that must be left). Mutants killed: no shared-parent rule (2 ssh specs), no
+  whole-tree check (2 ssh specs + twin), preparer after the record (lifecycle spec), no remove-only
+  refusal (residue spec). Twins 2026-11-13: WP Rocket lifecycle (8) + install-outputs (6), 14 passed.
 
 ### 12.13 — Settling admin request after install
 
@@ -1239,7 +1312,8 @@ Documented in AGENTS.md ("Auth fixture / setup" step 1, healthcheck) and
 
   On Apache this writes WP Rocket's `.htaccess` block, `WP_CACHE` and config files as the web
   server, before any step (F13).
-- A failed request is a warning. WP Rocket opts in.
+- A failed request is a warning. WP Rocket opts in. Measured in 12.12: without this request a
+  licensed WP-CLI install caches nothing (no `wp-rocket-config/<host>.php` yet).
 - Tests: opt-in, order and the login check (unit, fake request); twin: the block is there before the
   first step.
 

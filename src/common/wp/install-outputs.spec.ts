@@ -1,6 +1,8 @@
 import { test, expect } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -12,10 +14,15 @@ import { join } from "node:path";
 
 import {
   OUTPUTS_CHECK_SCRIPT,
+  RECLAIM_CHECK_SCRIPT,
   coveringPath,
+  keptEntries,
   newOutputs,
   outermostCovering,
+  ownedByTransportUser,
   parseOutputsCheck,
+  parseReclaimCheck,
+  sharedParents,
 } from "./install-outputs";
 import { normaliseInstallOutputs } from "./paths";
 
@@ -101,6 +108,92 @@ test.describe("newOutputs", () => {
   });
 });
 
+test.describe("keptEntries", () => {
+  const owner = { user: "ubuntu", group: "ubuntu", uid: 1000, gid: 1000 };
+
+  test("keeps what was there before and after, as a readable entry, in declared order", () => {
+    const after = new Map([
+      ["c", { kind: "entry", owner } as const],
+      ["a", { kind: "entry", owner } as const],
+      ["new", { kind: "entry", owner } as const],
+    ]);
+    expect(keptEntries(["a", "new", "c"], new Set(["a", "c"]), after)).toEqual([
+      "a",
+      "c",
+    ]);
+  });
+
+  test("never a link, an unreadable owner, or one gone since", () => {
+    const after = new Map([
+      ["link", { kind: "symlink" } as const],
+      ["unreadable", { kind: "entry", owner: undefined } as const],
+    ]);
+    expect(
+      keptEntries(
+        ["link", "unreadable", "gone"],
+        new Set(["link", "unreadable", "gone"]),
+        after,
+      ),
+    ).toEqual([]);
+  });
+});
+
+test.describe("ownedByTransportUser", () => {
+  const target = { user: "www-data", group: "www-data", uid: 33, gid: 33 };
+  const found = (uid: number, gid: number) =>
+    ({
+      kind: "entry",
+      owner: { user: String(uid), group: String(gid), uid, gid },
+    }) as const;
+
+  test("keeps only what the transport's uid owns", () => {
+    const after = new Map([
+      ["mine", found(1000, 1000)],
+      ["mine-other-group", found(1000, 33)],
+      ["site", found(33, 33)],
+      ["root", found(0, 0)],
+    ]);
+    expect(
+      ownedByTransportUser(
+        1000,
+        target,
+        ["mine", "mine-other-group", "site", "root"],
+        after,
+      ),
+    ).toEqual(["mine", "mine-other-group"]);
+  });
+
+  test("never what already has the site's ownership, even the transport's uid", () => {
+    const after = new Map([["x", found(33, 33)]]);
+    expect(ownedByTransportUser(33, target, ["x"], after)).toEqual([]);
+  });
+});
+
+test.describe("sharedParents", () => {
+  test("only a candidate with another declared output beneath it, never a sibling sharing a prefix", () => {
+    const outputs = [
+      "w/cache",
+      "w/cache/rocket",
+      "w/cache-other",
+      "w/config",
+      "w/drop-in.php",
+    ];
+    expect(
+      sharedParents(["w/cache", "w/cache-other", "w/config"], outputs),
+    ).toEqual(["w/cache"]);
+    expect(sharedParents(["w/cache/rocket"], outputs)).toEqual([]);
+  });
+});
+
+test.describe("parseReclaimCheck", () => {
+  test("the paths printed by index, in the order given, ignoring anything else", () => {
+    expect(parseReclaimCheck("3\n1\nnoise\n9\n 2x\n", ["a", "b", "c"])).toEqual(
+      ["a", "c"],
+    );
+    expect(parseReclaimCheck("", ["a"])).toEqual([]);
+  });
+});
+
 test.describe("coveringPath", () => {
   test("the nearest listed path strictly above, never a sibling sharing a prefix", () => {
     const paths = ["w/cache", "w/cache/rocket", "w/cache-other"];
@@ -171,5 +264,80 @@ test.describe("OUTPUTS_CHECK_SCRIPT", () => {
     expect(found.get("dir")?.kind).toBe("entry");
     // Nothing in a name ran.
     expect(() => execFileSync("test", ["-e", join(dir, "pwned")])).toThrow();
+  });
+});
+
+test.describe("RECLAIM_CHECK_SCRIPT", () => {
+  let dir: string;
+  const uid = String(process.getuid?.() ?? 0);
+
+  test.beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "install-outputs-reclaim-"));
+  });
+
+  test.afterEach(() => {
+    // A folder a test locked must be opened again before it can be removed.
+    const locked = join(dir, "unreadable", "inner");
+    if (existsSync(locked)) chmodSync(locked, 0o755);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /**
+   * Runs the check on this machine's `sh` and `find`.
+   *
+   * @param owner - the uid to test against.
+   * @param names - entries under `dir`.
+   * @returns the names it printed.
+   */
+  const run = (owner: string, names: readonly string[]): readonly string[] =>
+    parseReclaimCheck(
+      execFileSync(
+        "sh",
+        [
+          "-c",
+          RECLAIM_CHECK_SCRIPT,
+          "check",
+          owner,
+          ...names.map((n) => join(dir, n)),
+        ],
+        { encoding: "utf8", cwd: dir },
+      ),
+      names,
+    );
+
+  test("prints a tree wholly the uid's, a file or a folder, whatever the names hold", () => {
+    const hostile = "a b$(touch pwned)'\n`id`";
+    mkdirSync(join(dir, "tree", "deep"), { recursive: true });
+    writeFileSync(join(dir, "tree", "deep", "f.php"), "<?php");
+    writeFileSync(join(dir, "file.php"), "<?php");
+    mkdirSync(join(dir, hostile));
+
+    expect(run(uid, ["tree", "missing", "file.php", hostile])).toEqual([
+      "tree",
+      "file.php",
+      hostile,
+    ]);
+    expect(() => execFileSync("test", ["-e", join(dir, "pwned")])).toThrow();
+  });
+
+  test("never a tree with an entry another uid owns", () => {
+    mkdirSync(join(dir, "tree"));
+    expect(run(String(Number(uid) + 1), ["tree"])).toEqual([]);
+  });
+
+  // Root reads every folder: the refusal below is only observable as another user.
+  test("never a tree it cannot read whole", () => {
+    test.skip(uid === "0", "root reads an unreadable folder");
+    mkdirSync(join(dir, "unreadable", "inner"), { recursive: true });
+    writeFileSync(join(dir, "unreadable", "inner", "x"), "");
+    chmodSync(join(dir, "unreadable", "inner"), 0o000);
+    expect(run(uid, ["unreadable"])).toEqual([]);
+  });
+
+  test("never follows a link out of the tree", () => {
+    mkdirSync(join(dir, "tree"));
+    symlinkSync("/", join(dir, "tree", "to-root"));
+    // The link itself is the uid's; `/` beneath it is not, and is never walked.
+    expect(run(uid, ["tree"])).toEqual(["tree"]);
   });
 });
