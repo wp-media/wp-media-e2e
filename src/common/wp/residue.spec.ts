@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { SiteResidueRemovalFailedError } from "./errors";
 import { GRANT_SCRIPT, resetOwnershipCaches } from "./ownership";
 import {
+  deniedPreparationAdvice,
   isDeclaredResidue,
   normaliseResiduePath,
   parseResidueDeclaration,
@@ -665,11 +666,120 @@ test.describe("prepareSiteDataDirs", () => {
           "wp-content/uploads/backwpup-restore",
         ]),
       ).rejects.toThrow(
-        /could not `mkdir -p .*backwpup-restore`.*elevation: disabled/s,
+        /could not `mkdir -p .*backwpup-restore`.*elevation: disabled\)\. Site commands run as the transport's user here.*remove `transport\.elevate: false`/s,
       );
     } finally {
       chmodSync(uploads, 0o700);
     }
+  });
+});
+
+/**
+ * The refusal's advice must name who really ran the refused command (in `site` the identity, never
+ * the transport's user), never claim a declared `runAs` is the web server's (it is never checked
+ * against it), and give a fix that can work for that step and that elevation.
+ */
+test.describe("deniedPreparationAdvice", () => {
+  const SUDO = "grant the transport's user passwordless `sudo`";
+  const SITE = (target: string) =>
+    ({
+      kind: "site",
+      target: { user: target, group: target },
+      identity: {
+        user: "www-data",
+        group: "web",
+        uid: 33,
+        gid: 82,
+        groupIds: [82],
+        groupNames: ["web"],
+      },
+      umask: "0022",
+    }) as const;
+
+  // `site` is reached by `auto` (verified) and by a declared `runAs` (never verified): same words.
+  for (const [label, state] of [
+    ["auto", SITE("www-data")],
+    ["declared runAs", SITE("ubuntu")],
+  ] as const) {
+    test(`site (${label}): the identity ran it and is never called the web server's`, () => {
+      const advice = deniedPreparationAdvice("mkdir", state, "unavailable");
+      expect(advice).toContain(
+        "Site commands run as the site's identity, www-data:web: make the parent directory writable by www-data",
+      );
+      expect(advice).not.toContain("web server");
+      expect(advice).toContain(SUDO);
+      // The transport's user appears only as the one granted `sudo`.
+      expect(advice.replace(SUDO, "")).not.toContain("transport's user");
+    });
+  }
+
+  // Reached by `auto` and by a declared `runAs` naming the transport's user (repro: declared
+  // ubuntu:ubuntu, docroot www-data's, transport ubuntu): the web server is never checked then.
+  test("same-user/transport-user: the transport's user is the site's identity, not said to be the web server's", () => {
+    const advice = deniedPreparationAdvice(
+      "mkdir",
+      { kind: "same-user", reason: "transport-user" },
+      "unavailable",
+    );
+    expect(advice).toContain(
+      "Site commands run as the transport's user, which already is the site's identity: make the parent directory writable by it",
+    );
+    expect(advice).not.toContain("web server");
+    expect(advice).toContain(SUDO);
+  });
+
+  for (const state of [
+    { kind: "same-user", reason: "mode" },
+    { kind: "fallback", reason: "no-sudo", detail: "sudo refused" },
+    { kind: "disabled", reason: "config" },
+    { kind: "disabled", reason: "as-transport-user" },
+  ] as const) {
+    test(`${state.kind}/${state.reason}: the transport's user and the web server both need it`, () => {
+      const advice = deniedPreparationAdvice("mkdir", state, "unavailable");
+      expect(advice).toContain(
+        "Site commands run as the transport's user here",
+      );
+      expect(advice).toContain(
+        "writable by both it and the web server, which share this site's docroot",
+      );
+      expect(advice).toContain(SUDO);
+    });
+  }
+
+  // A writable parent cannot help a refused chmod: only the directory's owner may change its mode.
+  test("a refused chmod asks for ownership of the directory, never a writable parent", () => {
+    for (const state of [
+      SITE("www-data"),
+      { kind: "disabled", reason: "config" } as const,
+    ]) {
+      const advice = deniedPreparationAdvice("chmod", state, "unavailable");
+      expect(advice).toContain("the directory's owner");
+      expect(advice).not.toContain("parent directory");
+    }
+    expect(
+      deniedPreparationAdvice("chmod", SITE("www-data"), "unavailable"),
+    ).toContain("make www-data the directory's owner");
+  });
+
+  // `transport.elevate: false` never tries `sudo`: granting it alone would change nothing.
+  test("with elevation disabled it says to turn elevation back on, not only to grant sudo", () => {
+    const advice = deniedPreparationAdvice(
+      "mkdir",
+      { kind: "disabled", reason: "config" },
+      "disabled",
+    );
+    expect(advice).toContain("remove `transport.elevate: false`");
+  });
+
+  // Root already tried and failed: offering `sudo` again would send the operator in a circle.
+  test("when root's retry was refused too it offers no sudo", () => {
+    const advice = deniedPreparationAdvice(
+      "mkdir",
+      SITE("www-data"),
+      "available",
+    );
+    expect(advice).not.toContain("sudo");
+    expect(advice).toContain("Root's retry was refused too.");
   });
 });
 

@@ -164,7 +164,7 @@ const todaysLine = (file: string, args: readonly string[]): string =>
 
 test.describe("every state but site sends today's line", () => {
   for (const [label, overrides] of [
-    ["runAs absent", {}],
+    ["runAs absent (auto, no verdict)", {}],
     ["runAs false", { runAs: false }],
   ] as const) {
     test(`${label}: exactly today's line, and no other command`, async () => {

@@ -11,6 +11,7 @@ import {
 } from "./exec";
 import { normalizeOwnership } from "./ownership";
 import { resolveSiteIdentity } from "./site-identity";
+import type { IdentityState } from "./site-identity";
 import {
   PROTECTED_SITE_PATHS,
   assertSafeElevatedTarget,
@@ -653,7 +654,7 @@ async function handBackWhatRootMakes(
  * because that is the one an operator can act on.
  *
  * @param transport - the target site's transport.
- * @param file - the command to run.
+ * @param file - the command to run (its name picks the refusal's advice).
  * @param args - its arguments, as an array so nothing is shell-interpreted.
  * @param elevated - wraps the privileged retry (given it as a thunk), for a step that must act around
  * it; default: just the retry.
@@ -661,7 +662,7 @@ async function handBackWhatRootMakes(
  */
 async function escalateIfDenied(
   transport: Transport,
-  file: string,
+  file: PreparationStep,
   args: string[],
   elevated: (retry: () => Promise<ExecResult>) => Promise<ExecResult> = (
     retry,
@@ -678,10 +679,72 @@ async function escalateIfDenied(
   throw new Error(
     `[wp/residue] ${describeTarget(transport)}: could not \`${file} ${args.join(" ")}\` ` +
       `(exit ${String(first.exitCode)}: ${(first.stderr || first.stdout).trim() || "no output"}; ` +
-      `elevation: ${elevation}). The plugin's data directories must be writable by both the ` +
-      "transport's user and the web server, which share this site's docroot — grant the transport's " +
-      "user passwordless `sudo`, or make the parent directory writable by it.",
+      `elevation: ${elevation}). ${deniedPreparationAdvice(file, await resolveSiteIdentity(transport), elevation)}`,
   );
+}
+
+/** A data-directory preparation step {@link escalateIfDenied} runs. */
+export type PreparationStep = "mkdir" | "chmod";
+
+/**
+ * What to do when a data-directory step was refused, naming who actually ran it: the identity in the
+ * `site` state, the transport's user in every other. The fix depends on the step (`mkdir` needs a
+ * writable parent; `chmod` needs to own the directory itself) and on elevation, root's retry through
+ * the transport user's `sudo`. Never claims the identity is the web server's: a declared `runAs` is
+ * taken as given, never checked against the web server. Pure.
+ *
+ * @param step - the refused command.
+ * @param state - the site's identity state, which decided who ran it.
+ * @param elevation - how far root's retry could reach.
+ * @returns one or two sentences for the end of the error.
+ */
+export function deniedPreparationAdvice(
+  step: PreparationStep,
+  state: IdentityState,
+  elevation: ElevationSupport,
+): string {
+  let who: string;
+  let runs: string;
+  if (state.kind === "site") {
+    who = state.identity.user;
+    runs = `Site commands run as the site's identity, ${who}:${state.identity.group}`;
+  } else if (state.kind === "same-user" && state.reason === "transport-user") {
+    who = "it";
+    runs =
+      "Site commands run as the transport's user, which already is the site's identity";
+  } else {
+    who = "it";
+    runs =
+      "Site commands run as the transport's user here; the plugin's data directories must be " +
+      "writable by both it and the web server, which share this site's docroot";
+  }
+  const fix =
+    step === "mkdir"
+      ? `make the parent directory writable by ${who}`
+      : // Only a file's owner (or root) may change its mode: a writable parent does not help.
+        `make ${who} the directory's owner (only the owner can change its mode)`;
+  return `${runs}: ${fix}${elevationAdvice(elevation)}`;
+}
+
+/**
+ * The elevation half of {@link deniedPreparationAdvice}.
+ *
+ * @param elevation - how far root's retry could reach.
+ * @returns the clause ending the advice, from `", or …."` to `"."`.
+ */
+function elevationAdvice(elevation: ElevationSupport): string {
+  switch (elevation) {
+    case "unavailable":
+      return ", or grant the transport's user passwordless `sudo`.";
+    case "disabled":
+      // `transport.elevate: false` never tries `sudo`, so granting it alone changes nothing.
+      return (
+        ", or remove `transport.elevate: false` (and grant the transport's user passwordless " +
+        "`sudo`, if it has none)."
+      );
+    case "available":
+      return ". Root's retry was refused too.";
+  }
 }
 
 /**

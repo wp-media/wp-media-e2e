@@ -131,16 +131,17 @@ alias is never run) ([the ssh command line](../architecture/wordpress-automation
   - In the `site` identity state (`runAs`, below) files are already the web server's: only `false`
     counts there (a malformed value still fails the load); a declared owner is neither resolved nor
     enforced, and the pre-flight says so when it differs from the identity.
-- **`runAs`** (`ssh` only; absent = `false` until the
-  [Phase 12](../plans/phase-12-site-identity-plan.md) rollout, then `"auto"`) — who site commands
+- **`runAs`** (`ssh` only; absent = `"auto"`) — who site commands
   (`exec`/`wpCli`) run as: `"auto"` (the docroot's owner, once verified to be the web server's
   identity), `"user:group"` (the `fileOwner` rule, trimmed; root by name or id `0`, or an id above
   4294967294, refused as user **and** group: the web server never runs with group 0) or `false` (the
-  transport's user, as today). The pre-flight verifies it (the web probe: a short-lived
+  transport's user: a site's opt-out, e.g. while its server lacks the
+  [checklist below](#server-checklist-for-runas)). The pre-flight verifies it (the web probe: a short-lived
   `<root>/e2e-identity-<32 hex>.php`, only for `"auto"`/`"user:group"`) and reports the state in its
   "Site identity" check; `"auto"` without this run's verdict (`--no-deps`) runs as the transport's user.
-  **Keep real sites at `false` until Phase 12's rollout** (12.11) switches each, once its server
-  passes the [checklist below](#server-checklist-for-runas).
+  A site missing checklist item 1, 2, 4 or 5 falls back to the transport's user, warned every run;
+  one missing only 3 or 6 still runs as the identity, reported every run (without 3, sudo logs every
+  command line, `--key=` values included). `"runAs": false` opts the site out of all of it.
 - **`umask`** (`ssh` only; default `0022`) — the umask of commands run as the site's identity (the
   `site` state only): a text of 3–4 octal digits (`"022"`, `"0022"`), stored as four. Its owner digit
   must be `0` (`"0177"` would make new directories `0600`, unusable by their owner); a JSON number is
@@ -175,8 +176,8 @@ only, the suite drops sudo's `unable to resolve host` line itself, so `/etc/host
 In `site` the SSH user's `~/.wp-cli/config.yml` no longer applies (WP-CLI runs with the identity's
 home); move what the site needs to its `wp-cli.yml` (warned).
 
-Switching a live cell: drain the orchestrator running it (one Ctrl-C,
-[orchestrator.md](orchestrator.md)), apply the list, set `runAs: "auto"`, run `npm run healthcheck`
+Switching a live cell that opted out: drain the orchestrator running it (one Ctrl-C,
+[orchestrator.md](orchestrator.md)), apply the list, remove its `"runAs": false`, run `npm run healthcheck`
 (its "Site identity" check must read `Runs as <user>(<uid>):<group>(<gid>)`) and one full suite run, then start the orchestrator
 again.
 

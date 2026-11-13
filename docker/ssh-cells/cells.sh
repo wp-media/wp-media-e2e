@@ -351,7 +351,8 @@ show_logs() {
 remove_overlays() { rm -f "$BACKWPUP_OVERLAY" "$WP_ROCKET_OVERLAY"; }
 
 # Writes both products' overlays (0600: they hold the WordPress password) through Node, so every
-# value is JSON-escaped whatever the checkout's path holds. `runAs` is left out: the default applies.
+# value is JSON-escaped whatever the checkout's path holds. `runAs` is spelled out (`"auto"`, also the
+# default), so a twin keeps asking for the web server's identity whatever the default becomes.
 write_overlays() {
   say "Writing the sites overlays (sites.twins.json, git-ignored)"
   # shellcheck disable=SC2016 # JavaScript, expanded by Node

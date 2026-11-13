@@ -312,7 +312,8 @@ test.describe("ownership in the site state", () => {
 test.describe("ownership in every other state: today's handover, as root, grant before chown", () => {
   const cases: readonly [string, () => Transport, "disabled" | "fallback"][] = [
     ["runAs: false", () => server.transport({ runAs: false }), "disabled"],
-    ["runAs absent", () => server.transport(), "disabled"],
+    // Absent is `auto`, the default; with no verdict in this process it falls back unverified.
+    ["runAs absent (auto, no verdict)", () => server.transport(), "fallback"],
     [
       "an as-today copy of a site transport",
       () => asTransportUser(siteTransport()),
@@ -483,8 +484,9 @@ test.describe("residue in the site state: as the site first, root only for what 
     rmSync(join(server.root, "wp-content", "uploads"), { recursive: true });
     writeFileSync(join(server.root, "wp-content", "uploads"), "");
 
+    // The advice names who ran the refused mkdir: the identity, never the transport's user.
     await expect(prepareSiteDataDirs(transport, [DATA_DIR])).rejects.toThrow(
-      /could not `mkdir -p -- /,
+      /could not `mkdir -p -- .*Site commands run as the site's identity, www-data:\S+: make the parent directory writable by www-data/s,
     );
     expect(
       rootCallsSince(from).filter((argv) => argv.includes("chown")),

@@ -76,7 +76,8 @@ export interface IdentityIssue {
 /**
  * Whether a transport asks to run as an identity: `ssh` with an effective `runAs` of `"auto"` or
  * `"user:group"` (`effectiveRunAs` is `undefined` off `ssh`). Only
- * such a site gets the web probe and `sudo -n -l`; one with `runAs` false (or absent) gets neither.
+ * such a site gets the web probe and `sudo -n -l` (an absent `runAs` is `"auto"`); one with `runAs`
+ * false gets neither.
  *
  * @param transport - the site's transport.
  */

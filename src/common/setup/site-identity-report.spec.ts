@@ -534,11 +534,11 @@ test.describe("asksForIdentity", () => {
     ...(runAs === undefined ? {} : { runAs }),
   });
 
-  test("ssh with auto or a declared identity asks; false, absent (the default) and other modes do not", () => {
+  test("ssh with auto, absent (the default, auto) or a declared identity asks; false and other modes do not", () => {
     expect(asksForIdentity(ssh("auto"))).toBe(true);
+    expect(asksForIdentity(ssh())).toBe(true);
     expect(asksForIdentity(ssh("www-data:www-data"))).toBe(true);
     expect(asksForIdentity(ssh(false))).toBe(false);
-    expect(asksForIdentity(ssh())).toBe(false);
     expect(asksForIdentity({ mode: "local", rootDir: "/r" })).toBe(false);
     expect(asksForIdentity({ mode: "docker", container: "c" })).toBe(false);
   });

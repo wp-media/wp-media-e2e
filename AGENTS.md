@@ -191,8 +191,8 @@ Schema: **[configuration.md](docs/guides/configuration.md)**.
   smoke; an overlay alone (e.g. the SSH twins' `sites.twins.json`) replaces the example. Credentials
   live only there and never enter reports. `transport.port` (`ssh` only, default 22).
 - **Site identity fields** ([`run-as.ts`](src/common/config/run-as.ts)), read by `exec`/`wpCli`, verified
-  by the pre-flight (keep real sites at `false` until Phase 12's rollout): `transport.runAs` (`ssh` only; `"auto"`,
-  `"user:group"` never root, or `false`, the default `DEFAULT_SSH_RUN_AS`) and `transport.umask`
+  by the pre-flight: `transport.runAs` (`ssh` only; `"auto"`, the default `DEFAULT_SSH_RUN_AS`;
+  `"user:group"` never root; or `false`, a site's opt-out: the transport's user) and `transport.umask`
   (`ssh` only; 3–4 octal digits keeping the owner's bits, stored as four, default `0022`), both
   refused on `docker`/`local`; `transport.wpUser` is resolved-only, copied from the site's `username`
   (a sites file setting it is refused). Unknown site or transport keys fail the load.
@@ -646,8 +646,8 @@ history:
   (BackWPup first); supersedes the parent plan's Phase 6.
 - [`phase-12-site-identity-plan.md`](docs/plans/phase-12-site-identity-plan.md) — every site command
   as the web server's identity (`sudo -u/-g`), `wp --user=<admin>`, warned fallbacks: built and
-  twin-verified (12.1–12.10); left in 12.11: the per-cell rollout and the `"auto"` default (its
-  checklist is there). Part B readies WP Rocket's lifecycle.
+  rolled out (Part A done: `"auto"` the default, both `pro` cells live). Part B, next, readies WP
+  Rocket's lifecycle.
 - [`orchestrator-plan.md`](docs/plans/orchestrator-plan.md) — the orchestrator, a long-running service
   running cells on a server (supersedes the parent plan's Phase 9); includes Phase 0 (done): the run
   contract and each suite change's decision.

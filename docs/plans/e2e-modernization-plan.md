@@ -997,7 +997,7 @@ server's next write into it fails — a raw `EACCES` inside `WP_Filesystem_Direc
   falls back, warned; (b) zip installs, `eval` and option calls write nothing to `HOME` (only
   download installs warn and succeed: phase-12 F7); (c) accepted: what the suite does on a site now
   looks as if the website did it. Every state but `site` keeps this section's handover (`same-user`, `fallback`, `disabled`).
-  Per-site switch `transport.runAs`; the default stays `false` until 12.11's rollout.
+  Per-site switch `transport.runAs`: `"auto"` by default since 2026-11-13 (phase-12 12.11); `false` opts a site out.
 - Rejected: a `www-data:www-data` fallback when detection fails. It is wrong on `pro@apache`, and a
   wrong owner applied as root is worse than none; detection cannot fail alone (pre-flight already
   asserts root access and a booting WordPress); and the real failure, missing elevation, leaves
@@ -1055,8 +1055,8 @@ server's next write into it fails — a raw `EACCES` inside `WP_Filesystem_Direc
   budget. (Residue removal is already batched — wordpress-automation.md.)
 - ~~Running WP-CLI as the docroot owner (§8.2)~~ — **closed 2026-11-12**: built as Phase 12
   12.1–12.10, twin-verified; this module is now its fallback (`normalizeOwnership` answers
-  `unnecessary` in the `site` state). The default `"auto"` and the per-cell rollout are tracked in the
-  [phase-12 plan](phase-12-site-identity-plan.md) 12.11, no longer here.
+  `unnecessary` in the `site` state). The default became `"auto"` 2026-11-13, after the per-cell
+  rollout ([phase-12 plan](phase-12-site-identity-plan.md) 12.11).
 
 ## 9. References
 

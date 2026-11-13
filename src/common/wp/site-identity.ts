@@ -300,7 +300,7 @@ interface Wanted {
  * The identity state, or the probe still needed to decide it. Pure; the order is the rule:
  *
  * 1. not `ssh` → `same-user/mode` (no `runAs` there, never `disabled`);
- * 2. `runAs` false (or absent) → `disabled`;
+ * 2. `runAs` false → `disabled` (absent is `auto`);
  * 3. `auto` with no verdict → `fallback/unverified`, before any probe: none could change it (its fix,
  *    running the pre-flight, also reports an owner that is root or unreadable);
  * 4. owner and transport identity unknown → probe them;
@@ -536,7 +536,14 @@ function fallback(reason: FallbackReason, detail: string): IdentityState {
 
 // ── Messages ─────────────────────────────────────────────────────────────────────────────────────
 
-/** Each fallback reason in words, and its fix. */
+/** How a site stops asking for an identity: the end of each fix below but one. */
+export const RUN_AS_OPT_OUT = 'or set `"runAs": false` to opt the site out';
+
+/**
+ * Each fallback reason in words, and its fix. Every fix but `probe-mismatch`'s (sudo misbehaving,
+ * worth a look before anything else) ends with {@link RUN_AS_OPT_OUT}: since `runAs` defaults to
+ * `"auto"`, a host that cannot meet the checklist is otherwise warned on every run.
+ */
 export const FALLBACK_REASONS: Readonly<
   Record<FallbackReason, { readonly what: string; readonly fix: string }>
 > = {
@@ -544,31 +551,34 @@ export const FALLBACK_REASONS: Readonly<
     what: "sudo refused to run as the site's identity",
     fix:
       "give the SSH user passwordless sudo (`<ssh user> ALL=(ALL) NOPASSWD: ALL`; `(ALL:ALL)` when " +
-      "the group is not one of the web user's) and `Defaults:<ssh user> !log_allowed`",
+      "the group is not one of the web user's) and `Defaults:<ssh user> !log_allowed`, " +
+      RUN_AS_OPT_OUT,
   },
   "no-wp": {
     what: "WP-CLI does not run under sudo",
-    fix: "install `wp` on sudo's secure_path (e.g. /usr/local/bin/wp)",
+    fix: `install \`wp\` on sudo's secure_path (e.g. /usr/local/bin/wp), ${RUN_AS_OPT_OUT}`,
   },
   "no-root-access": {
     what: "the site's identity cannot enter the WordPress root",
-    fix: "give the web server's user search access to the root and its parents",
+    fix: `give the web server's user search access to the root and its parents, ${RUN_AS_OPT_OUT}`,
   },
   "no-identity": {
     what: "there is no usable identity to run as",
     fix:
-      "chown -R the docroot to the web server's user and group (never root), or set `runAs` to an " +
-      "account the host has",
+      "chown -R the docroot to the web server's user and group (never root), set `runAs` to an " +
+      `account the host has, ${RUN_AS_OPT_OUT}`,
   },
   "owner-not-web": {
     what: "PHP does not run as the docroot's owner",
-    fix: "chown -R the docroot to the user and group PHP runs as, or set `runAs` to them explicitly",
+    fix:
+      "chown -R the docroot to the user and group PHP runs as, set `runAs` to them explicitly, " +
+      RUN_AS_OPT_OUT,
   },
   unverified: {
     what: "the web server's identity was not verified in this run",
     fix:
-      "run with the auth setup (not --no-deps) so the pre-flight asks the web server, or set `runAs` " +
-      "to the web server's user and group",
+      "run with the auth setup (not --no-deps) so the pre-flight asks the web server, set `runAs` " +
+      `to the web server's user and group, ${RUN_AS_OPT_OUT}`,
   },
   "probe-mismatch": {
     what: "sudo ran the probe as another identity than asked",

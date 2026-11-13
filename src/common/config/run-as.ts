@@ -18,11 +18,13 @@ import type { RunAs, Transport } from "./types";
 export type RunAsIdentity = Exclude<RunAs, "auto" | false>;
 
 /**
- * What an `ssh` site without `runAs` gets: `false`, its transport's own user, as before the field
- * existed. Changing it to `"auto"` switches every such site at once, so it moves only after the
- * identity layer is proven; `docker`/`local` never run as another identity, whatever this says.
+ * What an `ssh` site without `runAs` gets: `"auto"`, the docroot's owner once the pre-flight verifies
+ * it is the web server's identity (a warned fallback to the transport's user otherwise). A host
+ * whose sudo logs command lines (no `!log_allowed`) or whose umask differs still runs as the
+ * identity, reported only. A site opts out with `false`; `docker`/`local` never run as another
+ * identity, whatever this says.
  */
-export const DEFAULT_SSH_RUN_AS: RunAs = false;
+export const DEFAULT_SSH_RUN_AS: RunAs = "auto";
 
 /**
  * The umask a site command gets when `umask` is absent: systemd's default for apache2 and php-fpm,

@@ -432,7 +432,7 @@ test.describe("site state: an absolute, shared staging root", () => {
 
 test.describe("every other state: today's line and upload", () => {
   for (const [label, transport] of [
-    ["runAs absent", (): Transport => server.transport()],
+    ["runAs absent (auto, no verdict)", (): Transport => server.transport()],
     ["runAs false", (): Transport => server.transport({ runAs: false })],
     ["an as-today copy", (): Transport => asTransportUser(siteTransport())],
   ] as const) {
@@ -563,7 +563,11 @@ test.describe("stale inboxes", () => {
   });
 
   for (const [label, transport, noSudo] of [
-    ["runAs absent", (): Transport => server.transport(), false],
+    [
+      "runAs absent (auto, no verdict)",
+      (): Transport => server.transport(),
+      false,
+    ],
     ["runAs false", (): Transport => server.transport({ runAs: false }), false],
     [
       "an as-today copy",
