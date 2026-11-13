@@ -651,6 +651,8 @@ history:
   decisions.
 - [`orchestrator-report-delivery-plan.md`](docs/plans/orchestrator-report-delivery-plan.md) — each
   run's report bundle (Allure, `report.tar.gz`, Slack's fetch command; done): its standing decisions.
+- [`suite-version-plan.md`](docs/plans/suite-version-plan.md) — the suite's `package.json` version in
+  the `[run]` header, run facts, the orchestrator's start line and Slack (planned).
 
 ## When to update these docs
 
