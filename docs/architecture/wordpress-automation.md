@@ -339,6 +339,38 @@ That flag does both in one PHP process where the plugin's main file is already l
 well-behaved `uninstall.php` sees itself loaded and skips its cleanup. A separate plain `uninstall`
 runs in a fresh process that never loads it.
 
+**A deactivation is read back, never trusted from its exit code.** A plugin can refuse from its own
+deactivation hook and WP-CLI still exits 0: WP Rocket, with no writable `wp-config.php`, stores
+`<user id>_donotdeactivaterocket` and `die()`s inside core's `deactivate_plugins()`, before
+`active_plugins` is saved. The recovery chain:
+
+1. `wp plugin deactivate`, read back (`ensurePluginDeactivated` → `inactive` | `deactivated`;
+   `deactivatePlainly`); left active, what it did is worded by `stillActiveAfter` — "exited 0 but left
+   it active", or "failed (exit N: …)" with its first error line, masked and plain;
+2. the product's `forceDeactivate` (`ProductConfig.forceDeactivate`, passed by the `@plugin` hooks),
+   read back → `forced` (`plainSaid`, and `forceError` when it threw yet took); still active →
+   `PluginDeactivationFailedError` with both;
+3. cleanup only (`ensurePluginAbsent`): `wp --skip-plugins plugin deactivate`, read back — the
+   plugin's deactivation hook never runs, so what it undoes stays (WP Rocket: its `.htaccess` block,
+   `WP_CACHE`, `advanced-cache.php`).
+
+`ensurePluginAbsent(transport, slug, { forceDeactivate, onRecovered })` takes step 3 only for that
+error (a command that cannot run is rethrown) and reports steps 2 and 3 (`DeactivationRecovery`,
+worded by `deactivationRecoveryMessage`; a `[wp/plugin]` warning without `onRecovered`); the
+pre-flight heal and `capture-backwpup-fixtures.ts` pass no force and get step 3. The `@plugin`
+teardown fails a scenario whose plugin needed step 3 (`PluginDeactivationBrokenError`, after every
+cleanup duty; the log verdict wins); step 2 taking, and step 3 before a scenario, are warnings.
+`uninstallPlugin` (under test) stops at step 1: a refusal is its verdict.
+
+WP Rocket's force (`src/projects/wp-rocket/support/deactivation.ts`, one `wp eval` with it loaded): a
+last `rocket_prevent_deactivation` filter returning the causes minus its own `wpconfig`/`htaccess`
+(`array_diff`: any other cause still refuses and is named), `deactivate_plugins()` (its hook runs whole
+but for the unwritable files), then the `<n>_donotdeactivaterocket` transients deleted — found by name
+in options, and by key for user 0 and every `activate_plugins` user, which is all a persistent object
+cache allows. Its `stopRunningWork` deactivates through steps 1–2 (`deactivateForStop`: no leading
+`is-active`, the force only while active, its failure returned for the removal's step 3), since it
+deactivates first.
+
 Two removal intents, with opposite semantics:
 
 | Function                              | Intent                           | Already absent                    |
@@ -364,7 +396,7 @@ trusted. **"Absent" means nothing at the plugin's path**, never "WordPress lists
   is at the path, if anything.
 
 Also: `isPluginInstalled` / `isPluginActive` (WordPress's view), `ensurePluginDeactivated`
-(idempotent), `pluginBreaksBoot` (the fatal — or the signal, a crash counting as a failed boot — WordPress
+(idempotent, above), `pluginBreaksBoot` (the fatal — or the signal, a crash counting as a failed boot — WordPress
 dies on with the plugin loaded, when it boots with `--skip-plugins=<slug>`; asked only after a failure, since that boot logs the fatal), `activatePlugin`, and `installPlugin(transport, source, opts?)` — a slug, a zip path
 **on the site**, or a URL ([`InstallPluginOptions`](../../src/common/wp/plugin.ts)
 `{ activate?, force? }`); a runner zip goes through `stageAndInstallPlugin`. "Destination folder

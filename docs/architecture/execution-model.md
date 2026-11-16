@@ -432,9 +432,9 @@ for runtime-named directory families), its database footprint (`registerSiteDbRe
 plugin for runtime-named data directories (`registerSiteDataDirResolver` / `getSiteDataDirResolver`),
 what its install writes before activation (`registerPrepareActivation` / `getPrepareActivation`; WP
 Rocket's licence), what it asks of the site over HTTP once active (`registerSettleAfterInstall` /
-`getSettleAfterInstall`; data, but product policy like the rest) and how to stop work it may still run (`registerStopRunningWork` / `getStopRunningWork`) (functions: metadata could never carry them),
+`getSettleAfterInstall`; data, but product policy like the rest), how to stop work it may still run (`registerStopRunningWork` / `getStopRunningWork`) and how to deactivate its plugin when a plain deactivation leaves it active (`registerForceDeactivate` / `getForceDeactivate`; WP Rocket with an unwritable `wp-config.php`) (functions: metadata could never carry them),
 and what its activation writes outside its folder (`registerInstallOutputs` / `getInstallOutputs` — the one
-registry that validates as it registers, so a bad path fails the config build). The auth setup's preflight reads one more: how to settle what its killed runs left on a site (`registerSettleLeftovers` / `getSettleLeftovers`), run before the gates that damage could fail; the healthcheck never settles. Hooks read files, footprint, resolver, install outputs, the activation preparer and the settle together through `declaredResidue(product)`
+registry that validates as it registers, so a bad path fails the config build). The auth setup's preflight reads one more: how to settle what its killed runs left on a site (`registerSettleLeftovers` / `getSettleLeftovers`), run before the gates that damage could fail; the healthcheck never settles. Hooks read files, footprint, resolver, install outputs, the activation preparer, the settle and the forced deactivation together through `declaredResidue(product)`
 (`hooks/plugin-lifecycle.ts`), as does a product step reinstalling mid-scenario, so the two never
 prepare or sweep different things. Unlike `getPool`, none throws — declaring none is legitimate and
 costs no round-trip: residue getters return an empty value, `getStopRunningWork`,

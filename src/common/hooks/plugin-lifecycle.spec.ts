@@ -17,11 +17,13 @@ import {
   DebugLogFatalError,
   PluginActivationFailedError,
   PluginDirRemovalFailedError,
+  PluginDeactivationBrokenError,
   PluginUninstallBrokenError,
 } from "../wp/errors";
 import { resetOwnershipCaches } from "../wp/ownership";
 import { DEFAULT_STAGING_DIR, PLUGINS_CATEGORY } from "../wp/staging";
 import {
+  registerForceDeactivate,
   registerInstallOutputs,
   registerPrepareActivation,
   registerSettleAfterInstall,
@@ -47,6 +49,7 @@ import {
   replacePluginUnderTest,
   teardownPluginUnderTest,
 } from "./plugin-lifecycle";
+import { deactivationRecoveryMessage } from "../wp/plugin";
 import { INSPECT_PLUGIN_DIR_BASH } from "../__fixtures__/plugin-dir-stub";
 import type { DeclaredResidue, ScenarioReport } from "./plugin-lifecycle";
 import type { ResolvedArtifact } from "../artifacts/types";
@@ -88,6 +91,8 @@ const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
  *  - `WP_STUB_LOG` — what an `eval` debug.log read prints.
  *  - `WP_STUB_FAIL` — an argv prefix to fail (e.g. `"plugin uninstall"`), leaving state untouched.
  *  - `WP_STUB_STUCK_ACTIVE` — deactivate exits 0 but never takes: a cleanup that cannot heal.
+ *  - `WP_STUB_REFUSES` — a plain deactivate exits 0 but never takes (the plugin's own hook refuses);
+ *    one with `--skip-plugins` does.
  *  - `WP_STUB_UNBOOTABLE` — the plugin cannot boot: an `eval` that loads plugins dies on its fatal,
  *    one with `--skip-plugins…` runs.
  *  - `WP_STUB_SILENT_ACTIVATE_FAIL` — install succeeds and exits 0, but the plugin never becomes
@@ -116,7 +121,9 @@ SLUG="$WP_STUB_SLUG"
 case "$1 $2" in
   "plugin is-installed") [ -e "$P/$3/main.php" ] && exit 0 || exit 1 ;;
   "plugin is-active")    [ -e "$S/active" ]    && exit 0 || exit 1 ;;
-  "plugin deactivate")   [ -z "$WP_STUB_STUCK_ACTIVE" ] && rm -f "$S/active"; exit 0 ;;
+  "plugin deactivate")
+    if [ -n "$WP_STUB_REFUSES" ] && [[ "$SKIPPED" != *--skip-plugins* ]]; then exit 0; fi
+    [ -z "$WP_STUB_STUCK_ACTIVE" ] && rm -f "$S/active"; exit 0 ;;
   "plugin uninstall")    rm -rf "\${P:?}/$3"; rm -f "$S/active"; exit 0 ;;
   "plugin install")
     if [ -e "$P/$SLUG" ]; then
@@ -302,6 +309,7 @@ test.afterEach(() => {
     "WP_STUB_FAIL",
     "WP_STUB_UNBOOTABLE",
     "WP_STUB_STUCK_ACTIVE",
+    "WP_STUB_REFUSES",
     "WP_STUB_SILENT_ACTIVATE_FAIL",
     "WP_STUB_ACTIVATION_OUTPUT",
   ] as const) {
@@ -407,6 +415,15 @@ test.describe("declaredResidue", () => {
     );
     expect(
       declaredResidue("residue-spec-unregistered").prepareActivation,
+    ).toBeUndefined();
+  });
+
+  test("carries the product's forced deactivation, and none for a product without", () => {
+    const force = (): Promise<void> => Promise.resolve();
+    registerForceDeactivate("force-spec-product", force);
+    expect(declaredResidue("force-spec-product").forceDeactivate).toBe(force);
+    expect(
+      declaredResidue("residue-spec-unregistered").forceDeactivate,
     ).toBeUndefined();
   });
 
@@ -1004,6 +1021,144 @@ test.describe("installPluginUnderTest — settling request", () => {
       ),
     ).rejects.toThrow(/refused/);
     expect(client.opened()).toBe(0);
+  });
+});
+
+/** What a plain deactivation that exits 0 yet leaves the plugin active is said as. */
+const EXITED_0 = "`wp plugin deactivate` exited 0 but left it active";
+
+test.describe("a deactivation the plugin refuses", () => {
+  /** A product force that takes, logged among the `wp` calls. */
+  const force = (_transport: unknown, slug: string): Promise<void> => {
+    appendFileSync(argvFile, `force ${slug}\n`);
+    rmSync(join(stateDir, "active"), { force: true });
+    return Promise.resolve();
+  };
+
+  test("the Before hook forces it before uninstalling, and reports it on the scenario", async () => {
+    seedInstalled();
+    process.env.WP_STUB_REFUSES = "1";
+    const report = reportSink();
+
+    await installPluginUnderTest(
+      local,
+      artifact(),
+      { ...files(), forceDeactivate: force },
+      undefined,
+      report,
+    );
+
+    const all = wpCalls();
+    expect(all.indexOf("force backwpup-pro")).toBeGreaterThan(
+      all.indexOf("plugin deactivate backwpup-pro"),
+    );
+    expect(all.indexOf("plugin uninstall backwpup-pro")).toBeGreaterThan(
+      all.indexOf("force backwpup-pro"),
+    );
+    expect(all.some((call) => call.startsWith("--skip-plugins plugin"))).toBe(
+      false,
+    );
+    const said = `[hooks] before "${SCENARIO_TITLE}", ${deactivationRecoveryMessage("backwpup-pro", { kind: "forced", plainSaid: EXITED_0 })}`;
+    expect(warnings).toContain(said);
+    expect(report.attached.get("forced-deactivation")).toBe(said);
+    expect(isActive()).toBe(true); // the fresh install
+  });
+
+  test("a reinstall part-way forces it too", async () => {
+    seedInstalled();
+    process.env.WP_STUB_REFUSES = "1";
+    await replacePluginUnderTest(local, artifact(), {
+      ...files(),
+      forceDeactivate: force,
+    });
+    expect(wpCalls()).toContain("force backwpup-pro");
+  });
+
+  // The copy is the artifact under test: a deactivation only the last resort took is its failure.
+  test("the teardown, with no force, takes it off unloaded, finishes its cleanup, reports it and fails", async () => {
+    seedInstalled();
+    process.env.WP_STUB_REFUSES = "1";
+    const leftovers = join(wpRoot, "wp-content/uploads/backwpup");
+    mkdirSync(leftovers, { recursive: true });
+    const report = reportSink();
+
+    const failure = await teardownPluginUnderTest(
+      local,
+      "backwpup-pro",
+      {},
+      files("wp-content/uploads/backwpup"),
+      report,
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(PluginDeactivationBrokenError);
+    expect((failure as Error).message).toContain(
+      `Plugin "backwpup-pro" could not be deactivated by WordPress: ${EXITED_0}\n`,
+    );
+    expect(isInstalled()).toBe(false);
+    expect(existsSync(leftovers)).toBe(false);
+    const all = wpCalls();
+    expect(all.indexOf("plugin uninstall backwpup-pro")).toBeGreaterThan(
+      all.indexOf("--skip-plugins plugin deactivate backwpup-pro"),
+    );
+    const said = `[hooks] after "${SCENARIO_TITLE}", ${deactivationRecoveryMessage(
+      "backwpup-pro",
+      {
+        kind: "unloaded",
+        refusal: EXITED_0,
+      },
+    )}`;
+    expect(warnings).toContain(said);
+    expect(report.attached.get("forced-deactivation")).toBe(said);
+  });
+
+  test("the Before hook, with no force, takes an earlier run's copy off unloaded and only warns", async () => {
+    seedInstalled();
+    process.env.WP_STUB_REFUSES = "1";
+    const report = reportSink();
+
+    await installPluginUnderTest(local, artifact(), files(), undefined, report);
+
+    expect(wpCalls()).toContain(
+      "--skip-plugins plugin deactivate backwpup-pro",
+    );
+    const said = `[hooks] before "${SCENARIO_TITLE}", ${deactivationRecoveryMessage(
+      "backwpup-pro",
+      { kind: "unloaded", refusal: EXITED_0 },
+    )}`;
+    expect(warnings).toContain(said);
+    expect(report.attached.get("forced-deactivation")).toBe(said);
+    expect(isActive()).toBe(true); // the fresh install
+  });
+
+  test("the teardown's log verdict outranks a deactivation only the last resort took", async () => {
+    seedInstalled();
+    process.env.WP_STUB_REFUSES = "1";
+    process.env.WP_STUB_LOG = "PHP Fatal error:  the real defect\n";
+
+    await expect(
+      teardownPluginUnderTest(local, "backwpup-pro", {}, files(), reportSink()),
+    ).rejects.toThrow(DebugLogFatalError);
+    expect(isInstalled()).toBe(false);
+    expect(errors.join("\n")).toContain(
+      'Plugin "backwpup-pro" could not be deactivated by WordPress',
+    );
+  });
+
+  test("the teardown uses the product's force before any last resort", async () => {
+    seedInstalled();
+    process.env.WP_STUB_REFUSES = "1";
+    await teardownPluginUnderTest(
+      local,
+      "backwpup-pro",
+      {},
+      { ...files(), forceDeactivate: force },
+      reportSink(),
+    );
+    expect(wpCalls()).toContain("force backwpup-pro");
+    expect(
+      wpCalls().some((call) => call.startsWith("--skip-plugins plugin")),
+    ).toBe(false);
+    expect(isInstalled()).toBe(false);
   });
 });
 

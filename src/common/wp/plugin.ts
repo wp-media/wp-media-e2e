@@ -12,6 +12,7 @@ import { flushObjectCache } from "./cache";
 import { wpCli } from "./exec";
 import { isPathSegment } from "./paths";
 import { errorMessage } from "../guards";
+import { plain, redactSecrets } from "../text";
 import {
   describePluginDir,
   inspectPluginDir,
@@ -20,7 +21,7 @@ import {
 import type { DestinationVerdict } from "./errors";
 import type { ExecResult } from "./exec";
 import type { PresentPluginDir } from "./plugin-dir";
-import type { Transport } from "../config/types";
+import type { ForceDeactivate, Transport } from "../config/types";
 
 /**
  * WordPress plugin lifecycle over WP-CLI (transport-agnostic — see ./exec).
@@ -72,20 +73,238 @@ export async function isPluginActive(
   return exitCode === 0;
 }
 
+/** How {@link ensurePluginDeactivated} deactivates a plugin a plain deactivation leaves active. */
+export interface DeactivationOptions {
+  /**
+   * The product's own forced deactivation (`ProductConfig.forceDeactivate`), tried once a plain
+   * `wp plugin deactivate` has left the plugin active; the state is read back after it either way.
+   */
+  readonly forceDeactivate?: ForceDeactivate | undefined;
+}
+
+/**
+ * What {@link ensurePluginDeactivated} found and did: `inactive` — nothing to do; `deactivated` — a
+ * plain `wp plugin deactivate` took; `forced` — that left it active (`plainSaid`, from
+ * {@link stillActiveAfter}) and the product's {@link DeactivationOptions.forceDeactivate} deactivated
+ * it (`forceError`: what the force threw, when it threw yet the plugin is inactive all the same).
+ */
+export type DeactivationOutcome =
+  | { readonly kind: "inactive" | "deactivated" }
+  | {
+      readonly kind: "forced";
+      readonly plainSaid: string;
+      readonly forceError?: string;
+    };
+
+/**
+ * What a plain `wp plugin deactivate` that left the plugin active did, in words. Pure. Exit 0 is
+ * said as such — a hook stopping the deactivation before WordPress saved it, most likely, but not
+ * read —; any other exit with its first error line ({@link firstError}), masked and plain.
+ *
+ * @param result - the plain deactivation's result.
+ */
+export function stillActiveAfter(result: ExecResult): string {
+  if (result.exitCode === 0) {
+    return "`wp plugin deactivate` exited 0 but left it active";
+  }
+  return `\`wp plugin deactivate\` failed (exit ${String(result.exitCode)}: ${printableFirstError(result)})`;
+}
+
+/**
+ * {@link firstError}, masked before it is cut and made one plain line: a deactivation's output is the
+ * site's, and lands in reports.
+ *
+ * @param result - a command's result.
+ */
+function printableFirstError(result: ExecResult): string {
+  return plain(
+    firstError({
+      ...result,
+      stdout: redactSecrets(result.stdout),
+      stderr: redactSecrets(result.stderr),
+    }),
+  );
+}
+
+/**
+ * A plain `wp plugin deactivate`, its effect read back (never its exit code: a plugin refusing from
+ * its own deactivation hook can still exit 0). For a caller that already knows the plugin is active.
+ *
+ * @param transport - the site.
+ * @param slug - the plugin's slug.
+ * @returns `undefined` once it is inactive, else what the deactivation did ({@link stillActiveAfter}).
+ * @throws Error if a command could not run.
+ */
+export async function deactivatePlainly(
+  transport: Transport,
+  slug: string,
+): Promise<string | undefined> {
+  const result = await wpCli(transport, ["plugin", "deactivate", slug]);
+  if (!(await isPluginActive(transport, slug))) return undefined;
+  return stillActiveAfter(result);
+}
+
+/**
+ * Runs a product's forced deactivation, catching what it throws: whether it took is read back by
+ * the caller, since a force may throw after deactivating.
+ *
+ * @param force - the product's forced deactivation.
+ * @param transport - the site.
+ * @param slug - the plugin's slug.
+ * @returns what it threw, masked and plain; `undefined` when it did not.
+ */
+export async function tryForceDeactivate(
+  force: ForceDeactivate,
+  transport: Transport,
+  slug: string,
+): Promise<string | undefined> {
+  try {
+    await force(transport, slug);
+    return undefined;
+  } catch (error) {
+    return plain(redactSecrets(errorMessage(error)));
+  }
+}
+
 /**
  * CLEANUP (idempotent). Deactivates the plugin if it's active, then no-ops — nothing left to do.
- * A genuine failure to deactivate throws {@link PluginDeactivationFailedError}. Always its own
- * WP-CLI call, kept separate from uninstall — see the module doc for why.
+ * Always its own WP-CLI call, kept separate from uninstall — see the module doc for why.
+ *
+ * A plain deactivation a plugin refuses from its own deactivation hook still exits 0 (WP Rocket with
+ * an unwritable `wp-config.php`: its hook `die()`s before WordPress saves `active_plugins`), so the
+ * state is read back, never the exit code ({@link deactivatePlainly}). Then the product's
+ * `forceDeactivate`, when given, and the state read back again. It never goes further: taking a plugin
+ * off `active_plugins` without loading it skips its deactivation hook, which removal under test must
+ * not hide — {@link ensurePluginAbsent} alone does that, as its last resort.
+ *
+ * @param transport - the site.
+ * @param slug - the plugin's slug.
+ * @param options - the product's forced deactivation, if it has one.
+ * @returns what it found and did.
+ * @throws {@link PluginDeactivationFailedError} if the plugin is still active, saying what the plain
+ * deactivation did (and what the force threw); Error if a command could not run.
  */
 export async function ensurePluginDeactivated(
   transport: Transport,
   slug: string,
-): Promise<void> {
-  if (!(await isPluginActive(transport, slug))) return;
-  await wpCli(transport, ["plugin", "deactivate", slug]);
-  if (await isPluginActive(transport, slug)) {
-    throw new PluginDeactivationFailedError(slug);
+  options: DeactivationOptions = {},
+): Promise<DeactivationOutcome> {
+  if (!(await isPluginActive(transport, slug))) return { kind: "inactive" };
+  const plainSaid = await deactivatePlainly(transport, slug);
+  if (plainSaid === undefined) return { kind: "deactivated" };
+  const force = options.forceDeactivate;
+  if (force === undefined) {
+    throw new PluginDeactivationFailedError(slug, plainSaid);
   }
+  const forceError = await tryForceDeactivate(force, transport, slug);
+  if (!(await isPluginActive(transport, slug))) {
+    return forceError === undefined
+      ? { kind: "forced", plainSaid }
+      : { kind: "forced", plainSaid, forceError };
+  }
+  throw new PluginDeactivationFailedError(
+    slug,
+    `${plainSaid}; its product's forced deactivation left it active too` +
+      (forceError === undefined ? "" : ` (it failed: ${forceError})`),
+  );
+}
+
+/**
+ * A deactivation {@link ensurePluginAbsent} had to recover, for the caller to report:
+ *
+ *  - `forced` — a plain `wp plugin deactivate` left the plugin active; the product's forced
+ *    deactivation deactivated it ({@link DeactivationOutcome});
+ *  - `unloaded` — that was not enough (`refusal`: what {@link ensurePluginDeactivated} said), so the
+ *    plugin was taken off `active_plugins` with no plugin loaded: its deactivation hook never ran, and
+ *    whatever that hook undoes (a `wp-config.php` constant, an `.htaccess` block) is left as it is.
+ */
+export type DeactivationRecovery =
+  | Extract<DeactivationOutcome, { readonly kind: "forced" }>
+  | { readonly kind: "unloaded"; readonly refusal: string };
+
+/**
+ * One sentence on a recovered deactivation, without a prefix: the caller says where and when. Pure,
+ * so its wording is pinned without a site.
+ *
+ * @param slug - the plugin's slug.
+ * @param recovery - what had to be done.
+ */
+export function deactivationRecoveryMessage(
+  slug: string,
+  recovery: DeactivationRecovery,
+): string {
+  if (recovery.kind === "unloaded") {
+    return (
+      `"${slug}" would not deactivate (${recovery.refusal}), so it was taken off active_plugins ` +
+      "without loading it (`wp --skip-plugins plugin deactivate`): its deactivation hook never ran, " +
+      "and what that hook undoes on the site is left as it is."
+    );
+  }
+  return (
+    `"${slug}" stayed active (${recovery.plainSaid}), so its product's forced deactivation ran and ` +
+    "deactivated it" +
+    (recovery.forceError === undefined
+      ? "."
+      : `, though it reported a failure: ${recovery.forceError}`)
+  );
+}
+
+/**
+ * Says a deactivation was recovered when no caller asked to be told: a warning, never silence.
+ *
+ * @param slug - the plugin's slug.
+ * @param recovery - what had to be done.
+ */
+function warnRecovered(slug: string, recovery: DeactivationRecovery): void {
+  console.warn(`[wp/plugin] ${deactivationRecoveryMessage(slug, recovery)}`);
+}
+
+/** What {@link ensurePluginAbsent} uses to deactivate, and whom it tells when it had to recover. */
+export interface RemovalOptions extends DeactivationOptions {
+  /**
+   * Told of each recovered deactivation ({@link DeactivationRecovery}), awaited; a `[wp/plugin]`
+   * warning when omitted.
+   */
+  readonly onRecovered?:
+    ((recovery: DeactivationRecovery) => void | Promise<void>) | undefined;
+}
+
+/**
+ * Deactivates a plugin about to be uninstalled, whatever it takes: {@link ensurePluginDeactivated}
+ * (plain, then the product's force), then, as the last resort, {@link deactivateUnloaded}. Reports
+ * each recovery it needed.
+ *
+ * @param transport - the site.
+ * @param slug - the plugin's slug.
+ * @param options - the force, and whom to tell.
+ * @throws {@link PluginDeactivationFailedError} if even the last resort leaves it active; Error if a
+ * command could not run.
+ */
+async function deactivateForRemoval(
+  transport: Transport,
+  slug: string,
+  options: RemovalOptions,
+): Promise<void> {
+  const report =
+    options.onRecovered ??
+    ((recovery: DeactivationRecovery): void => {
+      warnRecovered(slug, recovery);
+    });
+  let outcome: DeactivationOutcome;
+  try {
+    outcome = await ensurePluginDeactivated(transport, slug, options);
+  } catch (error) {
+    if (!(error instanceof PluginDeactivationFailedError)) throw error;
+    const refusal = error.reason ?? "still active";
+    await deactivateUnloaded(
+      transport,
+      slug,
+      `${refusal}; still active after \`wp --skip-plugins plugin deactivate\``,
+    );
+    await report({ kind: "unloaded", refusal });
+    return;
+  }
+  if (outcome.kind === "forced") await report(outcome);
 }
 
 /**
@@ -121,7 +340,8 @@ export type ClearedPluginDir =
  * that order, so a plugin WordPress lists is never removed by path before its uninstall was tried:
  *
  *  - **a plugin WordPress lists** is deactivated and uninstalled through WordPress, so its own cleanup
- *    runs. When that uninstall fails — a half-removed copy whose `uninstall.php` cannot load what it
+ *    runs. A deactivation it refuses is recovered ({@link deactivateForRemoval}: the product's force,
+ *    then, last, off `active_plugins` unloaded) and reported. When that uninstall fails — a half-removed copy whose `uninstall.php` cannot load what it
  *    needs — the plugin is first taken off `active_plugins` without loading it
  *    ({@link deactivateUnloaded}: such a copy cannot boot, so the ordinary deactivation never saw it
  *    active), then its folder is removed by path, and the caller's database sweep takes the footprint
@@ -143,10 +363,12 @@ export type ClearedPluginDir =
  *
  * @param transport - the target site's transport.
  * @param slug - the plugin's slug.
+ * @param options - the product's forced deactivation, and whom to tell of a recovered deactivation
+ * (a warning by default).
  * @returns what had to be removed by path, or `undefined` when nothing was there or WordPress's own
  * uninstall removed it all.
- * @throws {@link PluginDeactivationFailedError} if a listed plugin will not deactivate — before its
- * uninstall, or after a failed one; Error if the slug is not one path segment, the folder cannot be
+ * @throws {@link PluginDeactivationFailedError} if a listed plugin will not deactivate, even unloaded —
+ * before its uninstall, or after a failed one; Error if the slug is not one path segment, the folder cannot be
  * inspected, or removal by path refuses it (outside the root, or a listed plugin whose uninstall was
  * never tried — one that appeared meanwhile); `PluginDirRemovalFailedError` if what is left cannot be
  * removed by path.
@@ -154,6 +376,7 @@ export type ClearedPluginDir =
 export async function ensurePluginAbsent(
   transport: Transport,
   slug: string,
+  options: RemovalOptions = {},
 ): Promise<ClearedPluginDir | undefined> {
   let found = await inspectPluginDir(transport, slug);
   let cause: "unlisted" | "uninstall-left" = "unlisted";
@@ -161,7 +384,7 @@ export async function ensurePluginAbsent(
   if (found.kind === "recognised") {
     // Deactivate first, as its own WP-CLI call — see the module doc for why `uninstall
     // --deactivate` can't be trusted to run the plugin's cleanup.
-    await ensurePluginDeactivated(transport, slug);
+    await deactivateForRemoval(transport, slug, options);
     // Fires the uninstall procedure (DB cleanup) and deletes the files; exit code is ambiguous,
     // so what is left is read again below.
     const uninstall = await wpCli(transport, ["plugin", "uninstall", slug]);
@@ -170,7 +393,11 @@ export async function ensurePluginAbsent(
     if (found.kind === "recognised") {
       uninstallError = firstError(uninstall);
       // While WP-CLI still sees the plugin: once its folder is gone, it can no longer deactivate it.
-      await deactivateUnloaded(transport, slug);
+      await deactivateUnloaded(
+        transport,
+        slug,
+        "still active after `wp --skip-plugins plugin deactivate`, with its uninstall failed",
+      );
     }
   }
   let cleared: ClearedPluginDir | undefined;
@@ -192,17 +419,21 @@ export async function ensurePluginAbsent(
 /**
  * Takes a plugin off `active_plugins` with **no plugin loaded** (`--skip-plugins`), and verifies it.
  *
- * Only for a copy whose uninstall failed: one that cannot boot makes `wp plugin is-active` die on its
- * own fatal and exit 1 — read as "inactive" (measured) — so {@link ensurePluginDeactivated} never
- * deactivated it. Never the ordinary deactivation: an unloaded plugin's deactivation hook cannot run.
+ * Never the ordinary deactivation: an unloaded plugin's deactivation hook cannot run. For two cases
+ * only: a copy whose uninstall failed — one that cannot boot makes `wp plugin is-active` die on its
+ * own fatal and exit 1, read as "inactive" (measured), so {@link ensurePluginDeactivated} never
+ * deactivated it —, and the last resort for a plugin whose deactivation refuses even its product's
+ * force ({@link deactivateForRemoval}).
  *
  * @param transport - the target site's transport.
  * @param slug - the plugin's slug.
+ * @param stillActive - the error's reason when it is still active afterwards.
  * @throws {@link PluginDeactivationFailedError} if it is still active, or that cannot be told.
  */
 async function deactivateUnloaded(
   transport: Transport,
   slug: string,
+  stillActive: string,
 ): Promise<void> {
   await wpCli(transport, ["--skip-plugins", "plugin", "deactivate", slug]);
   const { exitCode } = await wpCli(transport, [
@@ -216,7 +447,7 @@ async function deactivateUnloaded(
   throw new PluginDeactivationFailedError(
     slug,
     exitCode === 0
-      ? "still active after `wp --skip-plugins plugin deactivate`, with its uninstall failed"
+      ? stillActive
       : `whether it is still active could not be read (\`wp --skip-plugins plugin is-active\` exit ${String(exitCode)})`,
   );
 }

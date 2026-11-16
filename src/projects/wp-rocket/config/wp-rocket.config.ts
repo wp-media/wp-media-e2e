@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import { loadSites } from "../../../common/config/sites";
 import { stopWpRocketWork } from "../support/background-work";
+import { forceDeactivateWpRocket } from "../support/deactivation";
 import { WP_ROCKET_LOG_OPTIONS } from "../support/debug-log";
 import { WP_ROCKET_SITE_DB_RESIDUE } from "../support/db-residue";
 import { writeLicencePlugin } from "../support/licence";
@@ -69,6 +70,9 @@ export const wpRocket: ProductConfig = {
   // That request starts Action Scheduler's async runner and preload, which outlive it: WP Rocket is
   // deactivated and they are waited for before each removal of the plugin.
   stopRunningWork: (transport) => stopWpRocketWork(transport),
+  // A plain `wp plugin deactivate` leaves it active while `wp-config.php` is not writable (its own
+  // deactivation refuses and dies): its refusal is lifted, its deactivation still runs.
+  forceDeactivate: forceDeactivateWpRocket,
   installOutputs: WP_ROCKET_INSTALL_OUTPUTS,
   siteResidue: WP_ROCKET_SITE_RESIDUE,
   siteDbResidue: WP_ROCKET_SITE_DB_RESIDUE,

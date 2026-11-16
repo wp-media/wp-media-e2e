@@ -6,16 +6,23 @@ import {
   BACKGROUND_WORK_PHP,
   READ_FAILURE_TOLERANCE,
   WP_ROCKET_BASENAME,
+  deactivateForStop,
+  forcedNote,
   parseBackgroundWork,
+  REAL_DEPS,
+  REAL_STOP_DEACTIVATION,
   staleWork,
   stopWpRocketWork,
   workInFlight,
   type BackgroundWork,
   type BackgroundWorkDeps,
   type QueueItem,
+  type StopDeactivation,
 } from "./background-work";
 import { LEFT_WORK_ALLOWANCE_MS } from "../../../common/hooks/plugin-lifecycle";
 import { phpLiteral } from "../../../common/wp/php";
+import { deactivatePlainly } from "../../../common/wp/plugin";
+import { forceDeactivateWpRocket } from "./deactivation";
 import type { Transport } from "../../../common/config/types";
 
 /**
@@ -54,10 +61,19 @@ function work(over: Partial<BackgroundWork> = {}): BackgroundWork {
   };
 }
 
-/** Fake I/O over a script of looks: each read takes the next, the last repeats. Logs every call. */
+/** A forced deactivation, as the stop's deactivation answers it. */
+const FORCED: Extract<StopDeactivation, { kind: "forced" }> = {
+  kind: "forced",
+  plainSaid: "`wp plugin deactivate` exited 0 but left it active",
+};
+
+/**
+ * Fake I/O over a script of looks: each read takes the next, the last repeats. Logs every call.
+ * `deactivation`: what the deactivation answers.
+ */
 function fakeSite(
   looks: readonly (BackgroundWork | Error)[],
-  onDeactivate: () => void = () => undefined,
+  deactivation: StopDeactivation = { kind: "plain" },
 ): { deps: BackgroundWorkDeps; log: string[]; clock: () => number } {
   let t = 0;
   let next = 0;
@@ -74,8 +90,7 @@ function fakeSite(
     },
     deactivate: () => {
       log.push("deactivate");
-      onDeactivate();
-      return Promise.resolve();
+      return Promise.resolve(deactivation);
     },
     sleep: (ms) => {
       log.push(`sleep ${String(ms)}`);
@@ -548,6 +563,68 @@ test.describe("stopWpRocketWork", () => {
     );
   });
 
+  // A forced deactivation is a recovery the hooks must show, even when nothing was running.
+  test("a forced deactivation is said on a quiet site", async () => {
+    const site = fakeSite([work(), work({ listed: false })], FORCED);
+    const said = await stopWpRocketWork(
+      TRANSPORT,
+      BACKGROUND_WORK_BUDGETS,
+      site.deps,
+    );
+    expect(said).toBe(
+      "WP Rocket stayed active (`wp plugin deactivate` exited 0 but left it active), so its forced " +
+        "deactivation ran before the plugin was removed.",
+    );
+  });
+
+  // What the force threw stays in sight even when it took.
+  test("a forced deactivation that reported a failure says it", async () => {
+    const site = fakeSite([work(), work({ listed: false })], {
+      ...FORCED,
+      forceError: "reading its refusal transients failed",
+    });
+    expect(
+      await stopWpRocketWork(TRANSPORT, BACKGROUND_WORK_BUDGETS, site.deps),
+    ).toMatch(
+      /; it reported a failure: reading its refusal transients failed\.$/,
+    );
+  });
+
+  test("a force that did not take is said, leaving WP Rocket to the removal's last resort", async () => {
+    const site = fakeSite([work(), work()], {
+      ...FORCED,
+      forceError: "still refused: other",
+    });
+    expect(
+      await stopWpRocketWork(TRANSPORT, BACKGROUND_WORK_BUDGETS, site.deps),
+    ).toBe(
+      "WP Rocket stayed active (`wp plugin deactivate` exited 0 but left it active), and its forced " +
+        "deactivation did not take either; it reported a failure: still refused: other; the removal " +
+        "deactivates it as its last resort.",
+    );
+  });
+
+  test("a forced deactivation is said with the work it waited for", async () => {
+    const site = fakeSite(
+      [
+        work({ claims: [claim(1, 999)] }),
+        work({ listed: false, claims: [claim(1, 999)] }),
+        work({ listed: false, now: 1013, lastRunAt: 1000 }),
+      ],
+      { ...FORCED, forceError: "boom" },
+    );
+    const said = await stopWpRocketWork(
+      TRANSPORT,
+      BACKGROUND_WORK_BUDGETS,
+      site.deps,
+    );
+    expect(said).toContain(
+      "WP Rocket was deactivated first — forced, as a plain deactivation did not take (`wp plugin " +
+        "deactivate` exited 0 but left it active); the force reported: boom —, so no new request loads it",
+    );
+    expect(said).not.toContain(forcedNote(FORCED, true));
+  });
+
   test("work still running once the drain budget is spent fails, naming it", async () => {
     const site = fakeSite([work({ listed: false, claims: [claim(1, 999)] })]);
     await expect(
@@ -588,12 +665,83 @@ test.describe("stopWpRocketWork", () => {
   // The hooks give a stop LEFT_WORK_ALLOWANCE_MS, probes included, and abandon a hook that overruns.
   test("fits the hooks' allowance for it, and outlasts WordPress's cron lock", () => {
     const { drainMs, graceMs, pollMs } = BACKGROUND_WORK_BUDGETS;
-    // The first look, the deactivation and the last look, ~5 s each on a slow link, plus a failed
-    // look's pauses.
-    const calls = 3 * 5_000 + READ_FAILURE_TOLERANCE * pollMs;
+    // ~5 s per WP-CLI call on a slow link: the first look, the deactivation's (a plain one, its
+    // read-back and the force: `deactivateForStop`), a look started just before the drain's budget
+    // ends, plus a failed look's pauses.
+    const deactivationCalls = 3;
+    const calls =
+      (2 + deactivationCalls) * 5_000 + READ_FAILURE_TOLERANCE * pollMs;
     expect(drainMs + graceMs + calls).toBeLessThanOrEqual(
       LEFT_WORK_ALLOWANCE_MS,
     );
     expect(drainMs).toBeGreaterThan(60_000);
+  });
+});
+
+test.describe("deactivateForStop", () => {
+  /** Ops logging each call; `plainSaid` is the plain deactivation's answer, `force` the force's. */
+  function ops(
+    plainSaid: string | undefined | Error,
+    force: "takes" | Error = "takes",
+  ): { log: string[]; ops: Parameters<typeof deactivateForStop>[1] } {
+    const log: string[] = [];
+    return {
+      log,
+      ops: {
+        deactivatePlainly: (_transport, slug) => {
+          log.push(`plain ${slug}`);
+          return plainSaid instanceof Error
+            ? Promise.reject(plainSaid)
+            : Promise.resolve(plainSaid);
+        },
+        force: (_transport, slug) => {
+          log.push(`force ${slug}`);
+          return force instanceof Error
+            ? Promise.reject(force)
+            : Promise.resolve();
+        },
+      },
+    };
+  }
+
+  test("a plain deactivation that takes never forces", async () => {
+    const fake = ops(undefined);
+    expect(await deactivateForStop(TRANSPORT, fake.ops)).toEqual({
+      kind: "plain",
+    });
+    expect(fake.log).toEqual(["plain wp-rocket"]);
+  });
+
+  test("one that leaves WP Rocket active is forced", async () => {
+    const fake = ops("why");
+    expect(await deactivateForStop(TRANSPORT, fake.ops)).toEqual({
+      kind: "forced",
+      plainSaid: "why",
+    });
+    expect(fake.log).toEqual(["plain wp-rocket", "force wp-rocket"]);
+  });
+
+  // The stop drains all the same; the removal's last resort takes WP Rocket off, and reports it.
+  test("a force that fails is answered with its error, never thrown", async () => {
+    const fake = ops("why", new Error("still refused: other"));
+    expect(await deactivateForStop(TRANSPORT, fake.ops)).toEqual({
+      kind: "forced",
+      plainSaid: "why",
+      forceError: "still refused: other",
+    });
+  });
+
+  test("a plain deactivation that could not run is thrown, never forced", async () => {
+    const fake = ops(new Error("connection reset"));
+    await expect(deactivateForStop(TRANSPORT, fake.ops)).rejects.toThrow(
+      "connection reset",
+    );
+    expect(fake.log).toEqual(["plain wp-rocket"]);
+  });
+
+  test("is the real stop's deactivation, over the shared plain deactivation and WP Rocket's force", () => {
+    expect(REAL_DEPS.deactivate).toBe(deactivateForStop);
+    expect(REAL_STOP_DEACTIVATION.deactivatePlainly).toBe(deactivatePlainly);
+    expect(REAL_STOP_DEACTIVATION.force).toBe(forceDeactivateWpRocket);
   });
 });

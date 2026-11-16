@@ -1,6 +1,6 @@
 # Phase 12 — Run as the site: the web server's identity for every site command
 
-Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8, 12.9 and 12.10 done 2026-11-12; 12.11 (live rollout, default `"auto"`), 12.11b, 12.12 and 12.13 done 2026-11-13; 12.14 next. Parent:
+Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8, 12.9 and 12.10 done 2026-11-12; 12.11 (live rollout, default `"auto"`), 12.11b, 12.12 and 12.13 done 2026-11-13; 12.14 done 2026-11-16; 12.15 next. Parent:
 [e2e-modernization-plan.md](e2e-modernization-plan.md) (§3 phase table). Reverses that plan's §8.2
 rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of WP Rocket's port
 ([phase-6 plan §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket)).
@@ -1372,7 +1372,7 @@ Read at `develop` @ 9788d19 (3.24.1-beta2, APVM); S1, S2, S5, S6 still hold ther
     (> cron lock) then "would not stop". A claim/action older than 65 s is **stale** (AS gives a batch
     30 s; only a request killed outright leaves one, released by AS at 300 s): not waited for, named in
     a warning (`staleWork`). A failed query is a `WP_CLI::error`, never an empty answer. A refused
-    deactivation is said, the wait goes on (12.14's). Lost folder: nothing to deactivate, still waits.
+    deactivation is said, the wait goes on (since 12.14: forced first). Lost folder: nothing to deactivate, still waits.
   - Before: a stop that had to act re-clears `debug.log` (what that work logged is the earlier run's).
     After: the stop runs **first**, then the log scan (the work logs until it ends; the next Before's
     clear would erase it); a stop failure is a cleanup failure, kept until the verdict is in, which
@@ -1433,23 +1433,71 @@ Read at `develop` @ 9788d19 (3.24.1-beta2, APVM); S1, S2, S5, S6 still hold ther
     (`… in …/plugins/wp-rocket/….php:<n>` or `on line <n>`), plus a failed `require` of one; other
     fatals still fail it.
 
-### 12.14 — Deactivation-recovery chain
+### 12.14 — Deactivation-recovery chain (done 2026-11-16)
 
-- `ProductConfig.forceDeactivate?: (transport, slug) => Promise<void>`, registered via
-  `registerForceDeactivate`/`getForceDeactivate` (`common/` never imports product code).
-- `ensurePluginDeactivated(transport, slug, options?)` gains an optional `forceDeactivate`:
-  `plugin-lifecycle.ts` passes the product's, tried when the plain deactivate leaves the plugin
-  active, then re-asserted.
-  - The pre-flight heal, `ensurePluginAbsent` without it, and `capture-backwpup-fixtures.ts` keep
-    today's path. The last resort below covers them.
-- WP Rocket's (`evalPhp`):
-  1. the `rocket_prevent_deactivation` filter with `array_diff` (never unset);
-  2. `deactivate_plugins('wp-rocket/wp-rocket.php')`;
-  3. delete transients `*_donotdeactivaterocket`.
-- Last resort, generic: `--skip-plugins` removal from `active_plugins` (today's `ensurePluginAbsent`
-  path). It skips WP Rocket's deactivation, so 12.15 restores the files.
-- Each needed step is reported.
-- Tests: chain order (unit); twin `wpconfig-root` finishes and leaves the site clean.
+Read at `develop` @ 4d37b19 (3.24.1, APVM) and core 7.2-beta1 (twin): S2 holds; `find_wpconfig_path()`
+returns false for an unwritable file, so `maybe_prevent_deactivation` adds `wpconfig`; core runs
+`deactivate_{$plugin}` before `update_option('active_plugins')`, so the hook's `die()` leaves it
+active, exit 0. Also there: a `rocket_nonce`/`force_deactivation` nonce bypass (the admin notice's
+link) — not used: it skips every cause, not only WP Rocket's own.
+- **Chain** (`wp/plugin.ts`), each step read back: (1) `wp plugin deactivate` (`deactivatePlainly`;
+  what it did in words, `stillActiveAfter`: "exited 0 but left it active", or "failed (exit N: <first
+  error line, masked, plain>)" — "refused" is never claimed); (2) `ProductConfig.forceDeactivate`
+  (registry `registerForceDeactivate`/`getForceDeactivate`, carried by `declaredResidue`; its throw
+  caught masked, `tryForceDeactivate`); (3) cleanup only: `wp --skip-plugins plugin deactivate`.
+  `ensurePluginDeactivated(…, { forceDeactivate })` → `inactive | deactivated | forced(plainSaid,
+  forceError?)`, else `PluginDeactivationFailedError` with (1)'s words (+ the force's; `reason` kept).
+  `ensurePluginAbsent(…, { forceDeactivate, onRecovered })` adds (3) — only for that error, a command
+  that cannot run is rethrown — and reports (2)/(3) (`DeactivationRecovery`,
+  `deactivationRecoveryMessage`; `[wp/plugin]` warning by default). The hooks pass the product's force
+  and report `[hooks] before|after "<title>", …` + a `forced-deactivation` attachment. Pre-flight heal,
+  `capture-backwpup-fixtures.ts`: no force, so (3). **Decision:** `uninstallPlugin` (under test) stops
+  at (1) — no force, no (3): a refusal is its verdict.
+- **Decision — (3) after a scenario fails it:** reaching (3) in the teardown is the artifact under test
+  not deactivating (e.g. a fatal in its deactivation hook: core runs `deactivate_{plugin}` before
+  saving `active_plugins`) — kept as `PluginDeactivationBrokenError`, every cleanup duty finished, thrown
+  after; the log verdict still wins. (2) taking (WP Rocket's known refusal) stays a reported warning.
+  In the Before and the pre-flight heal (3) stays a warning: the copy is an earlier run's.
+- **WP Rocket's force** (`support/deactivation.ts`, one `evalPhp`, plugins loaded): last-priority
+  `rocket_prevent_deactivation` filter = causes minus `wpconfig`/`htaccess` (a remaining cause is
+  echoed, then WP Rocket dies: named in the error); `deactivate_plugins()`; `delete_transient` of each
+  `<id>_donotdeactivaterocket` found by name in options (`_transient_<digits>_…`) and, for a persistent
+  object cache (no names to list), by key for user 0 and every `activate_plugins` user (`get_users`
+  `capability`, WP ≥ 5.9) — one stored by a user since demoted is left (its notice shows only to them);
+  answers JSON, parsed and checked. Refuses any slug but `wp-rocket`.
+- **Decision — `htaccess` lifted too:** WP Rocket's own admin force link (`notices.php`
+  `force_deactivation` nonce) bypasses both its causes, so lifting them is its own sanctioned path;
+  under WP-CLI `$is_apache` is false, so `htaccess` is inert there anyway.
+- **Decision — the stop uses it:** `stopWpRocketWork` deactivates first (to keep new work out), so it
+  meets the refusal first: `deactivateForStop` = (1) + (2) only while active, no leading `is-active`
+  (the stop's first look saw it loaded) — ≤ 3 calls; whether (2) took is read by the next look. A
+  failed force is returned (`forceError`), never thrown: the wait goes on and the removal's (3) reports.
+  Said even on a quiet site (`forcedNote`, with (1)'s words and the force's error), since the removal
+  then finds it inactive and says nothing. Worst case ≈ 94 s at ~5 s/call (look, 3, grace 2 s, drain
+  65 s, a last look, 2 failed-look pauses) → `LEFT_WORK_ALLOWANCE_MS` 90 → 100 s; the budget spec
+  counts it.
+- Specs: `plugin.spec.ts` (outcomes, order plain→force→read, force threw yet took, no force/failed
+  force messages, a fatal plain deactivate named masked+plain and never "refused", force error masked,
+  a killed read-back rethrown with no force/`--skip-plugins`, forceError reaches `onRecovered`;
+  `ensurePluginAbsent` force/last resort order and reports, default warning, all fail → nothing
+  removed, `uninstallPlugin` strict, wording); `plugin-lifecycle.spec.ts` (registry carry,
+  Before/reinstall/teardown force and report, teardown last resort fails after finishing its sweep,
+  Before last resort only warns, log verdict outranks it); `deactivation.spec.ts` (answers, bounds,
+  slug refusal, registration; PHP over `__fixtures__/deactivation-harness.php` reproducing WP Rocket's
+  refusal: `php -l`, own causes lifted + only digit-id transients deleted, an admin's deleted once
+  whether listed or not, object-cache keys for 0 and `activate_plugins` users, a third-party cause
+  still refuses and is named, no cause); `background-work.spec.ts` (forced wording with/without force
+  error, force that did not take, `deactivateForStop` plain/forced/failed/thrown, real wiring, budget
+  with 3 deactivation calls); `metadata.spec.ts` +1, `project.spec.ts` +1. Twin
+  `lifecycle.ssh-twins.spec.ts` + `wpconfig-root` (both stacks): plain deactivate exits 0 and stays
+  active with a refusal transient; the force alone deactivates and clears it; reactivated, the real
+  teardown's stop forces and says so (no removal-side report, no last resort); nothing recreated, no
+  fatal, `wp-config.php` owner/mode/inode/SHA-256 unchanged. ~45 s nginx, ~85 s apache per run (CI
+  twin step: + ~2.2 min).
+- Mutants killed: force never tried, hooks pass no force, no last resort, any error recovered as a
+  refusal, `report({kind:"forced"})` dropping forceError, teardown not failing on (3) (unit); filter
+  empties every cause, no filter, no diff, no transient delete, unanchored transient name, no key
+  sweep (harness); stop without the force (twin nginx: the removal's report appears instead).
 
 ### 12.15 — In-place cleanup
 

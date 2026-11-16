@@ -1,10 +1,20 @@
 import { setTimeout as delay } from "node:timers/promises";
 
-import { wpCli } from "../../../common/wp/exec";
 import { evalPhp, phpLiteral } from "../../../common/wp/php";
+import {
+  deactivatePlainly,
+  tryForceDeactivate,
+} from "../../../common/wp/plugin";
 import { isObject } from "../../../common/guards";
 import { plain } from "../../../common/text";
-import type { Transport } from "../../../common/config/types";
+import type { ForceDeactivate, Transport } from "../../../common/config/types";
+import {
+  WP_ROCKET_BASENAME,
+  WP_ROCKET_SLUG,
+  forceDeactivateWpRocket,
+} from "./deactivation";
+
+export { WP_ROCKET_BASENAME, WP_ROCKET_SLUG } from "./deactivation";
 
 /**
  * WP Rocket's background work, and its `ProductConfig.stopRunningWork`: what still runs on a site
@@ -35,16 +45,11 @@ import type { Transport } from "../../../common/config/types";
  *  - **WP Rocket's own background processes** (critical CSS generation, database optimization) hold a
  *    `<identifier>_process_lock` site transient while they run (`wp-background-process.php`).
  *
- * Nothing here kills a request: new work is stopped at its source — WP Rocket is deactivated, so no
- * request starting afterwards loads it (a missing plugin file loads nothing either) — and what already
+ * Nothing here kills a request: new work is stopped at its source — WP Rocket is deactivated (forced
+ * when a plain deactivation is refused, `./deactivation.ts`), so no request starting afterwards loads
+ * it (a missing plugin file loads nothing either) — and what already
  * runs is waited for until every sign above has been quiet long enough ({@link BackgroundWorkBudgets}).
  */
-
-/** WP Rocket's basename in `active_plugins`. */
-export const WP_ROCKET_BASENAME = "wp-rocket/wp-rocket.php";
-
-/** WP Rocket's slug, for `wp plugin deactivate`. */
-export const WP_ROCKET_SLUG = "wp-rocket";
 
 /** WP Rocket's background processes (`prefix_action`), each locked by `<id>_process_lock` while it runs. */
 export const WP_ROCKET_PROCESSES = [
@@ -314,10 +319,12 @@ export interface BackgroundWorkBudgets {
 }
 
 /**
- * The budgets the shared `@plugin` hooks run with. The whole stop — a probe, the deactivation, the
- * grace, the drain and its probes — must fit the hooks' allowance for it (`LEFT_WORK_ALLOWANCE_MS`,
- * 90 s; the spec holds these to it). `drainMs` outlasts `WP_CRON_LOCK_TIMEOUT` (60 s), so a cron run
- * alone can never fail the stop: WordPress itself stops counting it by then.
+ * The budgets the shared `@plugin` hooks run with. The whole stop — a probe, the deactivation (up to
+ * three WP-CLI calls, {@link deactivateForStop}), the grace, the drain and a probe it starts at its
+ * end, at ~5 s per call on a slow link: ≈ 94 s at worst — must fit the hooks' allowance for it
+ * (`LEFT_WORK_ALLOWANCE_MS`, 100 s; the spec holds these to it). `drainMs` outlasts
+ * `WP_CRON_LOCK_TIMEOUT` (60 s), so a cron run alone can never fail the stop: WordPress itself stops
+ * counting it by then.
  */
 export const BACKGROUND_WORK_BUDGETS: BackgroundWorkBudgets = {
   drainMs: 65_000,
@@ -430,12 +437,70 @@ function seconds(value: number): string {
   return `${Math.max(0, value).toFixed(1)} s`;
 }
 
+/**
+ * What the stop's deactivation did: `plain` — a plain `wp plugin deactivate` took; `forced` — it left
+ * WP Rocket active (`plainSaid`) and the force ran (`forceError`: what it threw). Whether the force
+ * took is not read here: the stop's next look reads `active_plugins` anyway.
+ */
+export type StopDeactivation =
+  | { readonly kind: "plain" }
+  | {
+      readonly kind: "forced";
+      readonly plainSaid: string;
+      readonly forceError?: string;
+    };
+
+/** The calls {@link deactivateForStop} makes — injected by unit specs. */
+export interface StopDeactivationOps {
+  /** A plain deactivation, read back: `undefined` once inactive, else what it did. */
+  readonly deactivatePlainly: (
+    transport: Transport,
+    slug: string,
+  ) => Promise<string | undefined>;
+  /** WP Rocket's forced deactivation. */
+  readonly force: ForceDeactivate;
+}
+
+/** The real {@link StopDeactivationOps}. */
+export const REAL_STOP_DEACTIVATION: StopDeactivationOps = {
+  deactivatePlainly,
+  force: forceDeactivateWpRocket,
+};
+
+/**
+ * The stop's deactivation, at most three WP-CLI calls: the stop's first look has just found WP Rocket
+ * listed and present, so no `is-active` leads — a plain `wp plugin deactivate`, its state read back,
+ * and the force ({@link forceDeactivateWpRocket}) only while still active. The force's failure is
+ * returned, never thrown: one that did not take leaves WP Rocket to the removal's last resort, after
+ * the wait, which reports it.
+ *
+ * @param transport - the site.
+ * @param ops - the calls; real by default.
+ * @returns what was done.
+ * @throws Error if the plain deactivation or its read-back could not run.
+ */
+export async function deactivateForStop(
+  transport: Transport,
+  ops: StopDeactivationOps = REAL_STOP_DEACTIVATION,
+): Promise<StopDeactivation> {
+  const plainSaid = await ops.deactivatePlainly(transport, WP_ROCKET_SLUG);
+  if (plainSaid === undefined) return { kind: "plain" };
+  const forceError = await tryForceDeactivate(
+    ops.force,
+    transport,
+    WP_ROCKET_SLUG,
+  );
+  return forceError === undefined
+    ? { kind: "forced", plainSaid }
+    : { kind: "forced", plainSaid, forceError };
+}
+
 /** The I/O {@link stopWpRocketWork} needs — injected by unit specs. */
 export interface BackgroundWorkDeps {
   /** One look at the site. */
   readonly read: (transport: Transport) => Promise<BackgroundWork>;
-  /** Deactivates WP Rocket; whether it worked is read back from the site, not from this. */
-  readonly deactivate: (transport: Transport) => Promise<void>;
+  /** Deactivates WP Rocket ({@link deactivateForStop}); whether it took, the next look reads. */
+  readonly deactivate: (transport: Transport) => Promise<StopDeactivation>;
   /** Waits that long. */
   readonly sleep: (ms: number) => Promise<void>;
   /** The runner's clock, in milliseconds. */
@@ -445,10 +510,7 @@ export interface BackgroundWorkDeps {
 /** The real I/O: the site over WP-CLI, the runner's clock. */
 export const REAL_DEPS: BackgroundWorkDeps = {
   read: readBackgroundWork,
-  deactivate: async (transport) => {
-    // The exit code is not the answer: the next look reads `active_plugins` itself.
-    await wpCli(transport, ["plugin", "deactivate", WP_ROCKET_SLUG]);
-  },
+  deactivate: deactivateForStop,
   sleep: (ms) => delay(ms),
   now: () => Date.now(),
 };
@@ -525,9 +587,11 @@ async function drain(
  * 2. WP Rocket active and its file present: **deactivated**, so no request starting from now loads it
  *    (WordPress reads `active_plugins` per request). The removal right after would deactivate it
  *    anyway; doing it here closes the window in which a WP-Cron run could start, load WP Rocket and
- *    still run when the folder goes. Then a short grace ({@link BackgroundWorkBudgets.graceMs}).
- *    A deactivation WP Rocket refuses is not this function's to judge — the removal reports it — so
- *    the wait goes on, with nothing keeping new work out.
+ *    still run when the folder goes. A plain deactivation WP Rocket refuses (an unwritable
+ *    `wp-config.php`) is forced ({@link forceDeactivateWpRocket}) and said, even on a quiet site.
+ *    Then a short grace ({@link BackgroundWorkBudgets.graceMs}). One that not even the force takes is
+ *    not this function's to judge — the removal's last resort takes it off, and reports it — so the
+ *    wait goes on, with nothing keeping new work out.
  * 3. Waits until nothing is in flight ({@link workInFlight}).
  * 4. Names what Action Scheduler holds for WP Rocket that is too old to be running ({@link staleWork}):
  *    a warning, never a wait or a failure.
@@ -563,10 +627,14 @@ export async function stopWpRocketWork(
   }
 
   let gate: string;
+  let deactivation: StopDeactivation | undefined;
   if (loaded) {
-    await deps.deactivate(transport);
+    deactivation = await deps.deactivate(transport);
     await deps.sleep(budgets.graceMs);
-    gate = "WP Rocket was deactivated first, so no new request loads it";
+    gate =
+      deactivation.kind === "forced"
+        ? `WP Rocket was deactivated first — ${forcedClause(deactivation)} —, so no new request loads it`
+        : "WP Rocket was deactivated first, so no new request loads it";
   } else {
     gate = first.listed
       ? "its plugin folder was already gone, so no new request loads it"
@@ -580,15 +648,59 @@ export async function stopWpRocketWork(
     (look) =>
       !loaded ? firstCutoff : look.listed ? Number.POSITIVE_INFINITY : look.now,
   );
-  if (loaded && last.listed) {
+  const stillActive = loaded && last.listed;
+  if (stillActive) {
     gate =
       "WP Rocket could not be deactivated first (it is still active), so new work could still start";
   }
   const running = foundFirst.length > 0 ? foundFirst : found;
   const stale = staleNote(staleWork(last, budgets.drainMs));
-  if (running.length === 0) return stale;
   const said =
-    `WP Rocket's background work was still running (${running.join("; ")}); ${gate}, and what ran ` +
-    `was left to finish (${seconds(waitedMs / 1000)}) before the plugin was removed.`;
-  return stale === undefined ? said : `${said} ${stale}`;
+    running.length > 0
+      ? `WP Rocket's background work was still running (${running.join("; ")}); ${gate}, and what ` +
+        `ran was left to finish (${seconds(waitedMs / 1000)}) before the plugin was removed.`
+      : deactivation?.kind === "forced"
+        ? forcedNote(deactivation, !stillActive)
+        : undefined;
+  return (
+    [said, stale].filter((part) => part !== undefined).join(" ") || undefined
+  );
+}
+
+/**
+ * How a forced deactivation is named inside a sentence: what the plain one did, and what the force
+ * threw.
+ *
+ * @param deactivation - the stop's forced deactivation.
+ */
+function forcedClause(
+  deactivation: Extract<StopDeactivation, { kind: "forced" }>,
+): string {
+  return (
+    `forced, as a plain deactivation did not take (${deactivation.plainSaid})` +
+    (deactivation.forceError === undefined
+      ? ""
+      : `; the force reported: ${deactivation.forceError}`)
+  );
+}
+
+/**
+ * What the stop says when it had to force the deactivation and found nothing running. Pure.
+ *
+ * @param deactivation - the stop's forced deactivation.
+ * @param took - whether the look after it found WP Rocket inactive.
+ */
+export function forcedNote(
+  deactivation: Extract<StopDeactivation, { kind: "forced" }>,
+  took: boolean,
+): string {
+  const tail =
+    deactivation.forceError === undefined
+      ? ""
+      : `; it reported a failure: ${deactivation.forceError}`;
+  return took
+    ? `WP Rocket stayed active (${deactivation.plainSaid}), so its forced deactivation ran before ` +
+        `the plugin was removed${tail}.`
+    : `WP Rocket stayed active (${deactivation.plainSaid}), and its forced deactivation did not take ` +
+        `either${tail}; the removal deactivates it as its last resort.`;
 }
