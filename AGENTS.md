@@ -271,7 +271,8 @@ lives in a sibling module, unit-testable without it.
 
 - **Before**, in order: clear `debug.log`; stop work the plugin still runs (a killed run's job —
   `ProductConfig.stopRunningWork`; reported, a failure only if it won't stop — a stop that fails on a
-  copy WordPress boots only without, `pluginBreaksBoot`, is reported: such a copy runs nothing); uninstall any
+  copy WordPress boots only without, `pluginBreaksBoot`, is reported: such a copy runs nothing; a stop
+  that had to act clears `debug.log` again: what that work logged is the earlier run's); uninstall any
   existing copy (so the install is fresh, DB footprint included) and remove by path what is left
   there — a folder WordPress no longer lists, or a listed copy whose uninstall fails (taken off
   `active_plugins` with no plugin loaded first, or `install --activate` skips its activation); a
@@ -292,13 +293,27 @@ lives in a sibling module, unit-testable without it.
   `wp/install-outputs.ts`); create the declared data directories (`ProductConfig.siteResidue`'s plain paths — `{ path, prepare: false }` is only removed —, and `resolveSiteDataDirs` for
   names the plugin picks at runtime, e.g. BackWPup's `uploads/backwpup-restore-<20 hex>`), opened
   `0777` in **every** state (outside `site` WP-CLI and the web server may be two users, and so are a `site`
-  scenario opting back to the SSH user and the web server) and handed to the site's ownership. The edition is
+  scenario opting back to the SSH user and the web server) and handed to the site's ownership; last,
+  for a product that asks (`ProductConfig.settleAfterInstall: "admin-request"`, WP Rocket), a
+  **settling request** over HTTP (`hooks/settle-request.ts`): `GET /wp-admin/` with the scenario's
+  session (a request context from `storageState`, no browser), its final URL checked to be wp-admin
+  (wp-login.php → a warning naming `@noauth` or an expired login), then one `GET /`; 30 s each, a
+  failure a warning plus a `settle-request` attachment, never a failure — what the plugin writes only
+  on a web request (WP Rocket's config file, Apache `.htaccess` block) is then there before the first
+  step, written by the web server. It starts work that outlives it (Action Scheduler's async runner,
+  preload), which WP Rocket's `stopRunningWork` (`support/background-work.ts`) handles before each
+  removal: deactivate WP Rocket so no new request loads it, then wait until none of its own
+  (`rocket*` groups) claims or `in-progress` actions, no `doing_cron` or process lock is live and
+  Action Scheduler has been quiet 12 s (the shared runner lock counts only while WP Rocket is on the
+  site); a claim or action older than the 65 s wait is stale (a request killed outright): warned,
+  never waited for. The settle itself does not wait. The edition is
   never named: the slug is `pluginArtifact("plugin").slug`. To reinstall part-way, a step calls
   `replacePluginUnderTest` (no log reset, so the teardown judges the whole log) with
-  `declaredResidue`.
-- **After**: scan `debug.log` with the product's preset — a **PHP fatal fails the scenario**
-  (`DebugLogFatalError`, log attached), warnings/notices are logged; stop running work (a BackWPup
-  job runs in a web request and would outlive the uninstall); remove the plugin, healing what is left at its path as above — a
+  `declaredResidue`, plus a client opener when its product settles (else warned and skipped).
+- **After**: stop running work (a BackWPup job, or WP Rocket's runner and preload, runs in a web
+  request and would outlive the uninstall; it logs until it ends, so first); scan `debug.log` with the
+  product's preset — a **PHP fatal fails the scenario** (`DebugLogFatalError`, log attached),
+  warnings/notices are logged; remove the plugin, healing what is left at its path as above — a
   failed uninstall still **fails the scenario** (`PluginUninstallBrokenError`); sweep its database
   footprint; clear the **files it left** (an uninstall keeps its data, and per-scenario reinstalls
   would fill the disk). All five always run, independently; the log verdict wins and other failures
@@ -307,7 +322,9 @@ lives in a sibling module, unit-testable without it.
   ([wordpress-automation.md](docs/architecture/wordpress-automation.md#left-over-plugin-data-wpresiduets)).
   A drained scenario gets neither hook.
 - The scenario timeout is extended **additively** for both hooks (remote WP-CLI + SFTP is slow),
-  plus `LEFT_WORK_ALLOWANCE_MS` for stopping left work (every `stopRunningWork` must fit it).
+  plus `LEFT_WORK_ALLOWANCE_MS` for stopping left work (every `stopRunningWork` must fit it) and
+  `SETTLE_ALLOWANCE_MS` (70 s: two 30 s requests plus the client's opening and disposal) for the
+  settling request.
 
 **MUST — `src/common/hooks/**/*.hooks.ts` belongs in every product's `steps` globs.** That glob is
 the only importer: omit it and the lifecycle is _silently absent_.
@@ -429,7 +446,8 @@ is checked with `holdsSecret`, both in the page.
 > [`secrets.run.spec.ts`](src/common/auth/secrets.run.spec.ts) proves it through the real runner.
 > Still exposed: a **scenario's** trace holds the WordPress **session cookies** (live until the next
 > run ends that session, or two days), and its trace and `error-context.md` any value typed or shown in
-> a field;
+> a field; a `@plugin` scenario of a settling product (WP Rocket) also traces its settling request
+> (`retain-on-failure`), so a failed one's trace holds that session cookie and the dashboard's HTML;
 > BackWPup's restore wizard renders the **database** password into its markup; Pro's restore deep link
 > and messages naming the restore folder carry its 20-hex name — on nginx the only thing keeping the folder,
 > and the DB credentials its `restore.dat` holds mid-restore, from being served (the teardown removes
@@ -687,7 +705,7 @@ this file goes in the right `docs/` file, linked from the [Documentation map](#d
 - The config factory (`createProductConfig`) or its project pairs.
 - The metadata/credential registry (`registerPool`, `routingMetadata`) and the per-process policy
   registries (`registerDebugLogOptions`, `registerSiteResidue`, `registerSiteDbResidue`,
-  `registerSiteDataDirResolver`, `registerInstallOutputs`, `registerPrepareActivation`, `registerStopRunningWork`,
+  `registerSiteDataDirResolver`, `registerInstallOutputs`, `registerPrepareActivation`, `registerSettleAfterInstall`, `registerStopRunningWork`,
   `registerSettleLeftovers`).
 - Artifact directories, `RUN_ID`, the `*_ROOT` env vars.
 - The drain (`config/drain.ts`, `E2E_INTERNAL_STOP_FILE`, `drainGate`) and its escalation signals.

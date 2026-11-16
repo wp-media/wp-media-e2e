@@ -2,6 +2,7 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadSites } from "../../../common/config/sites";
+import { stopWpRocketWork } from "../support/background-work";
 import { WP_ROCKET_LOG_OPTIONS } from "../support/debug-log";
 import { WP_ROCKET_SITE_DB_RESIDUE } from "../support/db-residue";
 import { writeLicencePlugin } from "../support/licence";
@@ -62,6 +63,12 @@ export const wpRocket: ProductConfig = {
   // Activation writes `WP_CACHE` only for a licensed copy: the dummy licence's must-use plugin goes
   // in first, and the teardown removes it with the rest of the residue.
   prepareActivation: (transport) => writeLicencePlugin(transport),
+  // Activation over WP-CLI writes neither the site's config file (nothing is cached without it) nor,
+  // on Apache, the `.htaccess` block: the first admin request does, as the web server.
+  settleAfterInstall: "admin-request",
+  // That request starts Action Scheduler's async runner and preload, which outlive it: WP Rocket is
+  // deactivated and they are waited for before each removal of the plugin.
+  stopRunningWork: (transport) => stopWpRocketWork(transport),
   installOutputs: WP_ROCKET_INSTALL_OUTPUTS,
   siteResidue: WP_ROCKET_SITE_RESIDUE,
   siteDbResidue: WP_ROCKET_SITE_DB_RESIDUE,

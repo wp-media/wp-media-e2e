@@ -19,6 +19,7 @@ import { env, intEnv } from "./env";
 import {
   registerDebugLogOptions,
   registerPool,
+  registerSettleAfterInstall,
   registerSettleLeftovers,
   registerSiteDataDirResolver,
   registerPrepareActivation,
@@ -248,6 +249,10 @@ export function createProductConfig(
   // And for what the install writes before it activates the plugin (WP Rocket's licence) — a
   // function too.
   registerPrepareActivation(product.name, product.prepareActivation);
+
+  // And for what the install asks of the site over HTTP once the plugin is active (WP Rocket's admin
+  // request) — data, but product policy the shared hooks read like the rest.
+  registerSettleAfterInstall(product.name, product.settleAfterInstall);
 
   // And for how to stop work it may still be doing on a site, which the shared teardown asks for
   // before it removes the plugin — a function, so this registry is its only possible channel.

@@ -352,5 +352,6 @@ test.describe("WP Rocket's config", () => {
     expect(wpRocket.siteDbResidue).toBe(WP_ROCKET_SITE_DB_RESIDUE);
     expect(wpRocket.installOutputs).toBe(WP_ROCKET_INSTALL_OUTPUTS);
     expect(typeof wpRocket.prepareActivation).toBe("function");
+    expect(wpRocket.settleAfterInstall).toBe("admin-request");
   });
 });

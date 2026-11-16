@@ -26,21 +26,25 @@ import { stageAndInstallPlugin } from "../wp/staging";
 import {
   getInstallOutputs,
   getPrepareActivation,
+  getSettleAfterInstall,
   getSiteDataDirResolver,
   getSiteDbResidue,
   getSiteResidue,
   getStopRunningWork,
 } from "../config/metadata";
 import { withinBudget } from "../deadline";
+import { SETTLE_ALLOWANCE_MS, settleAfterInstall } from "./settle-request";
 import { errorMessage } from "../guards";
 import type { ScanDebugLogOptions } from "../wp/log";
 import type { ClearedPluginDir } from "../wp/plugin";
 import type { FoundDbResidue, SiteDbResidue } from "../wp/db-residue";
 import type { TestInfo } from "@playwright/test";
 import type { ResolvedArtifact } from "../artifacts/types";
+import type { OpenSettleClient } from "./settle-request";
 import type {
   PrepareActivation,
   ResolveSiteDataDirs,
+  SettleAfterInstall,
   SiteResidue,
   StopRunningWork,
   Transport,
@@ -54,8 +58,8 @@ import type {
  * Two operations, mirroring the hook pair:
  *  - {@link installPluginUnderTest} — scope the log, stop what an earlier run left running, guarantee
  *    a clean baseline, install.
- *  - {@link teardownPluginUnderTest} — judge what PHP wrote, then restore the baseline: stop what the
- *    plugin is still doing, remove it *and* the data it left behind, on disk and in the database.
+ *  - {@link teardownPluginUnderTest} — stop what the plugin is still doing, judge what PHP wrote, then
+ *    restore the baseline: remove it *and* the data it left behind, on disk and in the database.
  */
 
 /**
@@ -86,6 +90,11 @@ export interface DeclaredResidue {
    * What it writes is declared in {@link files}, so the teardown removes it.
    */
   readonly prepareActivation?: PrepareActivation | undefined;
+  /**
+   * What the install asks of the site over HTTP once the plugin is active —
+   * `ProductConfig.settleAfterInstall` (`./settle-request.ts`).
+   */
+  readonly settleAfterInstall?: SettleAfterInstall | undefined;
 }
 
 /** A product that declares neither kind of leftover; every step below then costs nothing. */
@@ -105,6 +114,7 @@ export function declaredResidue(product: string): DeclaredResidue {
     resolveDataDirs: getSiteDataDirResolver(product),
     installOutputs: getInstallOutputs(product),
     prepareActivation: getPrepareActivation(product),
+    settleAfterInstall: getSettleAfterInstall(product),
   };
 }
 
@@ -145,9 +155,10 @@ export const PLUGIN_TAG = "@plugin";
  * round-trip at all. Only a site that really is carrying a footprint pays the removal and the
  * verifying re-read, which is exactly the run that has time to spare.
  *
- * Stopping the product's running work adds **one more `wp eval` to each hook** on an idle site.
- * One that has to act is bounded by its own budgets — about 70 s at the very worst for BackWPup —
- * which the After hook's ≈ 23 s leaves room for here. The Before hook's install does not (44–73 s
+ * Stopping the product's running work adds **one more `wp eval` to each hook** on an idle site
+ * (WP Rocket's: a deactivation, a 2 s grace and a second look). One that has to act is bounded by its
+ * own budgets — about 70 s at the very worst for BackWPup and WP Rocket alike — which the After
+ * hook's ≈ 23 s leaves room for here. The Before hook's install does not (44–73 s
  * measured, 73 s beside another run on the same server), so it gets {@link LEFT_WORK_ALLOWANCE_MS}
  * on top of this.
  *
@@ -165,16 +176,21 @@ export const HOOK_TIMEOUT_MS = 120_000;
  * within.**
  *
  * The teardown normally leaves nothing running, so this is spent only by the run that recovers a
- * killed one. Sized from BackWPup's stop, the one product that declares a stop: 30 s for a running
- * job to go and 30 s for its run to record its end, plus a few probes of ~1.3 s each, is about 70 s
- * at worst; 90 s keeps a margin for a slow link. Without it, that worst case beside the install
+ * killed one. Sized from BackWPup's stop: 30 s for a running job to go and 30 s for its run to
+ * record its end, plus a few probes of ~1.3 s each, is about 70 s at worst; WP Rocket's — a
+ * deactivation, then at most 65 s waiting for what Action Scheduler and WP-Cron still run — about
+ * the same; 90 s keeps a margin for a slow link. Without it, that worst case beside the install
  * measured above would overrun the hook, and a timed-out hook is abandoned rather than cancelled —
  * its install would go on beside the teardown.
  */
 export const LEFT_WORK_ALLOWANCE_MS = 90_000;
 
-/** The Before hook's budget: an install, plus stopping what a killed run left running. */
-export const BEFORE_HOOK_TIMEOUT_MS = HOOK_TIMEOUT_MS + LEFT_WORK_ALLOWANCE_MS;
+/**
+ * The Before hook's budget: an install, plus stopping what a killed run left running, plus the
+ * settling request a product may ask for after it (`SETTLE_ALLOWANCE_MS`, `./settle-request.ts`).
+ */
+export const BEFORE_HOOK_TIMEOUT_MS =
+  HOOK_TIMEOUT_MS + LEFT_WORK_ALLOWANCE_MS + SETTLE_ALLOWANCE_MS;
 
 /**
  * Cap on the `debug.log` body attached to a report, in characters. A fatal inside a loop, or one
@@ -266,6 +282,10 @@ export function extendedTimeout(current: number): number {
  * those the installed plugin names at runtime, asked of it first (`resolveDataDirs`) and prepared
  * the same way ({@link prepareResolvedDataDirs}).
  *
+ * Once ready, a product that asks for it (`residue.settleAfterInstall`) gets its **settling request**
+ * — wp-admin with the scenario's session, then the front page — so what the plugin writes only on a
+ * web request is there before the first step ({@link settleAfterInstall}; warned, never thrown).
+ *
  * @param transport - the target site's transport.
  * @param artifact - the resolved artifact under test. Its `slug` addresses the plugin without
  * knowing the edition, and its `zipPath` is staged onto the site first — a runner path means
@@ -277,6 +297,8 @@ export function extendedTimeout(current: number): number {
  * product that runs nothing in the background.
  * @param report - the scenario to attach a cleared plugin folder's report to; without it, the report
  * is only printed.
+ * @param openClient - opens an HTTP client bound to the site and the scenario's session, for the
+ * settling request; opened only when the product asks for one.
  * @throws Error if the artifact's slug is unusable, if work left running would not stop, if the
  * removal, the product's `prepareActivation`, the install, asking the plugin for its runtime-named
  * directories or the directory preparation fails (an undeclared one included), or
@@ -289,6 +311,7 @@ export async function installPluginUnderTest(
   residue: DeclaredResidue = NO_RESIDUE,
   leftWork?: LeftWork,
   report?: ScenarioReport,
+  openClient?: OpenSettleClient,
 ): Promise<void> {
   // Before the first command: `stageAndInstallPlugin` validates the slug too, but by then the log
   // has been cleared and an uninstall has been attempted with it. A slug this suite cannot use is
@@ -299,7 +322,7 @@ export async function installPluginUnderTest(
     // Work that would not stop ends the install here, before anything is removed: unlike the
     // teardown, there are no duties worth running anyway — installing over work still writing to the
     // site would hand the scenario a site nobody can vouch for.
-    await stopWorkLeftRunning(
+    const stopped = await stopWorkLeftRunning(
       transport,
       artifact.slug,
       leftWork.stop,
@@ -307,12 +330,16 @@ export async function installPluginUnderTest(
       "before",
       leftWork.budgetMs,
     );
+    // What that work logged while it was left to finish — a fatal in a request whose plugin folder
+    // had gone, say — belongs to the run that left it, not to this scenario, which has not begun.
+    if (stopped) await clearDebugLog(transport);
   }
   const cleared = await removeOldCopy(transport, artifact.slug, report);
   // A copy whose uninstall failed wrote that failure to the log just cleared. It is reported above,
   // and it belongs to the run that left the copy behind — never to this scenario, which has not begun.
   if (cleared?.cause === "uninstall-failed") await clearDebugLog(transport);
   await installFresh(transport, artifact, residue);
+  await settleAfterInstall(residue.settleAfterInstall, openClient, report);
 }
 
 /**
@@ -353,6 +380,9 @@ export interface LeftWork {
  * @param artifact - the resolved artifact under test.
  * @param residue - what this product leaves behind, on disk and in the database.
  * @param report - the scenario to attach a cleared plugin folder's report to.
+ * @param openClient - as for {@link installPluginUnderTest}: a caller whose product asks for a
+ * settling request passes one, and adds `SETTLE_ALLOWANCE_MS` to the step's budget; without it, the
+ * request is skipped with a warning.
  * @throws what {@link installPluginUnderTest} throws, bar the log reset's own failures.
  */
 export async function replacePluginUnderTest(
@@ -360,10 +390,12 @@ export async function replacePluginUnderTest(
   artifact: ResolvedArtifact,
   residue: DeclaredResidue = NO_RESIDUE,
   report?: ScenarioReport,
+  openClient?: OpenSettleClient,
 ): Promise<void> {
   pluginSitePath(artifact.slug);
   await removeOldCopy(transport, artifact.slug, report);
   await installFresh(transport, artifact, residue);
+  await settleAfterInstall(residue.settleAfterInstall, openClient, report);
 }
 
 /**
@@ -628,8 +660,8 @@ export function scenarioReport(
 }
 
 /**
- * Closes out a plugin scenario: judge what PHP wrote to `debug.log`, stop whatever the plugin is
- * still doing, remove it, then clear the data it left behind.
+ * Closes out a plugin scenario: stop whatever the plugin is still doing, judge what PHP wrote to
+ * `debug.log`, remove the plugin, then clear the data it left behind.
  *
  * **All five duties always run, whatever the ones before them did.** That independence is the point
  * of the last two: uninstalling a plugin does not delete the files it wrote — nor should it, for a
@@ -639,7 +671,8 @@ export function scenarioReport(
  * catches a footprint the plugin's own uninstall did not take with it — a table re-created by a
  * request that outlived the uninstall, or rows left by a run killed between the two. Stopping the
  * plugin's running work comes before the removal for the same reason: it is the work that would
- * otherwise outlive the uninstall — see {@link stopWorkLeftRunning}.
+ * otherwise outlive the uninstall — see {@link stopWorkLeftRunning}. It runs first of all, before the
+ * log is judged (below), and a stop that fails is a cleanup failure like the others.
  *
  * When more than one fails, the **debug-log verdict wins**: it is a statement about the product
  * under test, whereas a cleanup failure is about the environment. Cleanup failures are never merely
@@ -651,9 +684,13 @@ export function scenarioReport(
  * the failure is thrown ({@link PluginUninstallBrokenError}) — the log was judged before it, so this
  * is the only place it shows.
  *
- * The log is judged **as the scenario left it**, before any cleanup, so the verdict is about the
- * scenario and not about this hook's own work. A removal the scenario itself performs is a step, so
- * it falls inside that window and is judged normally.
+ * The log is judged **once the scenario's own work has ended**, before any removal, so the verdict is
+ * about the scenario and not about this hook's own work. Work the scenario started — a backup job, a
+ * plugin's background requests — logs until it ends, and the next Before clears the log, so the stop
+ * comes first: it only waits for that work or asks it to end (a product's stop may deactivate its
+ * plugin first, so no new work starts; what deactivation logs is the plugin's own behaviour). A
+ * removal the scenario itself performs is a step, so it falls inside that window and is judged
+ * normally.
  *
  * @param transport - the target site's transport.
  * @param slug - the plugin slug to remove; from the resolved artifact, so no edition branching.
@@ -679,37 +716,50 @@ export async function teardownPluginUnderTest(
 ): Promise<void> {
   let failure: Error | undefined;
 
+  /** Keeps the first failure, logging any that a verdict outranks. */
+  const keep = (error: unknown): void => {
+    if (failure === undefined) {
+      failure = toError(error);
+    } else {
+      console.error(
+        `[hooks] a cleanup step also failed, after the failure reported above: ${errorMessage(error)}`,
+      );
+    }
+  };
+  /** Runs one cleanup duty, keeping its failure. */
+  const cleanUp = async (duty: () => Promise<void>): Promise<void> => {
+    try {
+      await duty();
+    } catch (error) {
+      keep(error);
+    }
+  };
+
+  // The scenario's own work first: what it still runs logs into `debug.log` until it ends, and the
+  // next scenario's Before clears the log — so the verdict waits for it. Its failure is a cleanup
+  // failure, kept until the verdict is in: the verdict outranks it.
+  let stopFailure: { readonly error: unknown } | undefined;
+  if (stopRunningWork !== undefined) {
+    try {
+      await stopWorkLeftRunning(
+        transport,
+        slug,
+        stopRunningWork,
+        report,
+        "after",
+      );
+    } catch (error) {
+      stopFailure = { error };
+    }
+  }
+
   try {
     await checkDebugLog(transport, options, report);
   } catch (error) {
     failure = toError(error);
   }
+  if (stopFailure !== undefined) keep(stopFailure.error);
 
-  /** Runs one cleanup duty, keeping the first failure and logging any that a verdict outranks. */
-  const cleanUp = async (duty: () => Promise<void>): Promise<void> => {
-    try {
-      await duty();
-    } catch (error) {
-      if (failure === undefined) {
-        failure = toError(error);
-      } else {
-        console.error(
-          `[hooks] a cleanup step also failed, after the failure reported above: ${errorMessage(error)}`,
-        );
-      }
-    }
-  };
-
-  await cleanUp(async () => {
-    if (stopRunningWork === undefined) return;
-    await stopWorkLeftRunning(
-      transport,
-      slug,
-      stopRunningWork,
-      report,
-      "after",
-    );
-  });
   let uninstallFailed = false;
   await cleanUp(async () => {
     const cleared = await ensurePluginAbsent(transport, slug);
@@ -752,6 +802,7 @@ export async function teardownPluginUnderTest(
  *
  * @param when - whether the scenario is about to begin or has just ended, for the message.
  * @param budgetMs - how long the stop may take.
+ * @returns whether it had to stop something (and said so).
  * @throws whatever `stopRunningWork` throws — work that would not stop — or, past `budgetMs`, an
  *   error saying so.
  */
@@ -762,7 +813,7 @@ async function stopWorkLeftRunning(
   report: ScenarioReport,
   when: "before" | "after",
   budgetMs: number = LEFT_WORK_ALLOWANCE_MS,
-): Promise<void> {
+): Promise<boolean> {
   let stopped: string | undefined;
   try {
     stopped = await withinBudget(
@@ -777,7 +828,7 @@ async function stopWorkLeftRunning(
       `its running work could not be asked about, and none can run: WordPress cannot boot with ` +
       `"${slug}" loaded (${boot}), and boots without it. The plugin is removed next.`;
   }
-  if (stopped === undefined) return;
+  if (stopped === undefined) return false;
   const message = `[hooks] ${when} "${report.title}": ${stopped}`;
   console.warn(message);
   await report
@@ -787,6 +838,7 @@ async function stopWorkLeftRunning(
         `[hooks] could not attach the stopped-work report: ${errorMessage(attachError)}`,
       );
     });
+  return true;
 }
 
 /**

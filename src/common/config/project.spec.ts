@@ -178,6 +178,20 @@ test("registers the product's activation preparer, in the process building the c
   expect(registered).toBe(true);
 });
 
+test("registers the product's settling request, in the process building the config", async () => {
+  const file = (path: string): string => importable(join(REPO_ROOT, path));
+  const registered = (await runInChildNode(
+    `
+    const { createProductConfig } = await import(${file("src/common/config/project.ts")});
+    const { getSettleAfterInstall } = await import(${file("src/common/config/metadata.ts")});
+    createProductConfig({ ...${JSON.stringify(PRODUCT)}, settleAfterInstall: "admin-request" });
+    console.log(JSON.stringify(getSettleAfterInstall("demo")));
+    `,
+    { cwd: elsewhere, env: { RUN_ID: "run-1" } },
+  )) as string;
+  expect(registered).toBe("admin-request");
+});
+
 test("registers the product's install outputs validated, and refuses an unusable one as it builds", async () => {
   const file = (path: string): string => importable(join(REPO_ROOT, path));
   const outcome = (await runInChildNode(

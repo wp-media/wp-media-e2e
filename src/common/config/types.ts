@@ -273,6 +273,13 @@ export type SiteResidue = string | SiteResidueRemoveOnly | SiteResidueFamily;
 export type PrepareActivation = (transport: Transport) => Promise<void>;
 
 /**
+ * What the `@plugin` install asks of the site once the plugin is active — see
+ * {@link ProductConfig.settleAfterInstall}. `"admin-request"`: one wp-admin page, then the front page,
+ * over HTTP with the scenario's session.
+ */
+export type SettleAfterInstall = "admin-request";
+
+/**
  * Asks the installed plugin for the data directories it names at runtime — see
  * {@link ProductConfig.resolveSiteDataDirs}.
  *
@@ -357,6 +364,15 @@ export interface ProductConfig {
    * handed to the site's ownership (`normalizeOwnership`). Omit when the plugin needs nothing first.
    */
   readonly prepareActivation?: PrepareActivation;
+  /**
+   * What the `@plugin` install asks of the site over HTTP once the plugin is active, so what the
+   * plugin writes only on a web request is there before the first step — and written by the web
+   * server. `"admin-request"`: a GET of `/wp-admin/` with the scenario's session (warned when it lands
+   * on the login page), then one of the front page. WP Rocket: its config file, and on Apache its
+   * `.htaccess` block, are written by the first admin request, never by an activation over WP-CLI. A
+   * failed request is a warning. Omit when activation over WP-CLI leaves the plugin ready.
+   */
+  readonly settleAfterInstall?: SettleAfterInstall;
   /**
    * What this product leaves in a site's **database** when its files are removed without its own
    * uninstall ever running — the option fragments and tables the shared scenario hooks sweep

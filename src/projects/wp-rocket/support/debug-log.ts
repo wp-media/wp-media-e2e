@@ -1,10 +1,27 @@
+import { escapeRegExp } from "../../../common/text";
 import type { ScanDebugLogOptions } from "../../../common/wp/log";
+import { WP_ROCKET_TABLES } from "./db-residue";
 
 /**
  * Matches debug.log lines originating from WP Rocket's plugin directory. WordPress writes the
  * originating file path on PHP error lines, so this attributes an entry to the plugin.
  */
 export const WP_ROCKET_PLUGIN_PATH = /wp-content\/plugins\/wp-rocket\//;
+
+/**
+ * WP Rocket's own race creating its tables: each first request after activation runs BerlinDB's
+ * `AbstractTable::maybe_upgrade` on `init`, whose `CREATE TABLE` has no `IF NOT EXISTS`, so when two
+ * overlap (activation's preload spawns WP-Cron beside the first admin request) the second fails with
+ * MySQL's "already exists". Harmless: WordPress logs it and goes on, and the table is there. Matched
+ * narrowly — the whole message, the same name twice, any table prefix (WordPress allows only
+ * `[A-Za-z0-9_]`), one of WP Rocket's declared tables — so any other database error, or this one on
+ * another table, stays a fatal.
+ */
+export const WP_ROCKET_TABLE_CREATE_RACE = new RegExp(
+  "^\\[[^\\]]*\\] WordPress database error Table " +
+    `'([A-Za-z0-9_]*)(${WP_ROCKET_TABLES.map(escapeRegExp).join("|")})' ` +
+    "already exists for query CREATE TABLE \\1\\2 \\(",
+);
 
 /**
  * Default `scanDebugLog` options for WP Rocket runs. Scans EVERY source (core + all plugins),
@@ -18,9 +35,7 @@ export const WP_ROCKET_PLUGIN_PATH = /wp-content\/plugins\/wp-rocket\//;
  * ```
  */
 export const WP_ROCKET_LOG_OPTIONS: ScanDebugLogOptions = {
-  ignore: [
-    // Add verified benign patterns here as they are discovered from real test runs.
-  ],
+  ignore: [WP_ROCKET_TABLE_CREATE_RACE],
 };
 
 /**

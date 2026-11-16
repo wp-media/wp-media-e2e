@@ -123,7 +123,7 @@ flight dropped), never SIGKILL of the runner alone (workers finish orphaned). A 
 running step, so its teardown runs beside it. A killed run reaches no teardown; the next `@plugin`
 Before hook stops whatever the plugin still does before removing it (`ProductConfig.stopRunningWork`),
 within its own enforced budget (`LEFT_WORK_ALLOWANCE_MS`: past it, or work that will not stop, fails),
-so recovery from a kill is complete.
+and clears `debug.log` again when it had to, so recovery from a kill is complete.
 
 ## Watching a run: the terminal, the results stream and the summary
 
@@ -431,13 +431,14 @@ for runtime-named directory families), its database footprint (`registerSiteDbRe
 `getSiteDbResidue` — would fit metadata, but one channel is easier to follow), how to ask its installed
 plugin for runtime-named data directories (`registerSiteDataDirResolver` / `getSiteDataDirResolver`),
 what its install writes before activation (`registerPrepareActivation` / `getPrepareActivation`; WP
-Rocket's licence) and how to stop work it may still run (`registerStopRunningWork` / `getStopRunningWork`) (functions: metadata could never carry them),
+Rocket's licence), what it asks of the site over HTTP once active (`registerSettleAfterInstall` /
+`getSettleAfterInstall`; data, but product policy like the rest) and how to stop work it may still run (`registerStopRunningWork` / `getStopRunningWork`) (functions: metadata could never carry them),
 and what its activation writes outside its folder (`registerInstallOutputs` / `getInstallOutputs` — the one
-registry that validates as it registers, so a bad path fails the config build). The auth setup's preflight reads one more: how to settle what its killed runs left on a site (`registerSettleLeftovers` / `getSettleLeftovers`), run before the gates that damage could fail; the healthcheck never settles. Hooks read files, footprint, resolver, install outputs and the activation preparer together through `declaredResidue(product)`
+registry that validates as it registers, so a bad path fails the config build). The auth setup's preflight reads one more: how to settle what its killed runs left on a site (`registerSettleLeftovers` / `getSettleLeftovers`), run before the gates that damage could fail; the healthcheck never settles. Hooks read files, footprint, resolver, install outputs, the activation preparer and the settle together through `declaredResidue(product)`
 (`hooks/plugin-lifecycle.ts`), as does a product step reinstalling mid-scenario, so the two never
 prepare or sweep different things. Unlike `getPool`, none throws — declaring none is legitimate and
 costs no round-trip: residue getters return an empty value, `getStopRunningWork`,
-`getSiteDataDirResolver`, `getInstallOutputs`, `getPrepareActivation` and `getSettleLeftovers` return `undefined` ("nothing
+`getSiteDataDirResolver`, `getInstallOutputs`, `getPrepareActivation`, `getSettleAfterInstall` and `getSettleLeftovers` return `undefined` ("nothing
 to ask").
 
 ## Artifact directories & lifecycle

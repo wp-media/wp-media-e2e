@@ -1,6 +1,6 @@
 # Phase 12 — Run as the site: the web server's identity for every site command
 
-Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8, 12.9 and 12.10 done 2026-11-12; 12.11 (live rollout, default `"auto"`), 12.11b and 12.12 done 2026-11-13; 12.13 next. Parent:
+Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8, 12.9 and 12.10 done 2026-11-12; 12.11 (live rollout, default `"auto"`), 12.11b, 12.12 and 12.13 done 2026-11-13; 12.14 next. Parent:
 [e2e-modernization-plan.md](e2e-modernization-plan.md) (§3 phase table). Reverses that plan's §8.2
 rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of WP Rocket's port
 ([phase-6 plan §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket)).
@@ -1215,7 +1215,7 @@ Read at `develop` @ 9788d19 (3.24.1-beta2, APVM); S1, S2, S5, S6 still hold ther
     and `_exists` rows, background-process rows, per-user transients (`declarations.spec.ts`); the 8
     BerlinDB tables (`wp_wpr_*`, measured); the 10 `rocket_*` capabilities on `administrator`
     (`Capabilities/Manager.php`, measured). No role. Measured: a deactivate + uninstall leaves none of
-    it; a lost plugin folder leaves 20 options, 8 tables, 10 grants, all swept. Not swept (by design):
+    it; a lost plugin folder leaves 20 options (50 since 12.13's settle), 8 tables, 10 grants, all swept. Not swept (by design):
     user meta `rocket_boxes`, post meta `_rocket_exclude_*`, the 18 cron hooks its uninstall clears
     (in core's `cron`, which the sweep protects), Action Scheduler's tables/options (shared library,
     the uninstall keeps them too), core rows.
@@ -1235,7 +1235,7 @@ Read at `develop` @ 9788d19 (3.24.1-beta2, APVM); S1, S2, S5, S6 still hold ther
   - Measured (twin `site`, 2026-11-13): without it activation writes no `WP_CACHE`; with it
     `rocket_valid_key()` is true and `WP_CACHE` is written. **Pages are cached only after an admin
     request** writes `wp-rocket-config/<host>.php` (activation over WP-CLI writes no config file nor
-    `wp_rocket_settings`): 12.13's job; the twin spec makes that request itself.
+    `wp_rocket_settings`): 12.13's settling request does it.
   - A `mu-plugins` folder it creates stays (empty after the teardown); outside `site` it stays the
     transport user's (`0755`, readable): `normalizeOwnership` refuses `wp-content/mu-plugins`
     (protected). Accepted: WordPress never writes there.
@@ -1301,21 +1301,137 @@ Read at `develop` @ 9788d19 (3.24.1-beta2, APVM); S1, S2, S5, S6 still hold ther
   whole-tree check (2 ssh specs + twin), preparer after the record (lifecycle spec), no remove-only
   refusal (residue spec). Twins 2026-11-13: WP Rocket lifecycle (8) + install-outputs (6), 14 passed.
 
-### 12.13 — Settling admin request after install
+### 12.13 — Settling admin request after install (done 2026-11-13)
 
-- `ProductConfig.settleAfterInstall?: "admin-request"`. After `installFresh`, the `@plugin` Before
-  binding (`plugin.hooks.ts`, which gains `context`) and `replacePluginUnderTest`'s callers:
-  1. `context.request.get("/wp-admin/")`;
-  2. check the final URL is under `/wp-admin/`, not `wp-login.php` (a `@noauth` scenario or an
-     expired login → a warning naming it);
-  3. one GET of the front page.
-
-  On Apache this writes WP Rocket's `.htaccess` block, `WP_CACHE` and config files as the web
-  server, before any step (F13).
-- A failed request is a warning. WP Rocket opts in. Measured in 12.12: without this request a
-  licensed WP-CLI install caches nothing (no `wp-rocket-config/<host>.php` yet).
-- Tests: opt-in, order and the login check (unit, fake request); twin: the block is there before the
-  first step.
+- `ProductConfig.settleAfterInstall?: "admin-request"` (registry `registerSettleAfterInstall`, carried by
+  `declaredResidue`); WP Rocket opts in, BackWPup declares nothing (no client opened, no request).
+- `hooks/settle-request.ts` (pure, over a narrow `SettleClient`): after `installFresh`, in
+  `installPluginUnderTest` and `replacePluginUnderTest` (each takes an optional client opener):
+  `GET /wp-admin/`, its final URL classified (`adminLanding`: wp-admin / `wp-login.php` → warning
+  naming `@noauth` or an expired login / elsewhere, by path only), an error status warned; then
+  `GET /` even when wp-admin failed. 30 s per request (`SETTLE_REQUEST_TIMEOUT_MS`);
+  `SETTLE_ALLOWANCE_MS` (70 s: both requests plus `SETTLE_CLIENT_MARGIN_MS`, 10 s, for opening the
+  client and writing its trace) added to `BEFORE_HOOK_TIMEOUT_MS`, hence to `extendedTimeout`. Every
+  failure (open, request, status, landing) is one warning + a `settle-request` attachment; a request
+  error is shown by its first line, made plain, then credentials masked. An opted-in reinstall whose caller gave no
+  opener is warned and skipped (BackWPup's `reinstallPlugin` gives none; it needs none).
+- **Deviation — no `context`:** the Before binding opens `playwright.request.newContext({ baseURL,
+  storageState })`, not `context.request`: the `context` fixture launches a browser, which
+  `fixtures.ts` keeps away from page-less scenarios (BackWPup CLI ones). Same site, same session (the
+  saved login, or `@noauth`'s empty one), proved against a real Playwright request context.
+- Measured (twins, both stacks, `site`/`legacy-777`/`no-sudo`): right after the install, the settle
+  the only request since the login (made before the install, its redirect not followed),
+  `wp-rocket-config/<host>.php` exists, owned `www-data` (written by the web server),
+  and on Apache `.htaccess` holds `# BEGIN WP Rocket`; caching works with no admin request of the
+  spec's own. Without the settle (mutant) no config file. The admin request leaves more rows: a
+  lost-folder teardown now sweeps 50 options (was 20). The `.htaccess` block stays after the
+  teardown (F13) until 12.15.
+- **Specs:** `settle-request.spec.ts` (17: landing, warnings, order, bounds, dispose, masking,
+  open/attach failures; a real Playwright request context against a local server: saved cookie
+  reaches wp-admin, empty session redirected to `wp-login.php` and warned); `plugin-lifecycle.spec.ts`
+  +6 (order after the last `wp` call, reinstall, not-opted opens nothing, missing opener warned, a
+  failed install sends nothing; `declaredResidue` carry); `metadata.spec.ts` +1, `project.spec.ts`
+  +1, `declarations.spec.ts` (opt-in). Changed: `plugin-lifecycle.spec.ts` "gives the Before hook …
+  allowances" (budget gained `SETTLE_ALLOWANCE_MS`). Twin `lifecycle.ssh-twins.spec.ts`: installs
+  with a logged-in opener, `expectSettled` after each install, `expectCaching` without its own admin
+  request; 8 passed. Mutants killed: no settle in the install (lifecycle spec), no login check (5
+  specs), twin without the settle.
+- **Audit fixes (2026-11-13, each reproduced first):** (1, medium) the twin's opener logged in with
+  a POST whose 302 Playwright followed to `/wp-admin/`, so `admin_init` → `rocket_upgrader` wrote the
+  config file inside the opener: a mutant dropping only the settle's `GET /wp-admin/` passed all 6
+  `expectSettled` tests (twins). Now `settleOpener` logs in before the install like the auth setup
+  (`maxRedirects: 0`, 302 + a `wordpress_logged_in_*` cookie asserted), saves `storageState()` and
+  opens a fresh context from it: the mutant fails 6/6 (no config file). (2) `adminLanding` with
+  `/wp-admin/` in the query alone; (3) a failure's ESC/control characters, and a format character
+  splitting a token (the mask ran before `plain()`: order swapped, as `printableLine`); `pathOf`'s
+  `plain()` is unreachable (the URL parser percent-encodes controls and non-ASCII), kept as defence;
+  (4) `SETTLE_CLIENT_MARGIN_MS`; (5) AGENTS' trace warning names the settle's traced context. Specs:
+  `settle-request.spec.ts` +3 (control characters, split token, budget pinned), +1 assertion
+  (`adminLanding`). Mutants killed: `finalUrl.includes`, no `plain()` in `failureOf`, mask before
+  `plain()`, no margin.
+- **Background work outlives the settle → WP Rocket's `stopRunningWork`** (found by audit fix 1;
+  before it, twin lost-folder test nginx 3/5 failed: twice `_transient_wpr_dynamic_lists` re-created
+  after the sweep, once `Class "ActionScheduler_Lock" not found`). Measured (nginx twin, PHP-FPM status
+  page): the settle's admin `shutdown` takes Action Scheduler's `async-request-runner` lock and
+  dispatches `admin-ajax.php?action=as_async_request_queue_runner` (nginx 499, FPM runs on); it runs
+  `rocket-preload` batches, whose `preload_url` fetches pages `blocking => false`, then `sleep(5)`
+  (`AsyncRequest_QueueRunner::handle`) — alive 6.9 s, 5 s after its last claim, ~6 s past the settle;
+  the folder gone at its wake → that fatal. WP-Cron (`doing_cron`, 60 s) and WP Rocket's
+  `*_process_lock` site transients are the other sources.
+  - `support/background-work.ts` (`stopWpRocketWork`, registered): one `--skip-plugins` probe ($wpdb
+    and transients only: never-installed/quiet = one call); WP Rocket listed and present →
+    `wp plugin deactivate` (closes the window in which a cron run could load it before the removal), 2 s
+    grace, look again; then poll 1 s until none of WP Rocket's own Action Scheduler work (groups
+    `rocket*`: every group 3.24 schedules in — `rocket`, `-preload`, `-rucss`, `-cdn`, `-insights`,
+    `-performance-hints-warmup`) is live — a claim holding a pending/in-progress action, an
+    `in-progress` action (< 300 s, AS's timeouts) —, no process lock, no fresh `doing_cron` begun while
+    WP Rocket was loadable (a lost `spawn_cron` loopback leaves the mark 60 s with no run: measured, the
+    Before waited 58 s on a fresh Apache twin; WP-CLI spawns none, measured), and 12 s since its last
+    action finished or the runner lock was taken (5 s sleep ×2 for a chained runner + 2 s; the lock is
+    shared by every plugin bundling AS, so counted only while WP Rocket is listed or present); 65 s
+    (> cron lock) then "would not stop". A claim/action older than 65 s is **stale** (AS gives a batch
+    30 s; only a request killed outright leaves one, released by AS at 300 s): not waited for, named in
+    a warning (`staleWork`). A failed query is a `WP_CLI::error`, never an empty answer. A refused
+    deactivation is said, the wait goes on (12.14's). Lost folder: nothing to deactivate, still waits.
+  - Before: a stop that had to act re-clears `debug.log` (what that work logged is the earlier run's).
+    After: the stop runs **first**, then the log scan (the work logs until it ends; the next Before's
+    clear would erase it); a stop failure is a cleanup failure, kept until the verdict is in, which
+    outranks it. BackWPup's stop (read: `wp backwpup kill` → `BackWPup_Job::user_abort` deletes the
+    running file and flags working data; the job routes its errors into its own job log) adds nothing
+    to `debug.log` but the scenario's own job's end; `readRunState` loads BackWPup as every step does.
+  - The settle does **not** wait: the race is with removal, closed in both hooks; a quiet start would
+    hide the plugin's post-activation behaviour and cost ~10 s per scenario.
+  - Specs: `background-work.spec.ts` (parse/refusals, `workInFlight` edges incl. stale boundary and
+    runner lock off-site, `staleWork`, `php -l`, stop order, lost folder, refused deactivation, budget
+    exhaustion, stale-only warning in one look, a claim ageing stale mid-wait, read tolerance pinned at
+    3 reads, budgets ≤ `LEFT_WORK_ALLOWANCE_MS`); `plugin-lifecycle.spec.ts` (re-clear after a reported
+    stop, single clear when idle; teardown: stop before the scan, what the work logs while stopped is
+    judged, a fatal outranks a failed stop). Twin spec: install/teardown pass the product's stop as the
+    hooks do; the site and lost-folder tests check nothing is back 12 s after the teardown (site: no
+    fatal either); lost-folder test ignores only a fatal raised in a file of WP Rocket's own folder or a failed `require` of one (below); a probe
+    test seeds AS rows as its DB store writes them (another group's running batch and finished action;
+    WP Rocket's running, pending-only, finished and 120 s-old batches) and checks the probe's counts,
+    `lastRunAt`, `staleWork`, and the stop: another plugin's batch → `undefined` at once, stale only →
+    the warning at once.
+  - Twins 2026-11-13: WP Rocket lifecycle spec `--repeat-each=10`, 80/80; every teardown reported
+    waiting, typically 9–13 s; 12 of 80 also on a `doing_cron` mark begun before the deactivation, up to
+    52 s (a lost spawn, counted to WordPress's 60 s) — within the allowance, but slow.
+  - **Audit fixes (2026-11-13, second audit; each reproduced first):** (1) the teardown scanned the log
+    before the stop, so what the scenario's work logged while waited for was never read: stop first.
+    (2) the probe counted every AS group: on the nginx twin, WP Rocket deleted and another group's
+    claimed in-progress action seeded via its AS (`stake_claim` + `log_execution`), the stop waited
+    66 s and threw "WP Rocket's background work…"; now `rocket*` groups only, and the runner lock only
+    while WP Rocket is on the site. (3) stale claims/actions (decision above). (4) read count pinned;
+    SQL proved on the twins. (5) `waitForWpRocketIdle` removed (unused). Mutants killed: claim query
+    without `'in-progress'`, without the group filter; in-progress or `lastRunAt` without it (twin);
+    runner lock counted off-site, no stale cut, stale cut at `>`, tolerance 3, scan before stop (unit).
+    Twins: new probe test 2/2; lifecycle spec `--repeat-each=5` 47/50 — the 3 failures were the apache
+    "site" test timing out waiting for the twin's lock (`withTwin`) behind other workers, none ran.
+    Rerun 2026-11-16 (`--repeat-each=5 --workers=1`, the scan after the stop): 48/50, two fatals the
+    earlier order never read — the race below (nginx "site") and a lost-folder `TypeError` (apache).
+    **Result:** with both fixes, rerun 2026-11-16 50/50 (45.9 min; each stack 5 green runs in a row);
+    teardowns waited 9.3–51.3 s. Twins taken down.
+  - **Decision (operator, 2026-11-13; reversed 2026-11-16): `Table 'wp_wpr_performance_monitoring'
+    already exists for query CREATE TABLE`** — a "fatal" to `scanDebugLog` when the first requests
+    after activation overlap: WP Rocket's tables install on `init` (`AbstractTable::maybe_upgrade`,
+    BerlinDB `CREATE TABLE` without `IF NOT EXISTS`) on concurrent first requests (activation's
+    `preload_homepage` spawns WP-Cron beside the settle). First kept a scenario failure; reversed: a
+    harmless product race (WordPress logs it and goes on; the table exists), so
+    `WP_ROCKET_LOG_OPTIONS` ignores exactly it (`WP_ROCKET_TABLE_CREATE_RACE`: whole message, same name
+    twice, any prefix, only `WP_ROCKET_TABLES`); any other database error, or another table, stays
+    fatal. Ignored lines leave the counts, not `raw` (attached on failure). Still to be reported to WP
+    Rocket. Spec: `debug-log.spec.ts` (7).
+  - **Lost-folder `TypeError` (2026-11-16), proved before ignoring:** `Lazyload\Subscriber::__construct()
+    … Argument #2 ($assets) must be of type …RocketLazyload\Assets, string given`. Timing (apache
+    access log): the settle's `GET /` at 15:53:31, then the test's `rm -rf`; WP Rocket's preload
+    fetched `wp-sitemap-posts-{post,page}-1.xml` at 15:53:31 → 500, the fatal stamped 15:53:31.
+    Reproduced (apache twin, `site`, the run's build 4d37b19, licensed, settled): folder intact, 6
+    front/sitemap requests → 0 fatals; only `inc/Dependencies/RocketLazyload/Assets.php` deleted → 500
+    and that exact fatal (League container's `add('lazyload_assets', Assets::class)` passes the class
+    name as a string when the class cannot load); file back → 0. So the test's own half-deleted folder:
+    its `FOLDER_LOST_LOG_OPTIONS` now lets through any fatal raised in a file of WP Rocket's folder
+    (`… in …/plugins/wp-rocket/….php:<n>` or `on line <n>`), plus a failed `require` of one; other
+    fatals still fail it.
 
 ### 12.14 — Deactivation-recovery chain
 
@@ -1351,7 +1467,9 @@ Read at `develop` @ 9788d19 (3.24.1-beta2, APVM); S1, S2, S5, S6 still hold ther
      - insert `true`, then replace with `false`;
      - insert only;
      - replace an existing line;
-     - `.htaccess` block added and removed with the LF re-join.
+     - `.htaccess` block added and removed with the LF re-join;
+     - `.htaccess` block added, never removed (since 12.13 the teardown leaves it:
+       `flush_rocket_htaccess(true)` is a no-op under WP-CLI, S2).
   2. If the current file equals one candidate, write the recorded bytes back in place
      (`file_put_contents`: same inode and owner).
   3. Otherwise → a warning naming the file; never touched.
