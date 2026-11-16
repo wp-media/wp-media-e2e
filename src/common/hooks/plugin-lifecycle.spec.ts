@@ -23,6 +23,7 @@ import {
 import { resetOwnershipCaches } from "../wp/ownership";
 import { DEFAULT_STAGING_DIR, PLUGINS_CATEGORY } from "../wp/staging";
 import {
+  registerConfigEdits,
   registerForceDeactivate,
   registerInstallOutputs,
   registerPrepareActivation,
@@ -35,6 +36,7 @@ import {
 import { SETTLE_ALLOWANCE_MS } from "./settle-request";
 import type { SettleClient } from "./settle-request";
 import {
+  AFTER_HOOK_TIMEOUT_MS,
   BEFORE_HOOK_TIMEOUT_MS,
   HOOK_TIMEOUT_MS,
   LEFT_WORK_ALLOWANCE_MS,
@@ -53,7 +55,11 @@ import { deactivationRecoveryMessage } from "../wp/plugin";
 import { INSPECT_PLUGIN_DIR_BASH } from "../__fixtures__/plugin-dir-stub";
 import type { DeclaredResidue, ScenarioReport } from "./plugin-lifecycle";
 import type { ResolvedArtifact } from "../artifacts/types";
-import type { LocalTransport, StopRunningWork } from "../config/types";
+import type {
+  ConfigEdits,
+  LocalTransport,
+  StopRunningWork,
+} from "../config/types";
 
 /**
  * The `@plugin` lifecycle policy, driven end to end on the `local` transport: a real WP-root-like
@@ -98,6 +104,8 @@ const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
  *  - `WP_STUB_SILENT_ACTIVATE_FAIL` — install succeeds and exits 0, but the plugin never becomes
  *    active: the failure mode an exit code alone would miss.
  *  - `WP_STUB_ACTIVATION_OUTPUT` — an absolute folder activation creates outside the plugin's own.
+ *  - `WP_STUB_RECORD_ANSWER` / `WP_STUB_RESTORE_ANSWER` — what the in-place cleanup engine answers.
+ *  - `WP_STUB_RESTORE_AFTER` — a path the restore fails on while it still exists (proves an order).
  *  - a `db-residue` marker in the state dir — a leftover database footprint, which the sweep's own
  *    snippet reports until the snippet that deletes runs, exactly as a real site would.
  */
@@ -141,6 +149,15 @@ case "$1 $2" in
 esac
 if [ "$1" = "eval" ]; then
   case "$2" in
+    *'$e2e_mode = '*)
+      if [[ "$2" == *InJlc3RvcmUi* ]]; then
+        if [ -n "$WP_STUB_RESTORE_AFTER" ] && [ -e "$WP_STUB_RESTORE_AFTER" ]; then
+          echo "stub: restore ran while $WP_STUB_RESTORE_AFTER is still there" >&2
+          exit 1
+        fi
+        if [ -n "$WP_STUB_RESTORE_ANSWER" ]; then printf '%s\n' "$WP_STUB_RESTORE_ANSWER"; else printf '{"none":true}\n'; fi
+      elif [ -n "$WP_STUB_RECORD_ANSWER" ]; then printf '%s\n' "$WP_STUB_RECORD_ANSWER"
+      else printf '{"reconciled":null,"discarded":false,"swept":0}\n'; fi ;;
     *get_plugins*) inspect_plugin_dir "$P" "$SLUG" ;;
     *file_get_contents*) printf '%s' "$WP_STUB_LOG" ;;
     *leftover-footprint*)
@@ -312,6 +329,9 @@ test.afterEach(() => {
     "WP_STUB_REFUSES",
     "WP_STUB_SILENT_ACTIVATE_FAIL",
     "WP_STUB_ACTIVATION_OUTPUT",
+    "WP_STUB_RECORD_ANSWER",
+    "WP_STUB_RESTORE_ANSWER",
+    "WP_STUB_RESTORE_AFTER",
   ] as const) {
     Reflect.deleteProperty(process.env, key);
   }
@@ -322,7 +342,7 @@ test.afterEach(() => {
 
 test.describe("extendedTimeout", () => {
   test("adds room for both hooks on top of the scenario's own budget", () => {
-    const hooks = BEFORE_HOOK_TIMEOUT_MS + HOOK_TIMEOUT_MS;
+    const hooks = BEFORE_HOOK_TIMEOUT_MS + AFTER_HOOK_TIMEOUT_MS;
     expect(extendedTimeout(30_000)).toBe(30_000 + hooks);
     // A scenario that asked for more keeps all of it.
     expect(extendedTimeout(600_000)).toBe(600_000 + hooks);
@@ -333,6 +353,13 @@ test.describe("extendedTimeout", () => {
   test("gives the Before hook the leftover-work and settling-request allowances on top of a hook's budget", () => {
     expect(BEFORE_HOOK_TIMEOUT_MS).toBe(
       HOOK_TIMEOUT_MS + LEFT_WORK_ALLOWANCE_MS + SETTLE_ALLOWANCE_MS,
+    );
+  });
+
+  // The After hook stops the scenario's own work first, bounded by the same allowance.
+  test("gives the After hook the leftover-work allowance on top of a hook's budget", () => {
+    expect(AFTER_HOOK_TIMEOUT_MS).toBe(
+      HOOK_TIMEOUT_MS + LEFT_WORK_ALLOWANCE_MS,
     );
   });
 
@@ -404,6 +431,21 @@ test.describe("declaredResidue", () => {
     ]);
     expect(
       declaredResidue("residue-spec-unregistered").installOutputs,
+    ).toBeUndefined();
+  });
+
+  test("carries the product's validated in-place edits, and none for a product without", () => {
+    registerConfigEdits("edits-spec-product", {
+      files: [],
+      createdDirs: ["wp-content/cache/"],
+    });
+    expect(declaredResidue("edits-spec-product").configEdits).toEqual({
+      files: [],
+      createdFiles: [],
+      createdDirs: ["wp-content/cache"],
+    });
+    expect(
+      declaredResidue("residue-spec-unregistered").configEdits,
     ).toBeUndefined();
   });
 
@@ -902,6 +944,347 @@ test.describe("installPluginUnderTest — prepareActivation", () => {
       }),
     ).rejects.toThrow(/licence refused by the site/);
     expect(wpCalls().some((c) => c.startsWith("plugin install "))).toBe(false);
+  });
+});
+
+// The files a plugin edits in place: recorded once the old copy is gone and before the install, put
+// back last in the teardown — the engine itself is `../wp/config-edits.php.spec.ts`'s.
+test.describe("the plugin's in-place edits: record and restore", () => {
+  const EDITS: ConfigEdits = {
+    files: [
+      {
+        path: "wp-config.php",
+        operations: [
+          {
+            name: "set",
+            steps: [{ pattern: "/x/", replacement: "y", limit: 1 }],
+          },
+        ],
+      },
+    ],
+    createdFiles: [{ path: "wp-content/advanced-cache.php", marks: ["MARK"] }],
+    createdDirs: ["wp-content/cache"],
+  };
+
+  /** Whether a `wp` call is the engine in `mode`. */
+  const isEngine = (call: string, mode: "record" | "restore"): boolean =>
+    call.startsWith("eval $e2e_mode = ") &&
+    call.includes(mode === "restore" ? "InJlc3RvcmUi" : "InJlY29yZCI=");
+
+  let logs: string[];
+  let realLog: typeof console.log;
+  test.beforeEach(() => {
+    logs = [];
+    realLog = console.log;
+    console.log = (...args: unknown[]): void => {
+      logs.push(args.map(String).join(" "));
+    };
+  });
+  test.afterEach(() => {
+    console.log = realLog;
+  });
+
+  test("the Before records once the old copy is gone, before the database sweep and the install", async () => {
+    seedInstalled();
+    seedDbResidue();
+    await installPluginUnderTest(local, artifact(), {
+      ...bothResidue(),
+      configEdits: EDITS,
+    });
+    const calls = wpCalls();
+    const recorded = calls.findIndex((c) => isEngine(c, "record"));
+    const uninstalled = calls.findIndex((c) =>
+      c.startsWith("plugin uninstall"),
+    );
+    const swept = calls.findIndex((c) => c.includes("leftover-footprint"));
+    const installed = calls.findIndex((c) => c.startsWith("plugin install "));
+    expect(uninstalled).toBeGreaterThanOrEqual(0);
+    expect(recorded).toBeGreaterThan(uninstalled);
+    expect(swept).toBeGreaterThan(recorded);
+    expect(installed).toBeGreaterThan(swept);
+    expect(calls.filter((c) => isEngine(c, "record"))).toHaveLength(1);
+    // Run without booting WordPress, so no `--user` either.
+    expect(calls[recorded]).toMatch(/ --skip-wordpress$/);
+  });
+
+  test("a record that fails ends the install before anything is installed", async () => {
+    process.env.WP_STUB_FAIL = "eval $e2e_mode";
+    await expect(
+      installPluginUnderTest(local, artifact(), {
+        ...files(),
+        configEdits: EDITS,
+      }),
+    ).rejects.toThrow(
+      /\[wp\/config-edits\] recording the files the plugin edits failed/,
+    );
+    expect(wpCalls().some((c) => c.startsWith("plugin install "))).toBe(false);
+  });
+
+  test("a killed run's record reconciled first is said; what it left untouched is warned and attached", async () => {
+    process.env.WP_STUB_RECORD_ANSWER = JSON.stringify({
+      reconciled: [
+        { kind: "file", index: 0, result: "unrecognized" },
+        { kind: "dir", index: 0, result: "removed" },
+      ],
+      discarded: false,
+      swept: 2,
+    });
+    const report = reportSink();
+    await installPluginUnderTest(
+      local,
+      artifact(),
+      { ...files(), configEdits: EDITS },
+      undefined,
+      report,
+    );
+    expect(logs.join("\n")).toMatch(/a killed run's record .* was put back/);
+    expect(logs.join("\n")).toMatch(/2 stale record\(s\) of other sites swept/);
+    const attached = report.attached.get("config-edits") ?? "";
+    expect(attached).toContain(`before "${SCENARIO_TITLE}"`);
+    expect(attached).toContain(
+      '"wp-config.php" changed in a way the plugin\'s own edits do not explain',
+    );
+    expect(warnings.join("\n")).toContain(attached);
+  });
+
+  test("a record discarded unused is warned, in the Before and in the teardown", async () => {
+    process.env.WP_STUB_RECORD_ANSWER = JSON.stringify({
+      reconciled: null,
+      unusable: "damaged",
+      discarded: false,
+      swept: 0,
+    });
+    const before = reportSink();
+    await installPluginUnderTest(
+      local,
+      artifact(),
+      { ...files(), configEdits: EDITS },
+      undefined,
+      before,
+    );
+    expect(before.attached.get("config-edits")).toMatch(
+      /a killed run's record of them was discarded unused \(a copy in it no longer matches its checksum\)/,
+    );
+    process.env.WP_STUB_RESTORE_ANSWER = JSON.stringify({
+      unusable: "other-root",
+    });
+    const after = reportSink();
+    await teardownPluginUnderTest(
+      local,
+      "backwpup-pro",
+      {},
+      { ...files(), configEdits: EDITS },
+      after,
+    );
+    expect(after.attached.get("config-edits")).toMatch(
+      /another WordPress root/,
+    );
+  });
+
+  test("a part-way reinstall leaves the record alone", async () => {
+    await replacePluginUnderTest(local, artifact(), {
+      ...files(),
+      configEdits: EDITS,
+    });
+    expect(wpCalls().some((c) => c.startsWith("eval $e2e_mode"))).toBe(false);
+  });
+
+  test("no declaration, no command", async () => {
+    await installPluginUnderTest(local, artifact(), files());
+    await teardownPluginUnderTest(
+      local,
+      "backwpup-pro",
+      {},
+      files(),
+      reportSink(),
+    );
+    expect(wpCalls().some((c) => c.startsWith("eval $e2e_mode"))).toBe(false);
+  });
+
+  test("the teardown restores last, after the residue sweep, quietly when all went back", async () => {
+    seedInstalled();
+    process.env.WP_STUB_RESTORE_ANSWER = JSON.stringify({
+      outcomes: [
+        { kind: "file", index: 0, result: "restored" },
+        { kind: "created-file", index: 0, result: "removed" },
+        { kind: "dir", index: 0, result: "removed" },
+      ],
+    });
+    const report = reportSink();
+    const leftover = join(wpRoot, "wp-content", "e2e-leftover");
+    mkdirSync(leftover, { recursive: true });
+    // The restore fails while the leftover is there: run before the sweep, it would throw.
+    process.env.WP_STUB_RESTORE_AFTER = leftover;
+    await teardownPluginUnderTest(
+      local,
+      "backwpup-pro",
+      {},
+      { ...files("wp-content/e2e-leftover"), configEdits: EDITS },
+      report,
+    );
+    const calls = wpCalls();
+    expect(isEngine(calls.at(-1) ?? "", "restore")).toBe(true);
+    expect(existsSync(leftover)).toBe(false);
+    expect(report.attached.has("config-edits")).toBe(false);
+    expect(warnings).toEqual([]);
+  });
+
+  test("no record to restore from is warned, a mode set back is said", async () => {
+    const report = reportSink();
+    await teardownPluginUnderTest(
+      local,
+      "backwpup-pro",
+      {},
+      { ...files(), configEdits: EDITS },
+      report,
+    );
+    expect(report.attached.get("config-edits")).toMatch(
+      /no record of them was found/,
+    );
+
+    process.env.WP_STUB_RESTORE_ANSWER = JSON.stringify({
+      outcomes: [
+        {
+          kind: "file",
+          index: 0,
+          result: "restored",
+          mode: { found: 0o644, recorded: 0o640, restored: true },
+        },
+      ],
+    });
+    await teardownPluginUnderTest(
+      local,
+      "backwpup-pro",
+      {},
+      { ...files(), configEdits: EDITS },
+      reportSink(),
+    );
+    expect(logs.join("\n")).toContain(
+      '"wp-config.php"\'s mode set back to 0640 (the scenario left 0644).',
+    );
+  });
+
+  test("a record folder the engine will not use is warned, never a failure: the install goes on", async () => {
+    const dir = "/tmp/e2e-record-0123456789abcdef-33";
+    process.env.WP_STUB_RECORD_ANSWER = JSON.stringify({ blocked: dir });
+    let noted = 0;
+    const before = {
+      ...reportSink(),
+      noteRecordTaken: () => {
+        noted += 1;
+      },
+    };
+    await installPluginUnderTest(
+      local,
+      artifact(),
+      { ...files(), configEdits: EDITS },
+      undefined,
+      before,
+    );
+    expect(isActive()).toBe(true);
+    expect(noted).toBe(0);
+    expect(before.attached.get("config-edits")).toContain(
+      `the record folder ${dir} is not a private folder of this run's user`,
+    );
+    expect(before.attached.get("config-edits")).toContain(
+      "nothing was recorded, so the plugin's edits will stay after this scenario",
+    );
+
+    process.env.WP_STUB_RESTORE_ANSWER = JSON.stringify({ blocked: dir });
+    const after = reportSink();
+    await teardownPluginUnderTest(
+      local,
+      "backwpup-pro",
+      {},
+      { ...files(), configEdits: EDITS },
+      after,
+    );
+    expect(after.attached.get("config-edits")).toMatch(
+      /never used: nothing was put back/,
+    );
+  });
+
+  test("a stale record the sweep could not remove is warned", async () => {
+    process.env.WP_STUB_RECORD_ANSWER = JSON.stringify({
+      reconciled: null,
+      discarded: false,
+      swept: 0,
+      unswept: 2,
+    });
+    const report = reportSink();
+    await installPluginUnderTest(
+      local,
+      artifact(),
+      { ...files(), configEdits: EDITS },
+      undefined,
+      report,
+    );
+    expect(report.attached.get("config-edits")).toContain(
+      "2 stale record(s) of other sites in /tmp could not be removed",
+    );
+  });
+
+  test("a record taken is noted for the teardown, which then warns a missing one; untaken, it says nothing", async () => {
+    let noted = 0;
+    await installPluginUnderTest(
+      local,
+      artifact(),
+      { ...files(), configEdits: EDITS },
+      undefined,
+      {
+        ...reportSink(),
+        noteRecordTaken: () => {
+          noted += 1;
+        },
+      },
+    );
+    expect(noted).toBe(1);
+
+    for (const recordTaken of [true, false]) {
+      seedInstalled();
+      const report = { ...reportSink(), recordTaken };
+      await teardownPluginUnderTest(
+        local,
+        "backwpup-pro",
+        {},
+        { ...files(), configEdits: EDITS },
+        report,
+      );
+      expect(report.attached.has("config-edits"), String(recordTaken)).toBe(
+        recordTaken,
+      );
+    }
+  });
+
+  test("a restore that cannot run fails the teardown, after its other duties", async () => {
+    seedInstalled();
+    process.env.WP_STUB_FAIL = "eval $e2e_mode";
+    await expect(
+      teardownPluginUnderTest(
+        local,
+        "backwpup-pro",
+        {},
+        { ...files(), configEdits: EDITS },
+        reportSink(),
+      ),
+    ).rejects.toThrow(/putting back the files the plugin edits failed/);
+    expect(isInstalled()).toBe(false);
+  });
+
+  test("a removal that fails keeps the record: nothing is restored under a plugin still there", async () => {
+    seedInstalled();
+    process.env.WP_STUB_FAIL = "plugin uninstall";
+    process.env.WP_STUB_STUCK_ACTIVE = "1";
+    await expect(
+      teardownPluginUnderTest(
+        local,
+        "backwpup-pro",
+        {},
+        { ...files(), configEdits: EDITS },
+        reportSink(),
+      ),
+    ).rejects.toThrow();
+    expect(wpCalls().some((c) => isEngine(c, "restore"))).toBe(false);
   });
 });
 

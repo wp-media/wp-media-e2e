@@ -24,6 +24,7 @@ import {
   registerSiteDataDirResolver,
   registerForceDeactivate,
   registerPrepareActivation,
+  registerConfigEdits,
   registerInstallOutputs,
   registerSiteDbResidue,
   registerSiteResidue,
@@ -242,6 +243,10 @@ export function createProductConfig(
   // And for what its activation writes outside its plugin folder, which the shared install hands over
   // when it created it — validated here, so a bad path fails as the config is built.
   registerInstallOutputs(product.name, product.installOutputs);
+
+  // And for the files its plugin edits in place, recorded and put back around each scenario — data,
+  // validated as the config is built.
+  registerConfigEdits(product.name, product.configEdits);
 
   // And for how to ask the installed plugin for the data directories it names at runtime, which the
   // shared install prepares beside the declared ones — a function, so this is its only channel too.

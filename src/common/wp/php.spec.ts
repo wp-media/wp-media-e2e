@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -10,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { evalPhp, phpLiteral } from "./php";
+import { resetWpUserCaches } from "./wp-user";
 
 /**
  * `phpLiteral` is pure, so it is tested directly rather than through a stub `wp`: what matters is
@@ -116,10 +118,13 @@ test.describe("evalPhp's command", () => {
 
   test.beforeEach(() => {
     binDir = mkdtempSync(join(tmpdir(), "wp-php-argv-"));
+    // Answers the `--user` check (its marked line) as an administrator's.
     writeFileSync(
       join(binDir, "wp"),
-      `#!/usr/bin/env bash\nprintf '%s\\0' "$@" > "${join(binDir, "argv")}"\n`,
+      `#!/usr/bin/env bash\nprintf '%s\\0' "$@" > "${join(binDir, "argv")}"\n` +
+        `case "$*" in *e2e-wp-user:*) printf '\\ne2e-wp-user:{"numeric":false,"admin":true}\\n' ;; esac\n`,
     );
+    resetWpUserCaches();
     chmodSync(join(binDir, "wp"), 0o755);
     pathBefore = process.env.PATH ?? "";
     process.env.PATH = `${binDir}:${pathBefore}`;
@@ -128,6 +133,7 @@ test.describe("evalPhp's command", () => {
   test.afterEach(() => {
     process.env.PATH = pathBefore;
     rmSync(binDir, { recursive: true, force: true });
+    resetWpUserCaches();
   });
 
   /** The arguments the stub was last given. */
@@ -147,6 +153,36 @@ test.describe("evalPhp's command", () => {
       const local = { mode: "local", rootDir: binDir } as const;
       await evalPhp(local, "echo 1;", "probing", "wp/php", options);
       expect(argv()).toEqual([...flags, "eval", "echo 1;"]);
+    });
+  }
+
+  test("without WordPress: eval, the snippet, --skip-wordpress — never --user, even once an admin was found", async () => {
+    const local = { mode: "local", rootDir: binDir, wpUser: "admin" } as const;
+    await evalPhp(local, "echo 1;", "probing");
+    // The check found an administrator: a booting eval carries the login.
+    expect(argv()).toEqual(["--user=admin", "eval", "echo 1;"]);
+    await evalPhp(local, "echo 1;", "probing", "wp/php", {
+      skipWordPress: true,
+    });
+    expect(argv()).toEqual(["eval", "echo 1;", "--skip-wordpress"]);
+  });
+
+  for (const skip of [
+    { skipPlugins: true },
+    { skipThemes: true },
+    { skipPlugins: true, skipThemes: true },
+  ] as const) {
+    test(`without WordPress, ${Object.keys(skip).join(" and ")} is refused before any command`, async () => {
+      const local = { mode: "local", rootDir: binDir } as const;
+      await expect(
+        evalPhp(local, "echo 1;", "probing", "wp/php", {
+          skipWordPress: true,
+          ...skip,
+        }),
+      ).rejects.toThrow(
+        "[wp/php] probing: --skip-wordpress loads no plugin or theme to skip.",
+      );
+      expect(existsSync(join(binDir, "argv"))).toBe(false);
     });
   }
 });

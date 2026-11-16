@@ -6,8 +6,8 @@ import {
   readRouting,
 } from "../config/metadata";
 import {
+  AFTER_HOOK_TIMEOUT_MS,
   BEFORE_HOOK_TIMEOUT_MS,
-  HOOK_TIMEOUT_MS,
   PLUGIN_TAG,
   declaredResidue,
   extendedTimeout,
@@ -37,6 +37,22 @@ import {
  * The policy itself lives in `./plugin-lifecycle.ts`; this file only binds it to the runtime.
  */
 
+/**
+ * The scenario attempts (`testId#retry`) whose Before recorded the files the plugin edits in place, so
+ * their After knows a missing record is news — and one whose Before failed first is not. Per worker
+ * process, as both hooks of an attempt run in one; the After forgets its entry.
+ */
+const recordsTaken = new Set<string>();
+
+/**
+ * The key of one attempt at a scenario in {@link recordsTaken}.
+ *
+ * @param testInfo - the scenario's test info.
+ */
+function attemptKey(testInfo: { testId: string; retry: number }): string {
+  return `${testInfo.testId}#${String(testInfo.retry)}`;
+}
+
 Before(
   {
     name: "install the plugin under test",
@@ -55,7 +71,12 @@ Before(
     // before spending any of the budget.
     $testInfo.setTimeout(extendedTimeout($testInfo.timeout));
     const { product } = readRouting($testInfo.project.metadata);
-    const report = scenarioReport($testInfo);
+    const report = {
+      ...scenarioReport($testInfo),
+      noteRecordTaken: () => {
+        recordsTaken.add(attemptKey($testInfo));
+      },
+    };
     await installPluginUnderTest(
       site.transport,
       pluginArtifact("plugin"),
@@ -74,7 +95,7 @@ After(
   {
     name: "check debug.log, stop the plugin's running work, remove it and its leftovers",
     tags: PLUGIN_TAG,
-    timeout: HOOK_TIMEOUT_MS,
+    timeout: AFTER_HOOK_TIMEOUT_MS,
   },
   async ({ site, pluginArtifact, $testInfo }) => {
     // A drained scenario never began: no Before hook ran, so there is no log of its own to judge and
@@ -86,7 +107,10 @@ After(
       pluginArtifact("plugin").slug,
       getDebugLogOptions(product),
       declaredResidue(product),
-      scenarioReport($testInfo),
+      {
+        ...scenarioReport($testInfo),
+        recordTaken: recordsTaken.delete(attemptKey($testInfo)),
+      },
       getStopRunningWork(product),
     );
   },

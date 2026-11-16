@@ -39,8 +39,9 @@ export const WP_ROCKET_INSTALL_OUTPUTS: readonly string[] = [
  * What the teardown removes after every scenario (`ProductConfig.siteResidue`): what its uninstall
  * removes — so a run that skipped the uninstall leaves nothing — and the licence must-use plugin. All
  * remove-only: their modes are the plugin's (`CHMOD_WP_ROCKET_CACHE_DIRS`, `0755`), never opened up
- * as data directories. `wp-content/cache` itself and `advanced-cache.php` are left: the uninstall
- * keeps them too, and putting them back as found needs a record of the site before the install.
+ * as data directories. `wp-content/cache` itself and `advanced-cache.php` are not residue: the
+ * uninstall keeps them too, and they go only when the site had neither before the scenario
+ * (`./config-edits.ts`).
  */
 export const WP_ROCKET_SITE_RESIDUE: readonly SiteResidue[] = [
   ...[...CACHE_DIRS, CONFIG_DIR].map((path): SiteResidue => ({

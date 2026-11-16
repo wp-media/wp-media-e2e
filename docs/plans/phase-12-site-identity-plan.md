@@ -1,6 +1,6 @@
 # Phase 12 — Run as the site: the web server's identity for every site command
 
-Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8, 12.9 and 12.10 done 2026-11-12; 12.11 (live rollout, default `"auto"`), 12.11b, 12.12 and 12.13 done 2026-11-13; 12.14 done 2026-11-16; 12.15 next. Parent:
+Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8, 12.9 and 12.10 done 2026-11-12; 12.11 (live rollout, default `"auto"`), 12.11b, 12.12 and 12.13 done 2026-11-13; 12.14 and 12.15a done 2026-11-16; 12.15b next. Parent:
 [e2e-modernization-plan.md](e2e-modernization-plan.md) (§3 phase table). Reverses that plan's §8.2
 rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of WP Rocket's port
 ([phase-6 plan §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket)).
@@ -45,7 +45,7 @@ rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of 
   4. 12.5, 12.6 and 12.7 in parallel;
   5. 12.8, 12.9 and 12.10;
   6. 12.11;
-  7. Part B: 12.12 and 12.13 in parallel, then 12.14, then 12.15, then 12.16.
+  7. Part B: 12.12 and 12.13 in parallel, then 12.14, then 12.15a/b, then 12.16.
 
 ## 1. Facts this plan rests on
 
@@ -1499,42 +1499,105 @@ link) — not used: it skips every cause, not only WP Rocket's own.
   empties every cause, no filter, no diff, no transient delete, unanchored transient name, no key
   sweep (harness); stop without the force (twin nginx: the removal's report appears instead).
 
-### 12.15 — In-place cleanup
+### 12.15 — In-place cleanup (12.15a done 2026-11-16; 12.15b next)
 
-- **Record** (Before hook, before install), **outside the docroot**, crash-safe:
-  `/tmp/e2e-record-<sha256(installKey)[:16]>/`, `0700`, owned by the run identity.
-  - For `wp-config.php` and `.htaccess`: bytes, sha256, mode, owner, inode.
-  - For `advanced-cache.php`: exists, sha256.
-  - For `wp-content/cache`: exists.
-  - **A record already there** (a killed run) is reconciled first: restore from it (below), then
-    re-record.
-- **Restore** (after 12.14's uninstall), `evalPhp` with `--skip-plugins --skip-themes`, as the site
-  (or root in fallback, through `assertResolvedInsideRoot`, refusing symlinks):
-  1. Build the candidates WP Rocket's own code makes from the recorded bytes, using its exact
-     regexes (S3, S4):
-     - insert `true`, then replace with `false`;
-     - insert only;
-     - replace an existing line;
-     - `.htaccess` block added and removed with the LF re-join;
-     - `.htaccess` block added, never removed (since 12.13 the teardown leaves it:
-       `flush_rocket_htaccess(true)` is a no-op under WP-CLI, S2).
-  2. If the current file equals one candidate, write the recorded bytes back in place
-     (`file_put_contents`: same inode and owner).
-  3. Otherwise → a warning naming the file; never touched.
-  - `advanced-cache.php`: delete only if the record says absent and it is empty or defines
-    `WP_ROCKET_ADVANCED_CACHE` (S5).
-  - `wp-content/cache`: remove only if empty and the record says absent.
-  - A mode that differs from the record (F15) → restore it.
-  - Delete the record last.
-- Generic: `ProductConfig.configEdits` declares the transforms as data (pattern, replacement,
-  limit); WP Rocket declares S3 and S4. The engine stays product-agnostic.
-- Tests:
-  - the transforms pinned against WP Rocket's PHP regexes (a PHP fixture run in the unit job, or
-    golden outputs generated once from them): CRLF and LF, no trailing newline, `<?PHP`, blank lines
-    before an existing `WP_CACHE`, two `WP_CACHE` lines, a CRLF `.htaccess`, a third party's edit;
-  - the reconcile path;
-  - twin: byte-identical tracked files after a full lifecycle on both stacks, and after a run killed
-    mid-scenario.
+Read at 3.24.1 (APVM), quoted with file:line in `support/config-edits.ts`. S3–S5 hold; new:
+`set_wp_cache_constant` returns early when `WP_CACHE` already has the value (`WPCache.php:149-155`)
+and writes via `put_contents(…, rocket_get_filesystem_perms('file'))` (`files.php:1333-1373`: the mode
+may change, F15); `find_wpconfig_path` also edits a `wp-config.php` one level up (`:203-235`);
+`flush_rocket_htaccess(true)` on a file with **no** block **adds** an empty one, first
+(`htaccess.php:111-121`; never under WP-CLI); it leaves the file untouched (CRLF too) when the rules
+already match (`:105-110`).
+
+- **Split.** 12.15a (done): everything as the run's identity. **12.15b**: the root fallback for a
+  file the identity cannot write (in place, `assertResolvedInsideRoot`, refusing links) — today warned
+  (`unwritable`) and left. No twin variant needs it (`legacy-777`/`no-sudo` are 777; under
+  `wpconfig-root` WP Rocket cannot edit `wp-config.php` at all): 12.15b adds one (`site` docroot with
+  `runAs: false`) and proves it.
+- **Engine** (`wp/config-edits.ts`; pure half `config-edits-declaration.ts`): `ProductConfig.configEdits`
+  (`registerConfigEdits`, validated at config build, carried by `declaredResidue`) = `files` (operations
+  of `preg_replace` steps: PCRE `/…/flags`, **literal** replacement — back-references refused —,
+  `limit`, `when` `matches`/`lacks`/`differs` read on the **operation's input**, as WP Rocket reads
+  once then branches; `captures` read from the file as left, inserted as `{{name}}`), `createdFiles`
+  (`marks`), `createdDirs`. Candidates: the recorded text with every chain of ≤ 4 operations. One PHP
+  snippet (7.0+), inputs via `phpLiteral`. WP Rocket declares `set WP_CACHE true/false`,
+  `enable/disable WP_ROCKET_DEBUG` (`Logger::define_debug`, `Logger.php:584-622`, on a settings POST;
+  `@` delimiters written `/`; its runtime-constant guard not replayed — a guarded no-op is a shorter
+  chain) and `add/remove rules` with its patterns verbatim, `advanced-cache.php`
+  (`WP_ROCKET_ADVANCED_CACHE`), `wp-content/cache`.
+- **Decisions:**
+  - `wp eval --skip-wordpress` via `exec` (identity-routed, no `--user`; new `evalPhp` `skipWordPress`),
+    not `--skip-plugins --skip-themes`: putting `wp-config.php` back must not need it to boot.
+  - Key `sha256(installKey NUL slug)[:16]` (`recordStemFor`) + `-<euid>` appended by the engine: two
+    products' records on one install never meet, nor two identities' (`site` vs `fallback`/`runAs:
+    false`). A record another identity left stays that identity's: its edits stay, as after a reboot.
+  - Privacy: `/tmp`, `0700`/`0600` (umask `0077`), the identity's; anything else at the name (a link,
+    not a directory, someone else's, open to others) is **never used** — no reconcile, no record,
+    warned (`blocked`), the run goes on unrecorded (refusing would block every later Before, for good
+    under sticky `/tmp`); files created `xb`; `meta.json` (hashes, modes, ids, inodes — no bytes)
+    renamed in last and removed first, else the record is discarded. Bytes never leave the host, nor
+    reach a message or attachment.
+  - A record that cannot be trusted (`meta.json` unreadable, another root, a copy failing its SHA-256)
+    is **discarded unused and warned**, never a failure: failing would block every later Before.
+  - Stale sweep: this identity's private `e2e-record-*` untouched 30 days, by the record step,
+    best-effort (one that will not go is counted and warned, never a failure) (a record must
+    outlive a killed run until its site's next scenario; the inboxes' 1 h would defeat it). `/tmp` is
+    cleared on boot (AutoE2E reboots twice daily): a reboot between a kill and the next run loses the
+    record, and the site keeps WP Rocket's edits, as before 12.15.
+  - `.htaccess` "added, never removed": rules depend on settings, so the candidate is WP Rocket's add
+    with the rules **captured** from the file. Absent before, only WP Rocket's now → removed. Not
+    replayed (warned, untouched): an end marker before the start, a start without end, the
+    "unchanged rules" exit on a CRLF file, a white-labelled `WP_ROCKET_PLUGIN_NAME`, a `wp-config.php`
+    above the root, an `.htaccess` `get_home_path()` puts elsewhere.
+  - Mode set back only on a file found unchanged or restored, re-checked by `lstat` (same dev/inode,
+    regular) before `chmod`; the put-back's `r+` handle is `fstat`ed against the judged file's dev/inode
+    before truncating (`replaced` otherwise, untouched). An unrecognized file is not touched at all. A
+    changed owner is warned, never `chown`ed; the bytes still go back in place (content and owner are
+    independent). `advanced-cache.php` present before and changed → warned (bytes not recorded).
+  - A put-back cut short (truncate, then write) fails naming the record folder, which is kept; a file
+    found as a strict prefix of its recorded bytes (empty included), unexplained by the operations, is
+    written back in full (`resumed`, warned): it adds only recorded bytes. (Chosen over "keep the
+    record and warn": the next record step needs the folder, and the site — an empty `wp-config.php` —
+    is broken until it is written back.)
+  - A record step failing after a reconcile names it in its error (the answer line is lost).
+  - No record in the After is warned only when its Before took one (`ScenarioReport.recordTaken`, kept
+    per attempt by `plugin.hooks.ts`); a Before that failed first gets silence.
+  - Budget: one `wp eval` per hook (~1–5 s). The After now gets `LEFT_WORK_ALLOWANCE_MS` too
+    (`AFTER_HOOK_TIMEOUT_MS`): WP Rocket's stop (≈ 94 s) beside its ≈ 23 s teardown overran 120 s.
+  - Before: record once the old copy is removed (its deactivation joins the candidates), before the DB
+    sweep; never on a part-way reinstall. A record failure ends the install. After: the last duty,
+    **only after a successful removal** (a copy still there would re-edit; the record waits for the
+    next Before); a failure is a cleanup failure (the verdict outranks it), the record kept.
+  - Silent when all went back; a mode set back, a reconcile, a discarded/swept record are notes
+    (`console.log`); anything left is a warning + `config-edits` attachment.
+- **Specs:** `config-edits.php.spec.ts` (engine on local PHP via `__fixtures__/config-edits-harness.php`:
+  privacy, refusals, reconcile, unusable records, every outcome, stale sweep, literal captures,
+  operation-input conditions, PCRE errors); WP Rocket's `config-edits.php.spec.ts` (its verbatim code,
+  `__fixtures__/wp-rocket-edits-harness.php`, on 8 `wp-config.php` × 4 lifecycles and 7 `.htaccess` × 5:
+  LF/CRLF, no trailing newline, `<?PHP`, blank lines before `WP_CACHE`, two `WP_CACHE` lines, `0`, absent
+  /empty/CRLF `.htaccess`, earlier blocks; a third party's edit; mode; inode kept);
+  `config-edits-declaration.spec.ts` (validation, answers, wording, record path, literal embedding);
+  `plugin-lifecycle.spec.ts` +15 (order, failure, reconcile/unusable/blocked/unswept reports, record
+  noted, reinstall, teardown last — the stub restore fails while the residue is there —, only after
+  removal, After budget; `extendedTimeout`'s test now adds `AFTER_HOOK_TIMEOUT_MS`); `php.spec.ts` +4 (`skipWordPress` argv without `--user` after an admin was
+  found, combinations refused); `declarations.spec.ts` +1. The engine harness interrupts a run at a
+  snippet line (PHP ticks): a kill mid-removal, a path swapped for a link before the put-back, the
+  `chmod`, the hash check, the record after a reconcile. Changed: `layering.spec.ts` (metadata loads the pure
+  `config-edits-declaration.ts` beside `paths.ts`). Twin: every WP Rocket lifecycle test (both stacks,
+  `site`/lost folder/`legacy-777`/`wpconfig-root`/`no-sudo`) asserts the tracked paths' type, owner,
+  mode, inode and SHA-256 as found and no record left (`legacy-777`: its seeded `advanced-cache.php`
+  reclaimed by design); new "run killed mid-scenario" test per stack.
+- **Mutants killed:** conditions on step input, `differs` ignoring the value, depth 1, no mode/type
+  check on the record folder, links followed, unrecognized restored, any drop-in removed, non-empty or
+  pre-existing directory removed, mode never set, record kept, no damage/unusable check, sweep all,
+  non-literal replacement, missing capture tolerated, `.htaccess` block-last alternative, weakened
+  re-join, replace limit 1, restore after a failed removal, no record, no back-reference refusal, no
+  index bound, unusable not said; audit fixes: no euid in the name, blocked failing, sweep failing or
+  taking open folders, no `fstat`/`lstat` re-check, scandir drop order, no prefix rule, folder not
+  named, reconcile not named, restore before the sweep, untaken record warned, record not noted,
+  blocked thrown, unswept silent, After budget, `skipWordPress` via `wpCli` or combinations allowed,
+  WP_ROCKET_DEBUG undeclared (10 pinned cases fail). Equivalent: "remove adds no empty block" (the add with the captured
+  empty block makes the same text). Not killable locally: sweeping another uid's record (needs root).
 
 ### 12.16 — WP Rocket lifecycle scenario
 
@@ -1562,7 +1625,7 @@ link) — not used: it skips every cause, not only WP Rocket's own.
 | A killed runner leaves web-user processes (F10) | Unchanged from today; anything that stops one uses the same identity. |
 | The probe file served publicly | 128-bit random name, constant content (ids, umask, SAPI), deleted in `finally`, swept after 1 h. |
 | Empty-argument and `cd ;` defects (F5) | Fixed by 12.1 (done). |
-| WP Rocket's file edits not reversible byte for byte | 12.15 replays WP Rocket's own transforms on the record; anything else is warned and left. |
+| WP Rocket's file edits not reversible byte for byte | 12.15 replays WP Rocket's own transforms on the record; anything else is warned and left. A record (a `wp-config.php` copy) in `/tmp`: private, the identity's, removed after each scenario. |
 | Phase 11 profiles carrying identity fields | Phase 11's refused list names `runAs`/`umask`/`wpUser` (modernization plan, 12.2). |
 
 ## 6. Out of scope

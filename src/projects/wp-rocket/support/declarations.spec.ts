@@ -23,6 +23,8 @@ import {
   writeLicencePhp,
 } from "./licence";
 import { WP_ROCKET_INSTALL_OUTPUTS, WP_ROCKET_SITE_RESIDUE } from "./residue";
+import { WP_ROCKET_CONFIG_EDITS } from "./config-edits";
+import { normaliseConfigEdits } from "../../../common/wp/config-edits-declaration";
 import { wpRocket } from "../config/wp-rocket.config";
 import { removeTempDir } from "../../../common/__fixtures__/temp-dir";
 import {
@@ -353,5 +355,27 @@ test.describe("WP Rocket's config", () => {
     expect(wpRocket.installOutputs).toBe(WP_ROCKET_INSTALL_OUTPUTS);
     expect(typeof wpRocket.prepareActivation).toBe("function");
     expect(wpRocket.settleAfterInstall).toBe("admin-request");
+    expect(wpRocket.configEdits).toBe(WP_ROCKET_CONFIG_EDITS);
+  });
+
+  test("declares its in-place edits validly: wp-config.php, .htaccess, advanced-cache.php, the cache folder", () => {
+    const edits = normaliseConfigEdits(WP_ROCKET_CONFIG_EDITS, "wp-rocket");
+    expect(edits.files.map((file) => file.path)).toEqual([
+      "wp-config.php",
+      ".htaccess",
+    ]);
+    expect(edits.createdFiles).toEqual([
+      {
+        path: "wp-content/advanced-cache.php",
+        marks: ["WP_ROCKET_ADVANCED_CACHE"],
+      },
+    ]);
+    expect(edits.createdDirs).toEqual(["wp-content/cache"]);
+    // Neither is residue: the residue sweep would remove them whatever the site had before.
+    const residuePaths = WP_ROCKET_SITE_RESIDUE.map((entry) =>
+      typeof entry === "string" ? entry : "path" in entry ? entry.path : "",
+    );
+    expect(residuePaths).not.toContain("wp-content/cache");
+    expect(residuePaths).not.toContain("wp-content/advanced-cache.php");
   });
 });
