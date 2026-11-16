@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -13,7 +14,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  deactivationRecoveryMessage,
   ensurePluginAbsent,
+  stillActiveAfter,
   ensurePluginDeactivated,
   existingDestination,
   firstError,
@@ -25,6 +28,7 @@ import {
   uninstallPlugin,
 } from "./plugin";
 import {
+  CommandKilledError,
   PluginDeactivationFailedError,
   PluginDestinationBlockedError,
   PluginDestinationExistsError,
@@ -32,6 +36,7 @@ import {
   PluginUninstallFailedError,
 } from "./errors";
 import { INSPECT_PLUGIN_DIR_BASH } from "../__fixtures__/plugin-dir-stub";
+import type { DeactivationRecovery } from "./plugin";
 import type { LocalTransport } from "../config/types";
 
 /**
@@ -48,7 +53,10 @@ import type { LocalTransport } from "../config/types";
  * `--skip-plugins…` form skips it); `WP_STUB_DOWN` — every `eval` fails, as with no database;
  * `WP_STUB_KILLED` — PHP is killed by a signal (a segfault, an OOM kill) in `eval`: `loaded` only with
  * plugins loaded, `always` with the plugin skipped too;
- * `WP_STUB_IS_ACTIVE_EXIT` — what
+ * `WP_STUB_REFUSES` — a plain `deactivate` exits 0 and never takes (the plugin's own hook refuses), one
+ * with `--skip-plugins` does; `WP_STUB_DEACTIVATE_FATAL` — a plain `deactivate` dies on a fatal (a URL
+ * with credentials in it, colour codes around it) and never takes, one with `--skip-plugins` does;
+ * `WP_STUB_KILL_IS_ACTIVE_AFTER` — once a `deactivate` ran, `is-active` is killed by a signal; `WP_STUB_IS_ACTIVE_EXIT` — what
  * `--skip-plugins plugin is-active` exits with instead; `WP_STUB_CACHE_FAIL` — `cache flush` refuses;
  * `WP_STUB_REINSTALLED` — a copy lands at the path right after the first inspection; `WP_STUB_EVAL_BROKEN`
  * — the inspection answers with a warning, not JSON. For an install in the way: `WP_STUB_DEST` — the
@@ -82,11 +90,18 @@ case "$1 $2" in
     exit 0 ;;
   "plugin is-installed") [ -e "$P/$3/main.php" ] && exit 0 || exit 1 ;;
   "plugin is-active")
+    if [ -n "$WP_STUB_KILL_IS_ACTIVE_AFTER" ] && [ -e "$A.tried" ]; then kill -KILL $$; fi
     if [ -n "$WP_STUB_BROKEN" ] && [ -z "$SKIP" ]; then echo "$FATAL" >&2; exit 1; fi
     if [ -n "$SKIP" ] && [ -n "$WP_STUB_IS_ACTIVE_EXIT" ]; then exit "$WP_STUB_IS_ACTIVE_EXIT"; fi
     [ -e "$A" ] && exit 0 || exit 1 ;;
   "plugin deactivate")
     if [ -n "$WP_STUB_BROKEN" ] && [ -z "$SKIP" ]; then echo "$FATAL" >&2; exit 255; fi
+    [ -n "$WP_STUB_KILL_IS_ACTIVE_AFTER" ] && touch "$A.tried"
+    if [ -n "$WP_STUB_REFUSES" ] && [ -z "$SKIP" ]; then exit 0; fi
+    if [ -n "$WP_STUB_DEACTIVATE_FATAL" ] && [ -z "$SKIP" ]; then
+      printf 'PHP Fatal error:  \\033[31mUncaught Exception: https://admin:hunter2@example.test/x\\033[0m in deactivate\\n' >&2
+      exit 255
+    fi
     [ -z "$WP_STUB_STUCK_ACTIVE" ] && rm -f "$A"; exit 0 ;;
   "plugin uninstall")
     case "\${WP_STUB_UNINSTALL:-removes}" in
@@ -160,6 +175,9 @@ test.afterEach(() => {
     "WP_STUB_LOG",
     "WP_STUB_UNINSTALL",
     "WP_STUB_STUCK_ACTIVE",
+    "WP_STUB_REFUSES",
+    "WP_STUB_DEACTIVATE_FATAL",
+    "WP_STUB_KILL_IS_ACTIVE_AFTER",
     "WP_STUB_BROKEN",
     "WP_STUB_IS_ACTIVE_EXIT",
     "WP_STUB_CACHE_FAIL",
@@ -237,6 +255,339 @@ test.describe("ensurePluginDeactivated", () => {
     process.env.WP_STUB_STUCK_ACTIVE = "1";
     await expect(ensurePluginDeactivated(local, "x")).rejects.toBeInstanceOf(
       PluginDeactivationFailedError,
+    );
+  });
+});
+
+/**
+ * A product's forced deactivation for the stub site: logged among the `wp` calls as `force`, then
+ * `takes` (clears the active marker), `fails` (clears nothing) or `throws` (with or without clearing).
+ */
+function force(
+  effect: "takes" | "fails",
+  throws?: string,
+): (transport: unknown, slug: string) => Promise<void> {
+  return (_transport, slug) => {
+    appendFileSync(join(root, "calls.log"), `force ${slug}\n`);
+    if (effect === "takes") rmSync(join(root, "active"), { force: true });
+    return throws === undefined
+      ? Promise.resolve()
+      : Promise.reject(new Error(throws));
+  };
+}
+
+/** What a plain deactivation that exits 0 yet leaves the plugin active is said as. */
+const EXITED_0 = "`wp plugin deactivate` exited 0 but left it active";
+
+/** The calls that read or change the plugin's active state, and the force, in order. */
+function chainCalls(): string[] {
+  return calls().filter((call) =>
+    /^(--skip-plugins )?plugin (is-active|deactivate|uninstall)|^force /.test(
+      call,
+    ),
+  );
+}
+
+test.describe("ensurePluginDeactivated — a refused deactivation", () => {
+  test("answers what it found and did", async () => {
+    seedInstalled(false);
+    expect(await ensurePluginDeactivated(local, "x")).toEqual({
+      kind: "inactive",
+    });
+    seedInstalled();
+    expect(
+      await ensurePluginDeactivated(local, "x", {
+        forceDeactivate: force("takes"),
+      }),
+    ).toEqual({ kind: "deactivated" });
+    // A plain deactivation that takes never calls the force.
+    expect(chainCalls()).not.toContain("force x");
+  });
+
+  test("tries the product's force after the plain deactivation, then reads the state back", async () => {
+    seedInstalled();
+    process.env.WP_STUB_REFUSES = "1";
+    expect(
+      await ensurePluginDeactivated(local, "x", {
+        forceDeactivate: force("takes"),
+      }),
+    ).toEqual({ kind: "forced", plainSaid: EXITED_0 });
+    expect(chainCalls()).toEqual([
+      "plugin is-active x",
+      "plugin deactivate x",
+      "plugin is-active x",
+      "force x",
+      "plugin is-active x",
+    ]);
+  });
+
+  test("a force that throws having deactivated it is forced, with its error", async () => {
+    seedInstalled();
+    process.env.WP_STUB_REFUSES = "1";
+    expect(
+      await ensurePluginDeactivated(local, "x", {
+        forceDeactivate: force("takes", "transients left"),
+      }),
+    ).toEqual({
+      kind: "forced",
+      plainSaid: EXITED_0,
+      forceError: "transients left",
+    });
+  });
+
+  test("without a force, throws naming the plain deactivation, and never deactivates unloaded", async () => {
+    seedInstalled();
+    process.env.WP_STUB_REFUSES = "1";
+    await expect(ensurePluginDeactivated(local, "x")).rejects.toThrow(
+      `Plugin "x" could not be deactivated: ${EXITED_0}`,
+    );
+    expect(calls().some((call) => call.startsWith("--skip-plugins"))).toBe(
+      false,
+    );
+  });
+
+  test("a force that does not take throws naming both steps and what the force said", async () => {
+    seedInstalled();
+    process.env.WP_STUB_REFUSES = "1";
+    await expect(
+      ensurePluginDeactivated(local, "x", {
+        forceDeactivate: force("fails", "still refused: other"),
+      }),
+    ).rejects.toThrow(
+      `${EXITED_0}; its product's forced deactivation left it active too (it failed: still refused: other)`,
+    );
+    expect(calls().some((call) => call.startsWith("--skip-plugins"))).toBe(
+      false,
+    );
+  });
+});
+
+test.describe("ensurePluginAbsent — a refused deactivation", () => {
+  test("forces it, reports that, then uninstalls", async () => {
+    seedInstalled();
+    process.env.WP_STUB_REFUSES = "1";
+    const told: DeactivationRecovery[] = [];
+    await ensurePluginAbsent(local, "x", {
+      forceDeactivate: force("takes"),
+      onRecovered: (recovery) => {
+        told.push(recovery);
+      },
+    });
+    expect(told).toEqual([{ kind: "forced", plainSaid: EXITED_0 }]);
+    expect(chainCalls()).toEqual([
+      "plugin is-active x",
+      "plugin deactivate x",
+      "plugin is-active x",
+      "force x",
+      "plugin is-active x",
+      "plugin uninstall x",
+    ]);
+    expect(folderThere()).toBe(false);
+  });
+
+  test("takes it off active_plugins unloaded when the force fails, reports that, then uninstalls", async () => {
+    seedInstalled();
+    process.env.WP_STUB_REFUSES = "1";
+    const told: DeactivationRecovery[] = [];
+    await ensurePluginAbsent(local, "x", {
+      forceDeactivate: force("fails", "refused: other"),
+      onRecovered: (recovery) => {
+        told.push(recovery);
+      },
+    });
+    expect(told).toEqual([
+      {
+        kind: "unloaded",
+        refusal: `${EXITED_0}; its product's forced deactivation left it active too (it failed: refused: other)`,
+      },
+    ]);
+    expect(chainCalls()).toEqual([
+      "plugin is-active x",
+      "plugin deactivate x",
+      "plugin is-active x",
+      "force x",
+      "plugin is-active x",
+      "--skip-plugins plugin deactivate x",
+      "--skip-plugins plugin is-active x",
+      "plugin uninstall x",
+    ]);
+    expect(folderThere()).toBe(false);
+  });
+
+  test("without a force goes to the last resort, and warns when nobody asked to be told", async () => {
+    seedInstalled();
+    process.env.WP_STUB_REFUSES = "1";
+    const originalWarn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    try {
+      await ensurePluginAbsent(local, "x");
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings).toEqual([
+      `[wp/plugin] ${deactivationRecoveryMessage("x", {
+        kind: "unloaded",
+        refusal: EXITED_0,
+      })}`,
+    ]);
+    expect(folderThere()).toBe(false);
+  });
+
+  test("throws, removing nothing, when not even the last resort takes", async () => {
+    seedInstalled();
+    process.env.WP_STUB_STUCK_ACTIVE = "1";
+    const told: DeactivationRecovery[] = [];
+    await expect(
+      ensurePluginAbsent(local, "x", {
+        forceDeactivate: force("fails"),
+        onRecovered: (recovery) => {
+          told.push(recovery);
+        },
+      }),
+    ).rejects.toThrow(
+      `Plugin "x" could not be deactivated: ${EXITED_0}; its product's forced deactivation left it ` +
+        "active too; still active after `wp --skip-plugins plugin deactivate`",
+    );
+    expect(told).toEqual([]);
+    expect(pluginCalls()).not.toContain("plugin uninstall x");
+    expect(existsSync(join(plugins, "x", "main.php"))).toBe(true);
+  });
+
+  test("reports nothing when the plain deactivation takes", async () => {
+    seedInstalled();
+    const told: DeactivationRecovery[] = [];
+    await ensurePluginAbsent(local, "x", {
+      forceDeactivate: force("takes"),
+      onRecovered: (recovery) => {
+        told.push(recovery);
+      },
+    });
+    expect(told).toEqual([]);
+    expect(chainCalls()).not.toContain("force x");
+  });
+
+  // Removal under test judges the plugin: a refusal is its verdict, never recovered.
+  test("uninstallPlugin never recovers a refused deactivation", async () => {
+    seedInstalled();
+    process.env.WP_STUB_REFUSES = "1";
+    await expect(uninstallPlugin(local, "x")).rejects.toBeInstanceOf(
+      PluginDeactivationFailedError,
+    );
+    expect(calls().some((call) => call.startsWith("--skip-plugins"))).toBe(
+      false,
+    );
+    expect(existsSync(join(plugins, "x", "main.php"))).toBe(true);
+  });
+});
+
+test.describe("ensurePluginDeactivated — what the plain deactivation did", () => {
+  test("claims nothing about why when it exited 0: it says so", () => {
+    expect(stillActiveAfter({ exitCode: 0, stdout: "", stderr: "" })).toBe(
+      EXITED_0,
+    );
+  });
+
+  test("a deactivation that failed is named with its first error line, masked and plain", async () => {
+    seedInstalled();
+    process.env.WP_STUB_DEACTIVATE_FATAL = "1";
+    const failed = ensurePluginDeactivated(local, "x");
+    await expect(failed).rejects.toThrow(
+      'Plugin "x" could not be deactivated: `wp plugin deactivate` failed (exit 255: PHP Fatal ' +
+        "error:  Uncaught Exception: https://***@example.test/x in deactivate)",
+    );
+    await expect(failed).rejects.not.toThrow("hunter2");
+  });
+
+  test("a failed plain deactivation the force recovers is forced, never said refused", async () => {
+    seedInstalled();
+    process.env.WP_STUB_DEACTIVATE_FATAL = "1";
+    const outcome = await ensurePluginDeactivated(local, "x", {
+      forceDeactivate: force("takes"),
+    });
+    expect(outcome).toEqual({
+      kind: "forced",
+      plainSaid:
+        "`wp plugin deactivate` failed (exit 255: PHP Fatal error:  Uncaught Exception: " +
+        "https://***@example.test/x in deactivate)",
+    });
+  });
+
+  test("what the force threw is masked and plain", async () => {
+    seedInstalled();
+    process.env.WP_STUB_REFUSES = "1";
+    expect(
+      await ensurePluginDeactivated(local, "x", {
+        forceDeactivate: force(
+          "takes",
+          "\u001b[31mbad\u001b[0m token ghp_abcdefghijklmnop",
+        ),
+      }),
+    ).toEqual({
+      kind: "forced",
+      plainSaid: EXITED_0,
+      forceError: "bad token ***",
+    });
+  });
+});
+
+test.describe("ensurePluginAbsent — what it never recovers", () => {
+  // Only a plugin still active is recovered: a command that could not run is the site's failure.
+  test("rethrows a read-back that could not run, never reaching for the last resort", async () => {
+    seedInstalled();
+    process.env.WP_STUB_REFUSES = "1";
+    process.env.WP_STUB_KILL_IS_ACTIVE_AFTER = "1";
+    await expect(
+      ensurePluginAbsent(local, "x", { forceDeactivate: force("takes") }),
+    ).rejects.toBeInstanceOf(CommandKilledError);
+    expect(chainCalls()).toEqual([
+      "plugin is-active x",
+      "plugin deactivate x",
+      "plugin is-active x",
+    ]);
+  });
+
+  test("tells what the force threw when it took all the same", async () => {
+    seedInstalled();
+    process.env.WP_STUB_REFUSES = "1";
+    const told: DeactivationRecovery[] = [];
+    await ensurePluginAbsent(local, "x", {
+      forceDeactivate: force("takes", "transients left"),
+      onRecovered: (recovery) => {
+        told.push(recovery);
+      },
+    });
+    expect(told).toEqual([
+      { kind: "forced", plainSaid: EXITED_0, forceError: "transients left" },
+    ]);
+  });
+});
+
+test.describe("deactivationRecoveryMessage", () => {
+  test("says what the plain deactivation did, that the force ran, and what it reported when it threw", () => {
+    expect(
+      deactivationRecoveryMessage("x", { kind: "forced", plainSaid: "why" }),
+    ).toBe(
+      '"x" stayed active (why), so its product\'s forced deactivation ran and deactivated it.',
+    );
+    expect(
+      deactivationRecoveryMessage("x", {
+        kind: "forced",
+        plainSaid: "why",
+        forceError: "boom",
+      }),
+    ).toMatch(/deactivated it, though it reported a failure: boom$/);
+  });
+
+  test("says the deactivation hook never ran after the last resort", () => {
+    expect(
+      deactivationRecoveryMessage("x", { kind: "unloaded", refusal: "why" }),
+    ).toBe(
+      '"x" would not deactivate (why), so it was taken off active_plugins without loading it ' +
+        "(`wp --skip-plugins plugin deactivate`): its deactivation hook never ran, and what that " +
+        "hook undoes on the site is left as it is.",
     );
   });
 });

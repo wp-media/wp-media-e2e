@@ -4,6 +4,7 @@ import type { ScanDebugLogOptions } from "../wp/log";
 import type { SiteDbResidue } from "../wp/db-residue";
 import type {
   Edition,
+  ForceDeactivate,
   PrepareActivation,
   ResolveSiteDataDirs,
   SiteConfig,
@@ -332,6 +333,39 @@ export function getStopRunningWork(
   product: string,
 ): StopRunningWork | undefined {
   return runningWorkStops.get(product);
+}
+
+// Per-process registry: product -> how to deactivate its plugin when a plain deactivation leaves it
+// active. A function, so this is its only channel.
+const forcedDeactivations = new Map<string, ForceDeactivate>();
+
+/**
+ * Registers how a product deactivates its plugin when a plain `wp plugin deactivate` leaves it active
+ * (`ProductConfig.forceDeactivate`). Called while building the config, in each process. A product
+ * whose plugin always deactivates is not registered.
+ *
+ * @param product - the product's name.
+ * @param force - its forced deactivation, or `undefined`.
+ */
+export function registerForceDeactivate(
+  product: string,
+  force: ForceDeactivate | undefined,
+): void {
+  if (force === undefined) return;
+  forcedDeactivations.set(product, force);
+}
+
+/**
+ * A product's forced deactivation, or `undefined` when it declares none — the hooks then go from a
+ * refused deactivation straight to their generic last resort. Never throws, for the same reason as
+ * {@link getSiteResidue}.
+ *
+ * @param product - the product's name.
+ */
+export function getForceDeactivate(
+  product: string,
+): ForceDeactivate | undefined {
+  return forcedDeactivations.get(product);
 }
 
 // Per-process registry: product -> how to settle what its killed runs left on a site. A function, so

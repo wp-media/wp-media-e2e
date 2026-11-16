@@ -1,12 +1,14 @@
 import {
   DebugLogFatalError,
   PluginActivationFailedError,
+  PluginDeactivationBrokenError,
   PluginUninstallBrokenError,
   SiteResidueRemovalFailedError,
 } from "../wp/errors";
 import { isEmptyDbResidue, removeSiteDbResidue } from "../wp/db-residue";
 import { clearDebugLog, scanDebugLog } from "../wp/log";
 import {
+  deactivationRecoveryMessage,
   ensurePluginAbsent,
   isPluginActive,
   pluginBreaksBoot,
@@ -24,6 +26,7 @@ import {
 } from "../wp/install-outputs";
 import { stageAndInstallPlugin } from "../wp/staging";
 import {
+  getForceDeactivate,
   getInstallOutputs,
   getPrepareActivation,
   getSettleAfterInstall,
@@ -36,12 +39,17 @@ import { withinBudget } from "../deadline";
 import { SETTLE_ALLOWANCE_MS, settleAfterInstall } from "./settle-request";
 import { errorMessage } from "../guards";
 import type { ScanDebugLogOptions } from "../wp/log";
-import type { ClearedPluginDir } from "../wp/plugin";
+import type {
+  ClearedPluginDir,
+  DeactivationRecovery,
+  RemovalOptions,
+} from "../wp/plugin";
 import type { FoundDbResidue, SiteDbResidue } from "../wp/db-residue";
 import type { TestInfo } from "@playwright/test";
 import type { ResolvedArtifact } from "../artifacts/types";
 import type { OpenSettleClient } from "./settle-request";
 import type {
+  ForceDeactivate,
   PrepareActivation,
   ResolveSiteDataDirs,
   SettleAfterInstall,
@@ -95,6 +103,11 @@ export interface DeclaredResidue {
    * `ProductConfig.settleAfterInstall` (`./settle-request.ts`).
    */
   readonly settleAfterInstall?: SettleAfterInstall | undefined;
+  /**
+   * How every removal here deactivates the plugin when a plain deactivation leaves it active —
+   * `ProductConfig.forceDeactivate`; the generic last resort follows it (`ensurePluginAbsent`).
+   */
+  readonly forceDeactivate?: ForceDeactivate | undefined;
 }
 
 /** A product that declares neither kind of leftover; every step below then costs nothing. */
@@ -115,6 +128,7 @@ export function declaredResidue(product: string): DeclaredResidue {
     installOutputs: getInstallOutputs(product),
     prepareActivation: getPrepareActivation(product),
     settleAfterInstall: getSettleAfterInstall(product),
+    forceDeactivate: getForceDeactivate(product),
   };
 }
 
@@ -176,14 +190,15 @@ export const HOOK_TIMEOUT_MS = 120_000;
  * within.**
  *
  * The teardown normally leaves nothing running, so this is spent only by the run that recovers a
- * killed one. Sized from BackWPup's stop: 30 s for a running job to go and 30 s for its run to
- * record its end, plus a few probes of ~1.3 s each, is about 70 s at worst; WP Rocket's — a
- * deactivation, then at most 65 s waiting for what Action Scheduler and WP-Cron still run — about
- * the same; 90 s keeps a margin for a slow link. Without it, that worst case beside the install
- * measured above would overrun the hook, and a timed-out hook is abandoned rather than cancelled —
- * its install would go on beside the teardown.
+ * killed one. Sized from the products' stops: BackWPup's — 30 s for a running job to go and 30 s for
+ * its run to record its end, plus a few probes of ~1.3 s each — about 70 s at worst; WP Rocket's — a
+ * look, a deactivation of up to three WP-CLI calls (a plain one read back, then its force), a 2 s
+ * grace and at most 65 s waiting for what Action Scheduler and WP-Cron still run, plus a last look —
+ * about 94 s at ~5 s per call on a slow link, so 100 s. Without it, that worst case beside the
+ * install measured above would overrun the hook, and a timed-out hook is abandoned rather than
+ * cancelled — its install would go on beside the teardown.
  */
-export const LEFT_WORK_ALLOWANCE_MS = 90_000;
+export const LEFT_WORK_ALLOWANCE_MS = 100_000;
 
 /**
  * The Before hook's budget: an install, plus stopping what a killed run left running, plus the
@@ -249,6 +264,12 @@ export function extendedTimeout(current: number): number {
  * that was killed never reached its teardown, and the job it started goes on in a web request of
  * its own — so this is what makes recovering from a kill complete. On a site where the plugin is not
  * there, or idle, it costs the product's one probe.
+ *
+ * Every removal here (this one, a reinstall's, the teardown's) recovers a deactivation that leaves the
+ * plugin active — the product's `residue.forceDeactivate`, then the generic last resort — and reports
+ * it on the scenario (`forced-deactivation`; {@link ensurePluginAbsent}). Before a scenario that is
+ * never a failure: the copy is an earlier run's. The teardown fails for the last resort
+ * ({@link teardownPluginUnderTest}).
  *
  * Between the removal and the install sits the one step that copes with a site the removal could
  * not clean: the plugin's **database footprint**, swept off what is actually there rather than off
@@ -334,7 +355,12 @@ export async function installPluginUnderTest(
     // had gone, say — belongs to the run that left it, not to this scenario, which has not begun.
     if (stopped) await clearDebugLog(transport);
   }
-  const cleared = await removeOldCopy(transport, artifact.slug, report);
+  const cleared = await removeOldCopy(
+    transport,
+    artifact.slug,
+    residue.forceDeactivate,
+    report,
+  );
   // A copy whose uninstall failed wrote that failure to the log just cleared. It is reported above,
   // and it belongs to the run that left the copy behind — never to this scenario, which has not begun.
   if (cleared?.cause === "uninstall-failed") await clearDebugLog(transport);
@@ -393,29 +419,100 @@ export async function replacePluginUnderTest(
   openClient?: OpenSettleClient,
 ): Promise<void> {
   pluginSitePath(artifact.slug);
-  await removeOldCopy(transport, artifact.slug, report);
+  await removeOldCopy(
+    transport,
+    artifact.slug,
+    residue.forceDeactivate,
+    report,
+  );
   await installFresh(transport, artifact, residue);
   await settleAfterInstall(residue.settleAfterInstall, openClient, report);
 }
 
 /**
  * Removes whatever copy of the plugin is on the site — what is left at its path included — and
- * reports what had to go by path.
+ * reports what had to go by path, and a deactivation it had to recover.
  *
  * @param transport - the target site's transport.
  * @param slug - the plugin's slug.
- * @param report - the scenario to attach the report to, when there is one.
+ * @param forceDeactivate - the product's forced deactivation, if it has one.
+ * @param report - the scenario to attach the reports to, when there is one.
  * @returns what was removed by path, or `undefined`.
  * @throws what {@link ensurePluginAbsent} throws.
  */
 async function removeOldCopy(
   transport: Transport,
   slug: string,
+  forceDeactivate: ForceDeactivate | undefined,
   report?: ScenarioReport,
 ): Promise<ClearedPluginDir | undefined> {
-  const cleared = await ensurePluginAbsent(transport, slug);
+  const cleared = await ensurePluginAbsent(
+    transport,
+    slug,
+    removalOptions(slug, forceDeactivate, "before", report),
+  );
   await reportClearedPluginDir(cleared, "before", report);
   return cleared;
+}
+
+/**
+ * How the hooks' removals deactivate: the product's force, and a recovered deactivation reported on
+ * the scenario ({@link reportRecoveredDeactivation}).
+ *
+ * @param slug - the plugin's slug.
+ * @param forceDeactivate - the product's forced deactivation, if it has one.
+ * @param when - whether the scenario is about to begin or has just ended.
+ * @param report - the scenario to name and attach to, when there is one.
+ * @param onUnloaded - told when the last resort was needed (the teardown fails for it).
+ */
+function removalOptions(
+  slug: string,
+  forceDeactivate: ForceDeactivate | undefined,
+  when: "before" | "after",
+  report?: ScenarioReport,
+  onUnloaded?: (refusal: string) => void,
+): RemovalOptions {
+  return {
+    forceDeactivate,
+    onRecovered: async (recovery) => {
+      if (recovery.kind === "unloaded") onUnloaded?.(recovery.refusal);
+      await reportRecoveredDeactivation(slug, recovery, when, report);
+    },
+  };
+}
+
+/**
+ * Says a removal had to recover the plugin's deactivation: a warning, and a `forced-deactivation`
+ * attachment. Never a failure by itself — the plugin is inactive and the removal goes on; the report
+ * keeps what the deactivation did (and, for the last resort, the hook that never ran) in sight. The
+ * teardown fails for the last resort on its own ({@link teardownPluginUnderTest}).
+ *
+ * @param slug - the plugin's slug.
+ * @param recovery - what had to be done.
+ * @param when - whether the scenario is about to begin or has just ended.
+ * @param report - the scenario to name and attach to, when there is one.
+ */
+async function reportRecoveredDeactivation(
+  slug: string,
+  recovery: DeactivationRecovery,
+  when: "before" | "after",
+  report?: ScenarioReport,
+): Promise<void> {
+  const moment =
+    report === undefined
+      ? when === "before"
+        ? "before installing"
+        : "after the scenario"
+      : `${when} "${report.title}"`;
+  const message = `[hooks] ${moment}, ${deactivationRecoveryMessage(slug, recovery)}`;
+  console.warn(message);
+  await report
+    ?.attach("forced-deactivation", message)
+    .catch((attachError: unknown) => {
+      console.warn(
+        `[hooks] could not attach the forced-deactivation report: ${errorMessage(attachError)}`,
+      );
+    });
 }
 
 /**
@@ -682,7 +779,10 @@ export function scenarioReport(
  * is reported rather than thrown — see {@link sweepResidue}. One cleanup failure is about the product:
  * the plugin's own uninstall failing. Its folder is still removed by path, so later scenarios run, and
  * the failure is thrown ({@link PluginUninstallBrokenError}) — the log was judged before it, so this
- * is the only place it shows.
+ * is the only place it shows. So is its deactivation: one the product's force recovers is reported,
+ * never failed (a known refusal, such as WP Rocket's over an unwritable `wp-config.php`); one only the
+ * last resort takes — off `active_plugins` unloaded, its deactivation hook never run — is kept as a
+ * failure ({@link PluginDeactivationBrokenError}) and the removal finishes all the same.
  *
  * The log is judged **once the scenario's own work has ended**, before any removal, so the verdict is
  * about the scenario and not about this hook's own work. Work the scenario started — a backup job, a
@@ -701,7 +801,8 @@ export function scenarioReport(
  * @param stopRunningWork - how the product stops work it may still be doing on the site
  * (`ProductConfig.stopRunningWork`); omitted for a product that runs nothing in the background.
  * @throws {@link DebugLogFatalError} when PHP logged a fatal, else the first cleanup failure — work
- * that would not stop, then {@link ensurePluginAbsent} or {@link PluginUninstallBrokenError} (the
+ * that would not stop, then {@link PluginDeactivationBrokenError} (only the last resort deactivated
+ * it), {@link ensurePluginAbsent} or {@link PluginUninstallBrokenError} (the
  * plugin's own uninstall failed and its folder was removed by path: the site is clean, the plugin is
  * not), the database sweep (a footprint that survived removal, or a declaration the site refuses), or
  * a residue path that is not a usable declaration.
@@ -762,13 +863,31 @@ export async function teardownPluginUnderTest(
 
   let uninstallFailed = false;
   await cleanUp(async () => {
-    const cleared = await ensurePluginAbsent(transport, slug);
-    await reportClearedPluginDir(cleared, "after", report);
-    // This copy is the artifact under test: healed, so later scenarios run, but WordPress could not
-    // uninstall it — which a user's WordPress could not either.
-    if (cleared?.cause === "uninstall-failed") {
-      uninstallFailed = true;
-      throw new PluginUninstallBrokenError(slug, cleared.uninstallError);
+    // Reaching the last resort is the artifact under test failing to deactivate — which a user's
+    // WordPress could not either: kept as a failure, after the removal it does not stop.
+    let unloaded: string | undefined;
+    const removal = removalOptions(
+      slug,
+      residue.forceDeactivate,
+      "after",
+      report,
+      (refusal) => {
+        unloaded = refusal;
+      },
+    );
+    try {
+      const cleared = await ensurePluginAbsent(transport, slug, removal);
+      await reportClearedPluginDir(cleared, "after", report);
+      // This copy is the artifact under test: healed, so later scenarios run, but WordPress could not
+      // uninstall it — which a user's WordPress could not either.
+      if (cleared?.cause === "uninstall-failed") {
+        uninstallFailed = true;
+        throw new PluginUninstallBrokenError(slug, cleared.uninstallError);
+      }
+    } finally {
+      if (unloaded !== undefined) {
+        keep(new PluginDeactivationBrokenError(slug, unloaded));
+      }
     }
   });
   await cleanUp(() =>

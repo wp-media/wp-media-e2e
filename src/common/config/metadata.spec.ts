@@ -3,6 +3,7 @@ import { test, expect } from "@playwright/test";
 import {
   getDebugLogOptions,
   getInstallOutputs,
+  getForceDeactivate,
   getPrepareActivation,
   getSettleAfterInstall,
   getPool,
@@ -12,6 +13,7 @@ import {
   readRouting,
   registerDebugLogOptions,
   registerInstallOutputs,
+  registerForceDeactivate,
   registerPrepareActivation,
   registerSettleAfterInstall,
   registerPool,
@@ -208,6 +210,16 @@ test.describe("activation-preparer registry", () => {
     expect(getPrepareActivation("spec-prepare")).toBe(prepare);
     registerPrepareActivation("spec-no-prepare", undefined);
     expect(getPrepareActivation("spec-no-prepare")).toBeUndefined();
+  });
+});
+
+test.describe("forced-deactivation registry", () => {
+  test("serves back the registered force, and nothing for a product without", () => {
+    const force = (): Promise<void> => Promise.resolve();
+    registerForceDeactivate("spec-force", force);
+    expect(getForceDeactivate("spec-force")).toBe(force);
+    registerForceDeactivate("spec-no-force", undefined);
+    expect(getForceDeactivate("spec-no-force")).toBeUndefined();
   });
 });
 

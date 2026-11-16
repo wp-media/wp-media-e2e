@@ -178,6 +178,21 @@ test("registers the product's activation preparer, in the process building the c
   expect(registered).toBe(true);
 });
 
+test("registers the product's forced deactivation, in the process building the config", async () => {
+  const file = (path: string): string => importable(join(REPO_ROOT, path));
+  const registered = (await runInChildNode(
+    `
+    const { createProductConfig } = await import(${file("src/common/config/project.ts")});
+    const { getForceDeactivate } = await import(${file("src/common/config/metadata.ts")});
+    const force = async () => {};
+    createProductConfig({ ...${JSON.stringify(PRODUCT)}, forceDeactivate: force });
+    console.log(JSON.stringify(getForceDeactivate("demo") === force));
+    `,
+    { cwd: elsewhere, env: { RUN_ID: "run-1" } },
+  )) as boolean;
+  expect(registered).toBe(true);
+});
+
 test("registers the product's settling request, in the process building the config", async () => {
   const file = (path: string): string => importable(join(REPO_ROOT, path));
   const registered = (await runInChildNode(

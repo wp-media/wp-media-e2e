@@ -273,7 +273,10 @@ lives in a sibling module, unit-testable without it.
   `ProductConfig.stopRunningWork`; reported, a failure only if it won't stop — a stop that fails on a
   copy WordPress boots only without, `pluginBreaksBoot`, is reported: such a copy runs nothing; a stop
   that had to act clears `debug.log` again: what that work logged is the earlier run's); uninstall any
-  existing copy (so the install is fresh, DB footprint included) and remove by path what is left
+  existing copy (so the install is fresh, DB footprint included; a deactivation that leaves the plugin
+  active — read back, never the exit code — is forced by `ProductConfig.forceDeactivate`, else taken
+  off `active_plugins` unloaded, its deactivation hook skipped; either a warning plus a
+  `forced-deactivation` attachment) and remove by path what is left
   there — a folder WordPress no longer lists, or a listed copy whose uninstall fails (taken off
   `active_plugins` with no plugin loaded first, or `install --activate` skips its activation); a
   removal cut short leaves these (`wp/plugin-dir.ts`; a warning plus a `leftover-plugin-files`
@@ -302,7 +305,11 @@ lives in a sibling module, unit-testable without it.
   on a web request (WP Rocket's config file, Apache `.htaccess` block) is then there before the first
   step, written by the web server. It starts work that outlives it (Action Scheduler's async runner,
   preload), which WP Rocket's `stopRunningWork` (`support/background-work.ts`) handles before each
-  removal: deactivate WP Rocket so no new request loads it, then wait until none of its own
+  removal: deactivate WP Rocket so no new request loads it (forced when a plain one leaves it active,
+  ≤ 3 WP-CLI calls, said even on a quiet site: `support/deactivation.ts` lifts only its own
+  `wpconfig`/`htaccess` causes from `rocket_prevent_deactivation`, runs `deactivate_plugins()`, deletes
+  `<id>_donotdeactivaterocket`),
+  then wait until none of its own
   (`rocket*` groups) claims or `in-progress` actions, no `doing_cron` or process lock is live and
   Action Scheduler has been quiet 12 s (the shared runner lock counts only while WP Rocket is on the
   site); a claim or action older than the 65 s wait is stale (a request killed outright): warned,
@@ -313,8 +320,10 @@ lives in a sibling module, unit-testable without it.
 - **After**: stop running work (a BackWPup job, or WP Rocket's runner and preload, runs in a web
   request and would outlive the uninstall; it logs until it ends, so first); scan `debug.log` with the
   product's preset — a **PHP fatal fails the scenario** (`DebugLogFatalError`, log attached),
-  warnings/notices are logged; remove the plugin, healing what is left at its path as above — a
-  failed uninstall still **fails the scenario** (`PluginUninstallBrokenError`); sweep its database
+  warnings/notices are logged; remove the plugin, its deactivation recovered and what is left at its
+  path healed as above — a failed uninstall still **fails the scenario** (`PluginUninstallBrokenError`),
+  so does a deactivation only the unloaded last resort took (`PluginDeactivationBrokenError`; a
+  product's force taking is reported only); sweep its database
   footprint; clear the **files it left** (an uninstall keeps its data, and per-scenario reinstalls
   would fill the disk). All five always run, independently; the log verdict wins and other failures
   are logged. Having to stop work is reported; work that _won't_ stop is a failure. Leftovers neither
@@ -329,8 +338,8 @@ lives in a sibling module, unit-testable without it.
 **MUST — `src/common/hooks/**/*.hooks.ts` belongs in every product's `steps` globs.** That glob is
 the only importer: omit it and the lifecycle is _silently absent_.
 
-A product declares its `debug.log` preset (`ProductConfig.debugLog`), `stopRunningWork` and
-`settleLeftovers` (the auth setup's); the config factory registers them per process, so shared code
+A product declares its `debug.log` preset (`ProductConfig.debugLog`), `stopRunningWork`,
+`forceDeactivate` and `settleLeftovers` (the auth setup's); the config factory registers them per process, so shared code
 never imports product code (RegExps and functions
 cannot ride project metadata anyway).
 
@@ -523,7 +532,9 @@ automatically, and that verification **must not** be skipped. Mirrored as a comm
   `/tmp/e2e-inbox-*` and the identity copies it in and checks its SHA-256 (`wp/site-staging.ts`).
 - Idempotent cleanup (`ensurePluginAbsent`) and asserted removal under test (`uninstallPlugin`) both
   deactivate as their own call, then plain `wp plugin uninstall` — **never `uninstall --deactivate`**,
-  which makes the plugin's cleanup skip itself. Typed errors in `wp/errors.ts`. **"Absent" means
+  which makes the plugin's cleanup skip itself. A deactivation is read back, never trusted from its exit
+  code: `ensurePluginDeactivated(…, { forceDeactivate })` tries the product's force; only cleanup goes
+  on to its last resort (`--skip-plugins` off `active_plugins`, reported); removal under test throws. Typed errors in `wp/errors.ts`. **"Absent" means
   nothing at the plugin's path** (`wp/plugin-dir.ts`), not "WordPress lists none": cleanup removes
   what is left by path and returns it to report; removal under test fails naming it, never sweeps.
   Only the cell's own slug is inspected.
@@ -705,7 +716,7 @@ this file goes in the right `docs/` file, linked from the [Documentation map](#d
 - The config factory (`createProductConfig`) or its project pairs.
 - The metadata/credential registry (`registerPool`, `routingMetadata`) and the per-process policy
   registries (`registerDebugLogOptions`, `registerSiteResidue`, `registerSiteDbResidue`,
-  `registerSiteDataDirResolver`, `registerInstallOutputs`, `registerPrepareActivation`, `registerSettleAfterInstall`, `registerStopRunningWork`,
+  `registerSiteDataDirResolver`, `registerInstallOutputs`, `registerPrepareActivation`, `registerSettleAfterInstall`, `registerStopRunningWork`, `registerForceDeactivate`,
   `registerSettleLeftovers`).
 - Artifact directories, `RUN_ID`, the `*_ROOT` env vars.
 - The drain (`config/drain.ts`, `E2E_INTERNAL_STOP_FILE`, `drainGate`) and its escalation signals.

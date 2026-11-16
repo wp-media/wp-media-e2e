@@ -17,6 +17,7 @@ import {
   readBackgroundWork,
   staleWork,
 } from "./background-work";
+import { forceDeactivateWpRocket } from "./deactivation";
 import { WP_ROCKET_LOG_OPTIONS } from "./debug-log";
 import type { ScanDebugLogOptions } from "../../../common/wp/log";
 import { wpRocket } from "../config/wp-rocket.config";
@@ -36,8 +37,10 @@ import {
   disposeConnections,
   installKey,
   resetElevationCaches,
+  wpCli,
   wpRootDir,
 } from "../../../common/wp/exec";
+import { isPluginActive } from "../../../common/wp/plugin";
 import { findSiteDbResidue } from "../../../common/wp/db-residue";
 import { evalPhp, phpLiteral } from "../../../common/wp/php";
 import { resetOwnershipCaches } from "../../../common/wp/ownership";
@@ -72,7 +75,8 @@ import type { StopRunningWork, Transport } from "../../../common/config/types";
  * before anything else asks the site, and a logged-out page is then served from cache; the outputs
  * end the site's
  * (verified in `site`, handed over in `legacy-777`, attempted and refused for want of sudo in
- * `no-sudo`); what an earlier run left owned by the transport's user is reclaimed when its whole tree
+ * `no-sudo`); with `wp-config.php` root's (`wpconfig-root`), the deactivation WP Rocket refuses is
+ * forced and the file never touched; what an earlier run left owned by the transport's user is reclaimed when its whole tree
  * is that user's and it is no shared parent, else left with its contents untouched; and the teardown
  * leaves no declared file or database row, after a normal run or one whose plugin folder vanished.
  *
@@ -93,6 +97,7 @@ const RESIDUE: DeclaredResidue = {
   installOutputs: WP_ROCKET_INSTALL_OUTPUTS,
   prepareActivation: (transport) => writeLicencePlugin(transport),
   settleAfterInstall: "admin-request",
+  forceDeactivate: forceDeactivateWpRocket,
 };
 
 /** A scenario report that only prints. */
@@ -496,6 +501,82 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
       }
     });
 
+    // WP Rocket refuses its own deactivation while it cannot write `wp-config.php`, and WP-CLI exits 0
+    // on it: the hooks' stop and removal must force it, report it, and leave the site clean.
+    test(`${twin.stack} wpconfig-root: a refused deactivation is forced and reported, wp-config.php untouched, the site left clean`, async ({
+      playwright,
+    }) => {
+      const zip = await wpRocketZip();
+      const warnings = captureWarnings();
+      try {
+        await onVariant(
+          twin,
+          "wpconfig-root",
+          playwright.request,
+          async (transport, root) => {
+            const config = `${root}/wp-config.php`;
+            const before = fileState(twin.stack, config);
+            expect(before).toMatch(/^root:www-data 644 /);
+            const openSettleClient = await settleOpener(
+              playwright.request,
+              twin,
+            );
+            await installPluginUnderTest(
+              transport,
+              zip,
+              RESIDUE,
+              LEFT_WORK,
+              REPORT,
+              openSettleClient,
+            );
+            // Licensed, yet no `WP_CACHE`: the file is not writable.
+            expect(wpCacheLine(twin.stack, root)).toBe("");
+
+            // The premise: a plain deactivation exits 0, leaves it active and stores its refusal.
+            const plain = await wpCli(transport, [
+              "plugin",
+              "deactivate",
+              zip.slug,
+            ]);
+            expect(plain.exitCode).toBe(0);
+            expect(await isPluginActive(transport, zip.slug)).toBe(true);
+            expect(await refusalTransients(transport)).not.toEqual([]);
+
+            // The force alone: deactivated, its refusals gone.
+            await forceDeactivateWpRocket(transport, zip.slug);
+            expect(await isPluginActive(transport, zip.slug)).toBe(false);
+            expect(await refusalTransients(transport)).toEqual([]);
+
+            // Active again (activation is never refused), for the teardown to meet the refusal itself.
+            expect(
+              (await wpCli(transport, ["plugin", "activate", zip.slug]))
+                .exitCode,
+            ).toBe(0);
+            await teardownPluginUnderTest(
+              transport,
+              zip.slug,
+              WP_ROCKET_LOG_OPTIONS,
+              RESIDUE,
+              REPORT,
+              STOP,
+            );
+            // The stop forced it and said so; the removal after it found it inactive (no report of
+            // its own) and needed no last resort.
+            expect(warnings.said()).toMatch(
+              /deactivated first — forced, as a plain deactivation did not take \(`wp plugin deactivate` exited 0 but left it active\)|WP Rocket stayed active \(`wp plugin deactivate` exited 0 but left it active\), so its forced deactivation ran/,
+            );
+            expect(warnings.said()).not.toContain('"wp-rocket" stayed active');
+            expect(warnings.said()).not.toMatch(/without loading it/);
+            await expectNothingRecreated(transport, twin.stack, root);
+            expect(debugLogFatals(twin.stack, root)).toEqual([]);
+            expect(fileState(twin.stack, config)).toBe(before);
+          },
+        );
+      } finally {
+        warnings.restore();
+      }
+    });
+
     test(`${twin.stack} no-sudo: licensed, the handover attempted and refused for want of sudo`, async ({
       playwright,
     }) => {
@@ -672,7 +753,7 @@ async function onVariant(
         new Map([[installKey(site.transport), verdict]]),
       );
       const expected: IdentityState["kind"] =
-        variant === "site" ? "site" : "fallback";
+        variant === "site" || variant === "wpconfig-root" ? "site" : "fallback";
       expect((await resolveSiteIdentity(site.transport)).kind).toBe(expected);
       await work(site.transport, await wpRootDir(site.transport));
     } catch (error) {
@@ -875,6 +956,27 @@ function requireStop(stop: StopRunningWork | undefined): StopRunningWork {
   if (stop === undefined)
     throw new Error("WP Rocket declares no stopRunningWork");
   return stop;
+}
+
+/** A file's owner, mode, inode and SHA-256, read as root: what must not change. */
+function fileState(stack: TwinStack, path: string): string {
+  const stat = twinExec(stack, ["stat", "-c", "%U:%G %a %i", "--", path]);
+  const sum = twinExec(stack, ["sha256sum", "--", path]).split(" ")[0] ?? "";
+  return `${stat.trim()} ${sum}`;
+}
+
+/** The names of WP Rocket's refusal transients on the site (any user's), WordPress booted bare. */
+async function refusalTransients(transport: Transport): Promise<string[]> {
+  return JSON.parse(
+    await evalPhp(
+      transport,
+      `global $wpdb;
+      echo wp_json_encode( $wpdb->get_col( $wpdb->prepare( "SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s", '%' . $wpdb->esc_like( '_donotdeactivaterocket' ) ) ) );`,
+      "reading WP Rocket's refusal transients",
+      "twin",
+      { skipPlugins: true, skipThemes: true },
+    ),
+  ) as string[];
 }
 
 /** `user:group` of a path, read as root. */

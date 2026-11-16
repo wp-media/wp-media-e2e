@@ -22,6 +22,7 @@ import {
   registerSettleAfterInstall,
   registerSettleLeftovers,
   registerSiteDataDirResolver,
+  registerForceDeactivate,
   registerPrepareActivation,
   registerInstallOutputs,
   registerSiteDbResidue,
@@ -257,6 +258,10 @@ export function createProductConfig(
   // And for how to stop work it may still be doing on a site, which the shared teardown asks for
   // before it removes the plugin — a function, so this registry is its only possible channel.
   registerStopRunningWork(product.name, product.stopRunningWork);
+
+  // And for how to deactivate its plugin when a plain deactivation leaves it active, which the shared
+  // hooks try before their generic last resort — a function too.
+  registerForceDeactivate(product.name, product.forceDeactivate);
 
   // And for how to settle what its killed runs left, which the auth setup's preflight asks for
   // before its gates — a function too.

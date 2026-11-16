@@ -273,6 +273,16 @@ export type SiteResidue = string | SiteResidueRemoveOnly | SiteResidueFamily;
 export type PrepareActivation = (transport: Transport) => Promise<void>;
 
 /**
+ * Deactivates a plugin that a plain `wp plugin deactivate` left active, by the product's own means —
+ * see {@link ProductConfig.forceDeactivate}. Resolves once it has tried (the caller reads the state
+ * back); rejects saying why it could not.
+ */
+export type ForceDeactivate = (
+  transport: Transport,
+  slug: string,
+) => Promise<void>;
+
+/**
  * What the `@plugin` install asks of the site once the plugin is active — see
  * {@link ProductConfig.settleAfterInstall}. `"admin-request"`: one wp-admin page, then the front page,
  * over HTTP with the scenario's session.
@@ -399,11 +409,21 @@ export interface ProductConfig {
    * Declared here rather than imported by the hooks, for the same reason as {@link debugLog}. Omit
    * when the product runs nothing in the background.
    *
-   * Must settle within the hooks' allowance for it (`LEFT_WORK_ALLOWANCE_MS`, 90 s), probes
+   * Must settle within the hooks' allowance for it (`LEFT_WORK_ALLOWANCE_MS`, 100 s), probes
    * included: the install shares the Before hook with it, and a hook that times out is abandoned
    * mid-way rather than cancelled.
    */
   readonly stopRunningWork?: StopRunningWork;
+  /**
+   * How to deactivate this product's plugin when a plain `wp plugin deactivate` leaves it active: the
+   * plugin refuses from its own deactivation hook and WP-CLI still exits 0. WP Rocket refuses while
+   * `wp-config.php` is not writable (it could not unset `WP_CACHE`). The shared `@plugin` hooks try it
+   * before their generic last resort — taking the plugin off `active_plugins` without loading it, which
+   * skips its deactivation hook altogether — and report having needed either; after a scenario, the
+   * last resort fails it (a forced one does not). Must leave the plugin's
+   * own deactivation running, lifting only the refusal. Omit when a plain deactivation always takes.
+   */
+  readonly forceDeactivate?: ForceDeactivate;
   /**
    * Run by the auth setup's preflight on every real site **before its gates**: something a killed run
    * left can stop WordPress booting, and the gates would then skip every scenario — and with them the

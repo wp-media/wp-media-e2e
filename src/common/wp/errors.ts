@@ -55,6 +55,9 @@ export class PluginActivationFailedError extends Error {
 
 /** A plugin could not be deactivated (admin UI or WP-CLI). */
 export class PluginDeactivationFailedError extends Error {
+  /** What was seen, when more than "still active" is known — for a caller building on it. */
+  readonly reason: string | undefined;
+
   /**
    * @param slug - the plugin's slug.
    * @param reason - what was seen, when more than "still active" is known.
@@ -64,6 +67,7 @@ export class PluginDeactivationFailedError extends Error {
       `Plugin "${slug}" could not be deactivated${reason === undefined ? "." : `: ${reason}`}`,
     );
     this.name = "PluginDeactivationFailedError";
+    this.reason = reason;
   }
 }
 
@@ -108,6 +112,31 @@ export class PluginUninstallBrokenError extends Error {
     );
     this.name = "PluginUninstallBrokenError";
     this.uninstallError = uninstallError;
+  }
+}
+
+/**
+ * WordPress could not deactivate the plugin under test, not even through its product's forced
+ * deactivation, so cleanup took it off `active_plugins` without loading it — its deactivation hook
+ * never ran. Raised after a scenario, where the copy is the artifact under test (see
+ * `../hooks/plugin-lifecycle.ts`); before one, or in the pre-flight, the same recovery is a warning.
+ */
+export class PluginDeactivationBrokenError extends Error {
+  /** What the deactivation attempts did, as `PluginDeactivationFailedError.reason` says it. */
+  readonly refusal: string;
+
+  /**
+   * @param slug - the plugin's slug.
+   * @param refusal - what the deactivation attempts did.
+   */
+  constructor(slug: string, refusal: string) {
+    super(
+      `Plugin "${slug}" could not be deactivated by WordPress: ${refusal}\n  Cleanup took it off ` +
+        "active_plugins without loading it and removed it, so later scenarios run; its deactivation " +
+        "hook never ran, so what that hook undoes on the site is left as it is.",
+    );
+    this.name = "PluginDeactivationBrokenError";
+    this.refusal = refusal;
   }
 }
 
