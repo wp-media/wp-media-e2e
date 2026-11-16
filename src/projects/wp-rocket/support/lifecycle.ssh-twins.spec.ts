@@ -18,6 +18,9 @@ import {
   staleWork,
 } from "./background-work";
 import { forceDeactivateWpRocket } from "./deactivation";
+import { WP_ROCKET_CONFIG_EDITS } from "./config-edits";
+import { normaliseConfigEdits } from "../../../common/wp/config-edits-declaration";
+import { recordStemFor } from "../../../common/wp/config-edits";
 import { WP_ROCKET_LOG_OPTIONS } from "./debug-log";
 import type { ScanDebugLogOptions } from "../../../common/wp/log";
 import { wpRocket } from "../config/wp-rocket.config";
@@ -98,6 +101,7 @@ const RESIDUE: DeclaredResidue = {
   prepareActivation: (transport) => writeLicencePlugin(transport),
   settleAfterInstall: "admin-request",
   forceDeactivate: forceDeactivateWpRocket,
+  configEdits: normaliseConfigEdits(WP_ROCKET_CONFIG_EDITS, "wp-rocket"),
 };
 
 /** A scenario report that only prints. */
@@ -159,6 +163,7 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
           "site",
           playwright.request,
           async (transport, root) => {
+            const tracked = trackedFiles(twin.stack, root);
             // Logged in before the install, as a scenario's saved login is.
             const openSettleClient = await settleOpener(
               playwright.request,
@@ -200,11 +205,71 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
               STOP,
             );
             await expectNothingRecreated(transport, twin.stack, root);
+            expectPutBack(twin.stack, root, transport, zip.slug, tracked);
             expect(debugLogFatals(twin.stack, root)).toEqual([]);
           },
         );
       } finally {
         warnings.restore();
+      }
+    });
+
+    // A run killed mid-scenario never reaches its teardown: WP Rocket active, wp-config.php and (on
+    // Apache) .htaccess edited, the record left in /tmp. The next run's Before removes the old copy,
+    // puts the files back from that record and records anew; its teardown leaves them as first found.
+    test(`${twin.stack} site: a run killed mid-scenario is put back by the next run's record, byte for byte`, async ({
+      playwright,
+    }) => {
+      const zip = await wpRocketZip();
+      const logs: string[] = [];
+      const realLog = console.log;
+      console.log = (...args: unknown[]): void => {
+        logs.push(args.map(String).join(" "));
+      };
+      try {
+        await onVariant(
+          twin,
+          "site",
+          playwright.request,
+          async (transport, root) => {
+            const tracked = trackedFiles(twin.stack, root);
+            const killed = await settleOpener(playwright.request, twin);
+            await installPluginUnderTest(
+              transport,
+              zip,
+              RESIDUE,
+              LEFT_WORK,
+              REPORT,
+              killed,
+            );
+            expect(wpCacheLine(twin.stack, root)).toMatch(/'WP_CACHE', true/);
+            // Killed here: no teardown.
+
+            const next = await settleOpener(playwright.request, twin);
+            await installPluginUnderTest(
+              transport,
+              zip,
+              RESIDUE,
+              LEFT_WORK,
+              REPORT,
+              next,
+            );
+            expect(logs.join("\n")).toMatch(
+              /a killed run's record of the files the plugin edits was found/,
+            );
+            await teardownPluginUnderTest(
+              transport,
+              zip.slug,
+              WP_ROCKET_LOG_OPTIONS,
+              RESIDUE,
+              REPORT,
+              STOP,
+            );
+            expectPutBack(twin.stack, root, transport, zip.slug, tracked);
+          },
+        );
+      } finally {
+        console.log = realLog;
       }
     });
 
@@ -220,6 +285,7 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
         "site",
         playwright.request,
         async (transport, root) => {
+          const tracked = trackedFiles(twin.stack, root);
           // Logged in before the install, as a scenario's saved login is.
           const openSettleClient = await settleOpener(playwright.request, twin);
           await installPluginUnderTest(
@@ -254,6 +320,7 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
             STOP,
           );
           await expectNothingRecreated(transport, twin.stack, root);
+          expectPutBack(twin.stack, root, transport, zip.slug, tracked);
         },
       );
     });
@@ -429,6 +496,7 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
               "/dev/null",
               rootFile,
             ]);
+            const tracked = trackedFiles(twin.stack, root);
 
             // Logged in before the install, as a scenario's saved login is.
             const openSettleClient = await settleOpener(
@@ -494,6 +562,13 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
               STOP,
             );
             expectNoDeclaredFiles(twin.stack, root);
+            // The killed run's empty advanced-cache.php was reclaimed (handed to the site) by design.
+            expectPutBack(twin.stack, root, transport, zip.slug, {
+              ...tracked,
+              "wp-content/advanced-cache.php": (
+                tracked["wp-content/advanced-cache.php"] ?? ""
+              ).replace("ubuntu:ubuntu 644", "sftp_twin:www-data 777"),
+            });
           },
         );
       } finally {
@@ -514,6 +589,7 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
           "wpconfig-root",
           playwright.request,
           async (transport, root) => {
+            const tracked = trackedFiles(twin.stack, root);
             const config = `${root}/wp-config.php`;
             const before = fileState(twin.stack, config);
             expect(before).toMatch(/^root:www-data 644 /);
@@ -570,6 +646,7 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
             await expectNothingRecreated(transport, twin.stack, root);
             expect(debugLogFatals(twin.stack, root)).toEqual([]);
             expect(fileState(twin.stack, config)).toBe(before);
+            expectPutBack(twin.stack, root, transport, zip.slug, tracked);
           },
         );
       } finally {
@@ -588,6 +665,7 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
           "no-sudo",
           playwright.request,
           async (transport, root) => {
+            const tracked = trackedFiles(twin.stack, root);
             // Logged in before the install, as a scenario's saved login is.
             const openSettleClient = await settleOpener(
               playwright.request,
@@ -620,6 +698,7 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
               STOP,
             );
             expectNoDeclaredFiles(twin.stack, root);
+            expectPutBack(twin.stack, root, transport, zip.slug, tracked);
           },
         );
       } finally {
@@ -727,6 +806,53 @@ async function seedQueue(
     ),
   ) as { claims: number[]; actions: number[] };
   return ids;
+}
+
+/** The paths WP Rocket edits or creates beside its folder, which the teardown must leave as found. */
+const TRACKED = [
+  "wp-config.php",
+  ".htaccess",
+  "wp-content/advanced-cache.php",
+  "wp-content/cache",
+] as const;
+
+/**
+ * Each tracked path's type, owner, mode and inode, and a file's SHA-256 — or `absent` — read as root.
+ */
+function trackedFiles(stack: TwinStack, root: string): Record<string, string> {
+  return Object.fromEntries(
+    TRACKED.map((path) => [
+      path,
+      twinExec(stack, [
+        "sh",
+        "-c",
+        'if [ ! -e "$1" ] && [ ! -L "$1" ]; then echo absent; exit; fi; stat -c "%F %U:%G %a %i" -- "$1"; if [ -f "$1" ]; then sha256sum -- "$1" | cut -d" " -f1; fi',
+        "sh",
+        `${root}/${path}`,
+      ]).trim(),
+    ]),
+  );
+}
+
+/** The teardown put every tracked path back as {@link trackedFiles} saw it, and left no record (of any identity). */
+function expectPutBack(
+  stack: TwinStack,
+  root: string,
+  transport: Transport,
+  slug: string,
+  before: Record<string, string>,
+): void {
+  expect(trackedFiles(stack, root)).toEqual(before);
+  expect(
+    twinExec(stack, [
+      "sh",
+      "-c",
+      // Any identity's: the engine appends the effective uid to the stem.
+      'for d in "$1"-*; do if [ -e "$d" ]; then echo kept; exit; fi; done; echo gone',
+      "sh",
+      recordStemFor(transport, slug),
+    ]).trim(),
+  ).toBe("gone");
 }
 
 /**

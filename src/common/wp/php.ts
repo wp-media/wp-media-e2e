@@ -1,4 +1,5 @@
-import { wpCli } from "./exec";
+import { exec, wpCli } from "./exec";
+import type { ExecResult } from "./transport-exec";
 import type { Transport } from "../config/types";
 
 export { phpLiteral } from "./php-literal";
@@ -30,6 +31,13 @@ export interface EvalPhpOptions {
    * a theme's own code could stop it from running at all.
    */
   readonly skipThemes?: boolean;
+  /**
+   * Do not boot WordPress at all (`eval --skip-wordpress`): for a snippet that works on files only and
+   * must run even when WordPress cannot boot — `wp-config.php` itself put back, say. Runs as `wp`
+   * with no `--user` (there is no WordPress to log in to), in the WordPress root; `ABSPATH` is not
+   * defined. The other options are then meaningless and refused.
+   */
+  readonly skipWordPress?: boolean;
 }
 
 /**
@@ -54,6 +62,19 @@ export async function evalPhp(
   scope = "wp/php",
   options: EvalPhpOptions = {},
 ): Promise<string> {
+  if (options.skipWordPress === true) {
+    if (options.skipPlugins === true || options.skipThemes === true) {
+      throw new Error(
+        `[${scope}] ${what}: --skip-wordpress loads no plugin or theme to skip.`,
+      );
+    }
+    // `exec`, not `wpCli`: `--user` would have WP-CLI look the login up in a WordPress never booted.
+    return outputOf(
+      await exec(transport, "wp", ["eval", php, "--skip-wordpress"]),
+      what,
+      scope,
+    );
+  }
   // The flags lead the argv: WP-CLI reads global parameters before it dispatches the subcommand,
   // and one placed after the snippet would be handed to `eval` as another positional argument.
   const argv = [
@@ -62,7 +83,22 @@ export async function evalPhp(
     "eval",
     php,
   ];
-  const { stdout, stderr, exitCode } = await wpCli(transport, argv);
+  return outputOf(await wpCli(transport, argv), what, scope);
+}
+
+/**
+ * A snippet's trimmed output, or the error naming what failed.
+ *
+ * @param result - the command's result.
+ * @param what - what was being attempted.
+ * @param scope - the reporting module.
+ * @throws {@link Error} if it exited non-zero.
+ */
+function outputOf(
+  { stdout, stderr, exitCode }: ExecResult,
+  what: string,
+  scope: string,
+): string {
   if (exitCode !== 0) {
     throw new Error(
       `[${scope}] ${what} failed (exit ${String(exitCode)}): ` +

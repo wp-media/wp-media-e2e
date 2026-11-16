@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import { loadSites } from "../../../common/config/sites";
 import { stopWpRocketWork } from "../support/background-work";
+import { WP_ROCKET_CONFIG_EDITS } from "../support/config-edits";
 import { forceDeactivateWpRocket } from "../support/deactivation";
 import { WP_ROCKET_LOG_OPTIONS } from "../support/debug-log";
 import { WP_ROCKET_SITE_DB_RESIDUE } from "../support/db-residue";
@@ -74,6 +75,9 @@ export const wpRocket: ProductConfig = {
   // deactivation refuses and dies): its refusal is lifted, its deactivation still runs.
   forceDeactivate: forceDeactivateWpRocket,
   installOutputs: WP_ROCKET_INSTALL_OUTPUTS,
+  // `WP_CACHE` in wp-config.php, its .htaccess rules, an emptied advanced-cache.php and the cache
+  // folder's parent: recorded before each scenario and put back after it, by its own transforms.
+  configEdits: WP_ROCKET_CONFIG_EDITS,
   siteResidue: WP_ROCKET_SITE_RESIDUE,
   siteDbResidue: WP_ROCKET_SITE_DB_RESIDUE,
 };

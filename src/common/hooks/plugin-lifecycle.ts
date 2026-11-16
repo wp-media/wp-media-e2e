@@ -25,7 +25,15 @@ import {
   settleInstallOutputs,
 } from "../wp/install-outputs";
 import { stageAndInstallPlugin } from "../wp/staging";
+import { recordConfigEdits, restoreConfigEdits } from "../wp/config-edits";
 import {
+  blockedMessage,
+  configEditsReport,
+  unusableMessage,
+} from "../wp/config-edits-declaration";
+import type { RestoreAnswer } from "../wp/config-edits-declaration";
+import {
+  getConfigEdits,
   getForceDeactivate,
   getInstallOutputs,
   getPrepareActivation,
@@ -49,6 +57,7 @@ import type { TestInfo } from "@playwright/test";
 import type { ResolvedArtifact } from "../artifacts/types";
 import type { OpenSettleClient } from "./settle-request";
 import type {
+  ConfigEdits,
   ForceDeactivate,
   PrepareActivation,
   ResolveSiteDataDirs,
@@ -108,6 +117,11 @@ export interface DeclaredResidue {
    * `ProductConfig.forceDeactivate`; the generic last resort follows it (`ensurePluginAbsent`).
    */
   readonly forceDeactivate?: ForceDeactivate | undefined;
+  /**
+   * The files the plugin edits in place, validated — `ProductConfig.configEdits`: recorded before the
+   * scenario, put back after it ({@link recordConfigEdits}).
+   */
+  readonly configEdits?: ConfigEdits | undefined;
 }
 
 /** A product that declares neither kind of leftover; every step below then costs nothing. */
@@ -129,6 +143,7 @@ export function declaredResidue(product: string): DeclaredResidue {
     prepareActivation: getPrepareActivation(product),
     settleAfterInstall: getSettleAfterInstall(product),
     forceDeactivate: getForceDeactivate(product),
+    configEdits: getConfigEdits(product),
   };
 }
 
@@ -171,10 +186,14 @@ export const PLUGIN_TAG = "@plugin";
  *
  * Stopping the product's running work adds **one more `wp eval` to each hook** on an idle site
  * (WP Rocket's: a deactivation, a 2 s grace and a second look). One that has to act is bounded by its
- * own budgets — about 70 s at the very worst for BackWPup and WP Rocket alike — which the After
- * hook's ≈ 23 s leaves room for here. The Before hook's install does not (44–73 s
- * measured, 73 s beside another run on the same server), so it gets {@link LEFT_WORK_ALLOWANCE_MS}
- * on top of this.
+ * own budgets — {@link LEFT_WORK_ALLOWANCE_MS} at the very worst (WP Rocket's about 94 s) — which
+ * neither hook's own work leaves room for here: the Before's install is 44–73 s (73 s beside another
+ * run on the same server), the After's ≈ 23 s. So each hook gets {@link LEFT_WORK_ALLOWANCE_MS} on top
+ * of this ({@link BEFORE_HOOK_TIMEOUT_MS}, {@link AFTER_HOOK_TIMEOUT_MS}).
+ *
+ * A product declaring files it edits in place (`configEdits`) adds **one `wp eval` per hook** — the
+ * record before the install, the restore after the residue sweep — no WordPress booted, so about one
+ * round-trip (~1–5 s), well inside the margin above.
  *
  * Applied per hook — so a hang is reported as a hook timeout naming the hook, rather than as an
  * opaque scenario timeout — **and** added to the scenario's own budget by {@link extendedTimeout},
@@ -208,6 +227,13 @@ export const BEFORE_HOOK_TIMEOUT_MS =
   HOOK_TIMEOUT_MS + LEFT_WORK_ALLOWANCE_MS + SETTLE_ALLOWANCE_MS;
 
 /**
+ * The After hook's budget: the teardown, plus stopping the scenario's own work first — bounded by the
+ * same {@link LEFT_WORK_ALLOWANCE_MS} (WP Rocket's ≈ 94 s at worst beside its ≈ 23 s teardown would
+ * overrun {@link HOOK_TIMEOUT_MS} alone).
+ */
+export const AFTER_HOOK_TIMEOUT_MS = HOOK_TIMEOUT_MS + LEFT_WORK_ALLOWANCE_MS;
+
+/**
  * Cap on the `debug.log` body attached to a report, in characters. A fatal inside a loop, or one
  * raised by a hook that fires per row, turns a scenario's log into megabytes; attaching that to
  * every failing scenario bloats reports and CI artifact uploads for no diagnostic gain. ~256k
@@ -234,7 +260,7 @@ export function boundLogForAttachment(raw: string): string {
 
 /**
  * The scenario timeout a {@link PLUGIN_TAG} scenario needs: its own budget plus room for both
- * lifecycle hooks — {@link BEFORE_HOOK_TIMEOUT_MS} and {@link HOOK_TIMEOUT_MS}. Additive on purpose:
+ * lifecycle hooks — {@link BEFORE_HOOK_TIMEOUT_MS} and {@link AFTER_HOOK_TIMEOUT_MS}. Additive on purpose:
  * a scenario that asked for more time (a slow backup job) keeps every millisecond it asked for.
  *
  * @param current - the scenario's effective timeout, `testInfo.timeout`.
@@ -242,13 +268,17 @@ export function boundLogForAttachment(raw: string): string {
  * adding to it would silently impose one.
  */
 export function extendedTimeout(current: number): number {
-  return current === 0 ? 0 : current + BEFORE_HOOK_TIMEOUT_MS + HOOK_TIMEOUT_MS;
+  return current === 0
+    ? 0
+    : current + BEFORE_HOOK_TIMEOUT_MS + AFTER_HOOK_TIMEOUT_MS;
 }
 
 /**
  * Prepares a site for a scenario that tests a plugin: clears `debug.log`, stops any work an earlier
  * run left the plugin doing, removes any existing copy of the plugin — part of one WordPress no longer
- * lists included, reported when found — then installs and activates the resolved artifact.
+ * lists included, reported when found — records the files it edits in place (`residue.configEdits`,
+ * putting back first what a killed run's record holds; {@link recordConfigEdits}), then installs and
+ * activates the resolved artifact.
  *
  * The order is deliberate. Clearing **first** scopes the log to this scenario yet still captures
  * anything the stop and the removal trigger — a fatal in the outgoing plugin's uninstall procedure is
@@ -321,7 +351,8 @@ export function extendedTimeout(current: number): number {
  * @param openClient - opens an HTTP client bound to the site and the scenario's session, for the
  * settling request; opened only when the product asks for one.
  * @throws Error if the artifact's slug is unusable, if work left running would not stop, if the
- * removal, the product's `prepareActivation`, the install, asking the plugin for its runtime-named
+ * removal, recording the files the plugin edits in place (a record folder the engine will not use is
+ * only warned), the product's `prepareActivation`, the install, asking the plugin for its runtime-named
  * directories or the directory preparation fails (an undeclared one included), or
  * {@link PluginActivationFailedError} if the plugin is not active afterwards. Ownership
  * normalisation is best-effort and never throws.
@@ -364,8 +395,107 @@ export async function installPluginUnderTest(
   // A copy whose uninstall failed wrote that failure to the log just cleared. It is reported above,
   // and it belongs to the run that left the copy behind — never to this scenario, which has not begun.
   if (cleared?.cause === "uninstall-failed") await clearDebugLog(transport);
+  // With the old copy gone, so nothing re-edits them, and before anything of this install's: the
+  // state the teardown puts back. Not on a part-way reinstall, whose record is still this one.
+  await recordSiteFiles(transport, artifact.slug, residue.configEdits, report);
   await installFresh(transport, artifact, residue);
   await settleAfterInstall(residue.settleAfterInstall, openClient, report);
+}
+
+/**
+ * Records the files the product's plugin edits in place, putting back first what a killed run's
+ * record says (`../wp/config-edits.ts`), and says what that took. No command when none are declared.
+ *
+ * @param transport - the target site's transport.
+ * @param slug - the plugin under test.
+ * @param edits - the product's declaration, if any.
+ * @param report - the scenario to name and attach to, when there is one.
+ * @throws Error when recording fails: a scenario whose site cannot be put back afterwards is not run.
+ * A record folder the engine will not use (another user's, a link, open to others) is warned instead:
+ * the scenario runs, and its edits stay.
+ */
+async function recordSiteFiles(
+  transport: Transport,
+  slug: string,
+  edits: ConfigEdits | undefined,
+  report?: ScenarioReport,
+): Promise<void> {
+  if (edits === undefined) return;
+  const answer = await recordConfigEdits(transport, slug, edits);
+  if (answer.blocked !== undefined) {
+    await reportSiteFiles(
+      { warnings: [blockedMessage(answer.blocked, "before")], notes: [] },
+      "before",
+      report,
+    );
+    return;
+  }
+  report?.noteRecordTaken?.();
+  const notes: string[] = [];
+  const warnings: string[] = [];
+  if (answer.reconciled !== undefined) {
+    const said = configEditsReport(answer.reconciled, edits);
+    notes.push(
+      "a killed run's record of the files the plugin edits was found, and what only the plugin had " +
+        "changed was put back.",
+      ...said.notes,
+    );
+    warnings.push(...said.warnings);
+  }
+  if (answer.unusable !== undefined) {
+    warnings.push(unusableMessage(answer.unusable, "a killed run's"));
+  }
+  if (answer.discarded) {
+    notes.push(
+      "an unfinished record (a run killed while recording) was discarded.",
+    );
+  }
+  if (answer.swept > 0) {
+    notes.push(`${String(answer.swept)} stale record(s) of other sites swept.`);
+  }
+  if (answer.unswept > 0) {
+    warnings.push(
+      `${String(answer.unswept)} stale record(s) of other sites in /tmp could not be removed: left for a later sweep.`,
+    );
+  }
+  await reportSiteFiles({ warnings, notes }, "before", report);
+}
+
+/**
+ * Says what recording or restoring the edited files found: notes printed, warnings printed and
+ * attached (`config-edits`). Never a failure: what is left is named, and was never touched.
+ *
+ * @param said - the notes and warnings.
+ * @param when - whether the scenario is about to begin or has just ended.
+ * @param report - the scenario to name and attach to, when there is one.
+ */
+async function reportSiteFiles(
+  said: {
+    readonly warnings: readonly string[];
+    readonly notes: readonly string[];
+  },
+  when: "before" | "after",
+  report?: ScenarioReport,
+): Promise<void> {
+  const moment =
+    report === undefined
+      ? when === "before"
+        ? "before installing"
+        : "after the scenario"
+      : `${when} "${report.title}"`;
+  for (const note of said.notes) console.log(`[hooks] ${moment}, ${note}`);
+  if (said.warnings.length === 0) return;
+  const message = `[hooks] ${moment}, the files the plugin edits:\n${said.warnings
+    .map((warning) => `  - ${warning}`)
+    .join("\n")}`;
+  console.warn(message);
+  await report
+    ?.attach("config-edits", message)
+    .catch((attachError: unknown) => {
+      console.warn(
+        `[hooks] could not attach the config-edits report: ${errorMessage(attachError)}`,
+      );
+    });
 }
 
 /**
@@ -733,6 +863,13 @@ export interface ScenarioReport {
   readonly failed: boolean;
   /** Attaches a text body to the scenario's report. */
   attach(name: string, body: string): Promise<void>;
+  /** Called by the Before once it has recorded the files the plugin edits in place. */
+  noteRecordTaken?(): void;
+  /**
+   * In the teardown: whether this scenario's Before recorded those files. `false` silences the "no
+   * record" warning (a Before that failed first took none); `undefined`, unknown, keeps it.
+   */
+  readonly recordTaken?: boolean;
 }
 
 /**
@@ -758,7 +895,9 @@ export function scenarioReport(
 
 /**
  * Closes out a plugin scenario: stop whatever the plugin is still doing, judge what PHP wrote to
- * `debug.log`, remove the plugin, then clear the data it left behind.
+ * `debug.log`, remove the plugin, then clear the data it left behind — and, last, put back the files it
+ * edits in place (`residue.configEdits`, {@link restoreConfigEdits}), only once the removal succeeded:
+ * a copy still there could edit them again, so the record waits for the next Before.
  *
  * **All five duties always run, whatever the ones before them did.** That independence is the point
  * of the last two: uninstalling a plugin does not delete the files it wrote — nor should it, for a
@@ -805,7 +944,8 @@ export function scenarioReport(
  * it), {@link ensurePluginAbsent} or {@link PluginUninstallBrokenError} (the
  * plugin's own uninstall failed and its folder was removed by path: the site is clean, the plugin is
  * not), the database sweep (a footprint that survived removal, or a declaration the site refuses), or
- * a residue path that is not a usable declaration.
+ * a residue path that is not a usable declaration, or putting back the files the plugin edits in place
+ * failing to run (its record is then kept for the next Before).
  */
 export async function teardownPluginUnderTest(
   transport: Transport,
@@ -862,6 +1002,8 @@ export async function teardownPluginUnderTest(
   if (stopFailure !== undefined) keep(stopFailure.error);
 
   let uninstallFailed = false;
+  // Set inside the removal duty; an object, since a flag assigned in a closure reads as never set.
+  const removedCopy = { done: false };
   await cleanUp(async () => {
     // Reaching the last resort is the artifact under test failing to deactivate — which a user's
     // WordPress could not either: kept as a failure, after the removal it does not stop.
@@ -877,6 +1019,7 @@ export async function teardownPluginUnderTest(
     );
     try {
       const cleared = await ensurePluginAbsent(transport, slug, removal);
+      removedCopy.done = true;
       await reportClearedPluginDir(cleared, "after", report);
       // This copy is the artifact under test: healed, so later scenarios run, but WordPress could not
       // uninstall it — which a user's WordPress could not either.
@@ -894,8 +1037,62 @@ export async function teardownPluginUnderTest(
     sweepDbResidue(transport, residue.db, "after", uninstallFailed),
   );
   await cleanUp(() => sweepResidue(transport, residue.files, report));
+  // Last, on a site the plugin has left (a copy still there could edit them again): the record is then
+  // kept, for the next Before to put back. After the residue sweep, which empties `wp-content/cache`.
+  if (removedCopy.done) {
+    await cleanUp(() =>
+      restoreSiteFiles(transport, slug, residue.configEdits, report),
+    );
+  }
 
   if (failure !== undefined) throw failure;
+}
+
+/**
+ * Puts back the files the product's plugin edits in place, from the record its Before took, and says
+ * what was left (`../wp/config-edits.ts`). No command when none are declared.
+ *
+ * @param transport - the target site's transport.
+ * @param slug - the plugin under test.
+ * @param edits - the product's declaration, if any.
+ * @param report - the scenario to name and attach to.
+ * @throws Error when the restore fails to run (its record is kept for the next Before).
+ */
+async function restoreSiteFiles(
+  transport: Transport,
+  slug: string,
+  edits: ConfigEdits | undefined,
+  report: ScenarioReport,
+): Promise<void> {
+  if (edits === undefined) return;
+  const answer = await restoreConfigEdits(transport, slug, edits);
+  // A Before that failed before its record step took none: nothing of this scenario's to put back.
+  if (answer.kind === "none" && report.recordTaken === false) return;
+  await reportSiteFiles(
+    answer.kind === "restored"
+      ? configEditsReport(answer.outcomes, edits)
+      : { warnings: [restoreWarning(answer)], notes: [] },
+    "after",
+    report,
+  );
+}
+
+/**
+ * The warning for a restore that put nothing back.
+ *
+ * @param answer - the engine's answer, other than `restored`.
+ */
+function restoreWarning(
+  answer: Exclude<RestoreAnswer, { readonly kind: "restored" }>,
+): string {
+  switch (answer.kind) {
+    case "none":
+      return "no record of them was found (a reboot clears it): left as the scenario left them.";
+    case "blocked":
+      return blockedMessage(answer.dir, "after");
+    case "unusable":
+      return unusableMessage(answer.reason);
+  }
 }
 
 /**

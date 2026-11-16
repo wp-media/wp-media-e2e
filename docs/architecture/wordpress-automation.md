@@ -820,6 +820,49 @@ goes on, warned, and the step ends on its own. Undeclared: no command at all. Va
 plugin's own files, fallback's `o+rwX` grant (SSH user outside the group) makes handed-over PHP files
 world-writable.
 
+## In-place cleanup ([`wp/config-edits.ts`](../../src/common/wp/config-edits.ts))
+
+What a plugin edits in files it does not own, put back byte for byte — only where its own edits explain
+the difference. Declared as data, `ProductConfig.configEdits` (validated by
+[`config-edits-declaration.ts`](../../src/common/wp/config-edits-declaration.ts), pure, when the config
+is built): `files` (text edited in place: `operations`, each a list of `preg_replace` steps — PCRE,
+literal `replacement`, `limit`, an optional `when` read on the operation's input — and `captures`, text
+read from the file as left, inserted as `{{name}}`), `createdFiles` (`marks`), `createdDirs`. WP Rocket
+declares `WP_CACHE` and `WP_ROCKET_DEBUG` in `wp-config.php` and its `.htaccess` rules with its own
+patterns, copied verbatim (`support/config-edits.ts`).
+
+- **Record** (`recordConfigEdits`), in the `@plugin` Before once the old copy is removed: per file bytes,
+  SHA-256, mode, owner, inode; per created path whether it exists. In `/tmp/e2e-record-<16 hex of
+  sha256(installKey NUL slug)>-<euid>/` (`recordStemFor` + the engine's effective uid) — outside the
+  docroot (`wp-config.php` holds the database credentials), `0700`, files `0600`, the run identity's.
+  Anything else at that name (a link, someone else's, open to others) is **never used** — warned, the
+  scenario runs unrecorded, its edits stay (as after a reboot); remove it to resume. A record another
+  identity left (a run in `site`, the next in `fallback`) is that identity's alone: its edits stay too.
+  `meta.json` is renamed in last and removed first: a record without it is discarded. **A record
+  already there** (a killed run) is restored from first (a record step failing after that says so in
+  its error). A record failure ends the install.
+- **Restore** (`restoreConfigEdits`), the teardown's last duty, only once the plugin is removed (a copy
+  still there would re-edit; the record then waits for the next Before): candidates are the recorded
+  text with every chain of up to 4 operations; a file equal to one gets the recorded bytes in place
+  (`r+`, truncate, write: same inode and owner), its recorded mode set back; absent before → removed.
+  A path swapped since it was judged (the opened file is not the one checked, or no longer a regular
+  file before `chmod`) is not written or chmodded. A strict prefix of the recorded bytes, empty
+  included, is a put-back cut short: written back in full (`resumed`, warned) — it holds no byte the
+  record lacks. Anything else — another edit, a link, an unwritable file — is warned (`config-edits`
+  attachment) and **never touched**. An owner that changed is warned and never changed; the bytes
+  still go back (in place, so the owner found stays). A created file goes only if absent before and
+  empty or marked; a created directory only if absent before and empty. The record is removed last;
+  a restore that fails keeps it (its error names the folder) for the next Before. A record that cannot
+  be trusted (unreadable index, another root, a copy failing its SHA-256) is discarded unused and
+  warned. No record is warned only when this scenario's Before took one (`ScenarioReport.recordTaken`).
+- Both run as `wp eval --skip-wordpress` (`evalPhp`'s `skipWordPress`) through the site's identity:
+  no WordPress boot, no byte of a tracked file leaves the host or reaches a message. The record step
+  sweeps this identity's other private records untouched for 30 days (a record must outlive a killed
+  run until its site's next scenario), best-effort: one that will not go is warned, never a failure; a
+  reboot clears `/tmp`. Each adds one round-trip to its hook.
+- Not handled (warned, left): a file the run's identity cannot write — no root fallback yet — and a
+  `wp-config.php` above the root.
+
 ## Site identity ([`wp/site-identity.ts`](../../src/common/wp/site-identity.ts))
 
 Who a site's commands run as, once per install per process: `exec`/`wpCli` follow it
@@ -1003,6 +1046,9 @@ Every module asking WordPress what no WP-CLI command answers goes through here.
   on other plugins (a cleanup, a plugin that should be gone); core, `$wpdb` and the option API behave
   normally. Off by default (a running site's question needs the site as it runs). The flag leads the
   argv: WP-CLI reads globals before dispatching, and one after the snippet becomes an `eval` argument.
+- `options.skipWordPress` never boots WordPress (`eval --skip-wordpress`, through `exec`: no `--user`,
+  no `ABSPATH`; the working directory is the root) — for file work that must run even when
+  `wp-config.php` stops WordPress booting (the in-place cleanup, above).
 
 **Any value from outside this codebase — site data, scenario input, a fixture — goes through
 `phpLiteral`.** No exceptions: it is SQL injection's twin, avoidable in one line. A compile-time

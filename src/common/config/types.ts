@@ -283,6 +283,94 @@ export type ForceDeactivate = (
 ) => Promise<void>;
 
 /**
+ * When a {@link ConfigEditStep} runs, tested on the text its **operation** received (before any of
+ * its steps) — as a plugin reads a file once, then branches. A step whose condition fails leaves the
+ * text as it is. Patterns are PCRE, with
+ * `/` delimiters and flags, run by the site's PHP exactly as the plugin runs them.
+ *
+ * - `matches` / `lacks`: `pattern` matches the text somewhere / nowhere.
+ * - `differs`: the first match of `pattern` has capture `group` set — PHP's `!empty()`, so `""` and
+ *   `"0"` are unset — and not equal to `value`.
+ */
+export type ConfigEditCondition =
+  | { readonly kind: "matches" | "lacks"; readonly pattern: string }
+  | {
+      readonly kind: "differs";
+      readonly pattern: string;
+      readonly group: string;
+      readonly value: string;
+    };
+
+/** One `preg_replace` of a plugin's edit — see {@link ConfigEditOperation}. */
+export interface ConfigEditStep {
+  /** PCRE with `/` delimiters and flags. */
+  readonly pattern: string;
+  /**
+   * The text put in place of each match, **literal**: no back-references (`$1`, `\1`). `{{name}}`
+   * inserts a {@link ConfigEditCapture} read from the file as the scenario left it.
+   */
+  readonly replacement: string;
+  /** How many matches to replace, as `preg_replace`'s `limit`: `-1` for all. */
+  readonly limit: number;
+  /** Runs only when this holds; otherwise the step leaves the text as it is. */
+  readonly when?: ConfigEditCondition;
+}
+
+/**
+ * One edit the plugin makes to a file (`WP_CACHE` set to `true`, a rules block added), as the steps
+ * its own code takes, in order.
+ */
+export interface ConfigEditOperation {
+  /** A name for messages and specs, unique within its file. */
+  readonly name: string;
+  readonly steps: readonly ConfigEditStep[];
+}
+
+/**
+ * Text a plugin's edit inserts that only the edited file can tell (`.htaccess` rules built from
+ * settings): read from the file as the scenario left it — the first match of `pattern`, capture
+ * `group` — and inserted where a step's replacement names it. An operation needing a capture the file
+ * does not hold is not one the plugin made.
+ */
+export interface ConfigEditCapture {
+  readonly name: string;
+  readonly pattern: string;
+  readonly group: string;
+}
+
+/** A text file the plugin edits in place, and the edits it can make — see {@link ConfigEdits}. */
+export interface EditedFile {
+  /** Relative to the WordPress root. */
+  readonly path: string;
+  readonly operations: readonly ConfigEditOperation[];
+  readonly captures?: readonly ConfigEditCapture[];
+}
+
+/**
+ * A file the plugin creates and may leave behind emptied (WP Rocket's `advanced-cache.php`): removed
+ * after a scenario only when it was absent before, and is now empty or holds one of `marks`.
+ */
+export interface CreatedFile {
+  /** Relative to the WordPress root. */
+  readonly path: string;
+  /** Text only the plugin's own copy holds, e.g. a constant it defines. */
+  readonly marks: readonly string[];
+}
+
+/**
+ * What a plugin changes in place on a site, declared as data so the shared engine stays
+ * product-agnostic ({@link ProductConfig.configEdits}). A file the scenario left equal to its
+ * recorded bytes with any sequence of the declared operations applied (up to four) is put back byte
+ * for byte, in place.
+ */
+export interface ConfigEdits {
+  readonly files: readonly EditedFile[];
+  readonly createdFiles?: readonly CreatedFile[];
+  /** Directories (relative to the root) removed when they were absent before and are empty now. */
+  readonly createdDirs?: readonly string[];
+}
+
+/**
  * What the `@plugin` install asks of the site once the plugin is active — see
  * {@link ProductConfig.settleAfterInstall}. `"admin-request"`: one wp-admin page, then the front page,
  * over HTTP with the scenario's session.
@@ -355,6 +443,14 @@ export interface ProductConfig {
    * when the config is built. Omit when activation writes only inside the plugin's folder.
    */
   readonly installOutputs?: readonly string[];
+  /**
+   * The site files the plugin **edits in place** (`wp-config.php`, `.htaccess`), with its own
+   * transforms as data, and what it creates beside them: recorded before each `@plugin` scenario
+   * (outside the docroot) and put back after it when only those transforms explain the difference;
+   * anything else is warned about and left untouched (`../wp/config-edits.ts`). Validated when the
+   * config is built. Omit when the plugin edits no file outside its folder.
+   */
+  readonly configEdits?: ConfigEdits;
   /**
    * The data directories this product's plugin names at runtime, asked of the installed plugin after
    * every `@plugin` install and prepared like the declared ones — open to both the transport's user

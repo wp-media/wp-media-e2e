@@ -1,8 +1,10 @@
 import { isNonEmptyString, isObject } from "../guards";
+import { normaliseConfigEdits } from "../wp/config-edits-declaration";
 import { normaliseInstallOutputs } from "../wp/paths";
 import type { ScanDebugLogOptions } from "../wp/log";
 import type { SiteDbResidue } from "../wp/db-residue";
 import type {
+  ConfigEdits,
   Edition,
   ForceDeactivate,
   PrepareActivation,
@@ -215,6 +217,36 @@ export function getInstallOutputs(
   product: string,
 ): readonly string[] | undefined {
   return installOutputs.get(product);
+}
+
+// Per-process registry: product -> the files its plugin edits in place, and its own transforms.
+const configEdits = new Map<string, ConfigEdits>();
+
+/**
+ * Registers the files a product's plugin edits in place (`ProductConfig.configEdits`), for the shared
+ * hooks to record before a scenario and put back after it. Validated here, like
+ * {@link registerInstallOutputs}. Undeclared: not registered.
+ *
+ * @param product - the product's name.
+ * @param edits - `ProductConfig.configEdits`.
+ * @throws Error naming the first unusable entry.
+ */
+export function registerConfigEdits(
+  product: string,
+  edits: ConfigEdits | undefined,
+): void {
+  if (edits === undefined) return;
+  configEdits.set(product, normaliseConfigEdits(edits, product));
+}
+
+/**
+ * A product's validated in-place edits, or `undefined` when it declares none — the hooks then record
+ * nothing and run no command for them. Never throws, for the same reason as {@link getSiteResidue}.
+ *
+ * @param product - the product's name.
+ */
+export function getConfigEdits(product: string): ConfigEdits | undefined {
+  return configEdits.get(product);
 }
 
 // Per-process registry: product -> how to ask its installed plugin for the data directories it names

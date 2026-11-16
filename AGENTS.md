@@ -46,8 +46,8 @@ src/
 │   ├── pages/              # cross-product page objects (plugins, site-health) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm + warm-lines.ts its output, pin)
-│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/), raw Allure results, a stub Allure CLI and a stop at a chosen check (allure.ts), a web server serving the identity probe (probe-web-server.ts), a FIFO's blocked reader released, or fed chunk by chunk, within a deadline, or a FIFO tapped to prove nothing was written through a path (fifo.ts), a `dd` taking `conv=excl` where the runner's (BSD) lacks it (excl-dd.ts), a `.tar.gz` listed from its raw headers (tar-listing.ts), an in-process SSH server that runs what it is sent, with a recording fake `sudo` (ssh-server.ts; `denySudo` all or one `-u` user, `sudoNoise` its unresolvable-host line), the option parsing every fake `sudo` shares (fake-sudo.ts), arguments that must survive every command line (hostile-arguments.ts), the SSH twins' gate, sites, variants, `resetTwin` and the cross-worker lock `withTwin` (ssh-twins.ts: `E2E_SSH_TWINS=1`), a shell command that dies with its spawner even on SIGKILL (tether.ts; `php -S` and the SSH server's commands)
-│   └── wp/                 # WordPress over WP-CLI (exec — exec/wpCli by identity state, wpCli's `--user` in wp-user — over transport-exec, php + php-literal, staging + site-staging (the `site` state's inbox), plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, install-outputs, ownership + owner-probe, paths, cache, db, teardown, errors; site-identity + web-identity + run-as-argv: who site commands run as; sudo-noise: sudo's `unable to resolve host` line removed)
+│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, the in-place cleanup engine on local PHP (config-edits-engine + harness), a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/), raw Allure results, a stub Allure CLI and a stop at a chosen check (allure.ts), a web server serving the identity probe (probe-web-server.ts), a FIFO's blocked reader released, or fed chunk by chunk, within a deadline, or a FIFO tapped to prove nothing was written through a path (fifo.ts), a `dd` taking `conv=excl` where the runner's (BSD) lacks it (excl-dd.ts), a `.tar.gz` listed from its raw headers (tar-listing.ts), an in-process SSH server that runs what it is sent, with a recording fake `sudo` (ssh-server.ts; `denySudo` all or one `-u` user, `sudoNoise` its unresolvable-host line), the option parsing every fake `sudo` shares (fake-sudo.ts), arguments that must survive every command line (hostile-arguments.ts), the SSH twins' gate, sites, variants, `resetTwin` and the cross-worker lock `withTwin` (ssh-twins.ts: `E2E_SSH_TWINS=1`), a shell command that dies with its spawner even on SIGKILL (tether.ts; `php -S` and the SSH server's commands)
+│   └── wp/                 # WordPress over WP-CLI (exec — exec/wpCli by identity state, wpCli's `--user` in wp-user — over transport-exec, php + php-literal, staging + site-staging (the `site` state's inbox), plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, install-outputs, config-edits + config-edits-declaration (in-place cleanup), ownership + owner-probe, paths, cache, db, teardown, errors; site-identity + web-identity + run-as-argv: who site commands run as; sudo-noise: sudo's `unable to resolve host` line removed)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
     └── <product>/
@@ -56,7 +56,7 @@ src/
         ├── features/       # *.feature (Gherkin)
         ├── pages/          # page objects (+ locator-contract specs)
         ├── steps/          # product-specific steps
-        └── support/        # debug-log presets, leftover declarations (files + database), WP Rocket's licence must-use plugin, REST barriers, WP-CLI readers, the CLI-under-test runner, running-job probes and stop, site setup
+        └── support/        # debug-log presets, leftover declarations (files + database), WP Rocket's licence must-use plugin and in-place edits (its own patterns), REST barriers, WP-CLI readers, the CLI-under-test runner, running-job probes and stop, site setup
 
 orchestrator/               # runs cells in loops. Layout and design: docs/plans/orchestrator-phase-0.5-plan.md §5, §4
 │                           # suite-imports.json (suite modules it may import) + import-boundary.spec.ts; config.example.json
@@ -280,7 +280,10 @@ lives in a sibling module, unit-testable without it.
   there — a folder WordPress no longer lists, or a listed copy whose uninstall fails (taken off
   `active_plugins` with no plugin loaded first, or `install --activate` skips its activation); a
   removal cut short leaves these (`wp/plugin-dir.ts`; a warning plus a `leftover-plugin-files`
-  attachment; after a failed uninstall `debug.log` is cleared again, that fatal is an earlier run's); sweep its leftover **database
+  attachment; after a failed uninstall `debug.log` is cleared again, that fatal is an earlier run's); **record the files the
+  plugin edits in place** (`ProductConfig.configEdits`; `/tmp/e2e-record-<hex>-<euid>`, outside the
+  docroot, after putting back what a killed run's record says; a failure ends the install, a folder at
+  that name not the identity's own is warned and the scenario runs unrecorded; `wp/config-edits.ts`); sweep its leftover **database
   footprint** (`ProductConfig.siteDbResidue`: options, tables, roles, capabilities — keyed off what is
   on the site, never off whether the plugin is installed; activation's `add_role()` keeps a leftover
   role as it is); write what the product needs before activation (`ProductConfig.prepareActivation`:
@@ -325,15 +328,17 @@ lives in a sibling module, unit-testable without it.
   so does a deactivation only the unloaded last resort took (`PluginDeactivationBrokenError`; a
   product's force taking is reported only); sweep its database
   footprint; clear the **files it left** (an uninstall keeps its data, and per-scenario reinstalls
-  would fill the disk). All five always run, independently; the log verdict wins and other failures
+  would fill the disk); once the plugin is removed, **put back the files it edited in place** — only
+  what its own declared edits explain, byte for byte; anything else warned (`config-edits`), never
+  touched. All six always run, independently (the last only after a removal); the log verdict wins and other failures
   are logged. Having to stop work is reported; work that _won't_ stop is a failure. Leftovers neither
   the site's commands nor root (no elevation, `elevate: false`) could remove are reported, not failed
   ([wordpress-automation.md](docs/architecture/wordpress-automation.md#left-over-plugin-data-wpresiduets)).
   A drained scenario gets neither hook.
 - The scenario timeout is extended **additively** for both hooks (remote WP-CLI + SFTP is slow),
-  plus `LEFT_WORK_ALLOWANCE_MS` for stopping left work (every `stopRunningWork` must fit it) and
-  `SETTLE_ALLOWANCE_MS` (70 s: two 30 s requests plus the client's opening and disposal) for the
-  settling request.
+  each plus `LEFT_WORK_ALLOWANCE_MS` for stopping work (every `stopRunningWork` must fit it;
+  `BEFORE_HOOK_TIMEOUT_MS`, `AFTER_HOOK_TIMEOUT_MS`), the Before also plus `SETTLE_ALLOWANCE_MS` (70 s:
+  two 30 s requests plus the client's opening and disposal) for the settling request.
 
 **MUST — `src/common/hooks/**/*.hooks.ts` belongs in every product's `steps` globs.** That glob is
 the only importer: omit it and the lifecycle is _silently absent_.
@@ -716,7 +721,7 @@ this file goes in the right `docs/` file, linked from the [Documentation map](#d
 - The config factory (`createProductConfig`) or its project pairs.
 - The metadata/credential registry (`registerPool`, `routingMetadata`) and the per-process policy
   registries (`registerDebugLogOptions`, `registerSiteResidue`, `registerSiteDbResidue`,
-  `registerSiteDataDirResolver`, `registerInstallOutputs`, `registerPrepareActivation`, `registerSettleAfterInstall`, `registerStopRunningWork`, `registerForceDeactivate`,
+  `registerSiteDataDirResolver`, `registerInstallOutputs`, `registerConfigEdits`, `registerPrepareActivation`, `registerSettleAfterInstall`, `registerStopRunningWork`, `registerForceDeactivate`,
   `registerSettleLeftovers`).
 - Artifact directories, `RUN_ID`, the `*_ROOT` env vars.
 - The drain (`config/drain.ts`, `E2E_INTERNAL_STOP_FILE`, `drainGate`) and its escalation signals.
@@ -738,6 +743,8 @@ this file goes in the right `docs/` file, linked from the [Documentation map](#d
 - Site identity (`site-identity.ts`: states, `decideIdentityState`, `resolveSiteIdentity`,
   `asTransportUser`; `web-identity.ts`: the web probe, its sweep, `site-identity.json`;
   `run-as-argv.ts`: the sudo wrapper).
+- In-place cleanup (`config-edits.ts`: `recordConfigEdits`, `restoreConfigEdits`, `recordStemFor`, the
+  engine; `config-edits-declaration.ts`: `normaliseConfigEdits`, answers, `configEditsReport`).
 - Residue (`residue.ts`: `parseResidueDeclaration`, `SiteResidueFamily`, `resolveSiteResidue`,
   `prepareResolvedDataDirs`, `isDeclaredResidue`) and the footprint sweep (`db-residue.ts`:
   `SiteDbResidue`, `findSiteDbResidue`, `removeSiteDbResidue`, `PROTECTED_OPTIONS`, `PROTECTED_TABLES`,
