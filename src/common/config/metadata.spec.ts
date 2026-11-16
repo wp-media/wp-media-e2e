@@ -4,6 +4,7 @@ import {
   getDebugLogOptions,
   getInstallOutputs,
   getPrepareActivation,
+  getSettleAfterInstall,
   getPool,
   getSiteResidue,
   getSettleLeftovers,
@@ -12,6 +13,7 @@ import {
   registerDebugLogOptions,
   registerInstallOutputs,
   registerPrepareActivation,
+  registerSettleAfterInstall,
   registerPool,
   registerSiteResidue,
   registerSettleLeftovers,
@@ -206,5 +208,14 @@ test.describe("activation-preparer registry", () => {
     expect(getPrepareActivation("spec-prepare")).toBe(prepare);
     registerPrepareActivation("spec-no-prepare", undefined);
     expect(getPrepareActivation("spec-no-prepare")).toBeUndefined();
+  });
+});
+
+test.describe("settle-after-install registry", () => {
+  test("serves back the registered settle, and nothing for a product without", () => {
+    registerSettleAfterInstall("spec-settle", "admin-request");
+    expect(getSettleAfterInstall("spec-settle")).toBe("admin-request");
+    registerSettleAfterInstall("spec-no-settle", undefined);
+    expect(getSettleAfterInstall("spec-no-settle")).toBeUndefined();
   });
 });

@@ -24,11 +24,14 @@ import { DEFAULT_STAGING_DIR, PLUGINS_CATEGORY } from "../wp/staging";
 import {
   registerInstallOutputs,
   registerPrepareActivation,
+  registerSettleAfterInstall,
   registerSiteDataDirResolver,
   registerSiteDbResidue,
   registerSiteResidue,
   registerStopRunningWork,
 } from "../config/metadata";
+import { SETTLE_ALLOWANCE_MS } from "./settle-request";
+import type { SettleClient } from "./settle-request";
 import {
   BEFORE_HOOK_TIMEOUT_MS,
   HOOK_TIMEOUT_MS,
@@ -319,9 +322,9 @@ test.describe("extendedTimeout", () => {
 
   // The Before hook may have to stop a killed run's work before it installs, which the install's own
   // budget has no room for.
-  test("gives the Before hook the leftover-work allowance on top of a hook's budget", () => {
+  test("gives the Before hook the leftover-work and settling-request allowances on top of a hook's budget", () => {
     expect(BEFORE_HOOK_TIMEOUT_MS).toBe(
-      HOOK_TIMEOUT_MS + LEFT_WORK_ALLOWANCE_MS,
+      HOOK_TIMEOUT_MS + LEFT_WORK_ALLOWANCE_MS + SETTLE_ALLOWANCE_MS,
     );
   });
 
@@ -404,6 +407,16 @@ test.describe("declaredResidue", () => {
     );
     expect(
       declaredResidue("residue-spec-unregistered").prepareActivation,
+    ).toBeUndefined();
+  });
+
+  test("carries the product's settling request, and none for a product without", () => {
+    registerSettleAfterInstall("settle-spec-product", "admin-request");
+    expect(declaredResidue("settle-spec-product").settleAfterInstall).toBe(
+      "admin-request",
+    );
+    expect(
+      declaredResidue("residue-spec-unregistered").settleAfterInstall,
     ).toBeUndefined();
   });
 
@@ -875,6 +888,125 @@ test.describe("installPluginUnderTest — prepareActivation", () => {
   });
 });
 
+// The settling request goes to a site whose plugin is installed, active and ready — after every `wp`
+// call of the install — and only for a product that asks for it.
+test.describe("installPluginUnderTest — settling request", () => {
+  /**
+   * A client that logs its requests into the stub `wp`'s log, so they order against the `wp` calls,
+   * and lands each in wp-admin; `opened` counts how often it was opened.
+   */
+  function loggingClient(): {
+    open: () => Promise<SettleClient>;
+    opened: () => number;
+  } {
+    let opened = 0;
+    const client: SettleClient = {
+      get: (url) => {
+        appendFileSync(argvFile, `GET ${url}\n`);
+        return Promise.resolve({
+          url: () => `http://site.test${url}`,
+          status: () => 200,
+        });
+      },
+      dispose: () => Promise.resolve(),
+    };
+    return {
+      open: () => {
+        opened += 1;
+        return Promise.resolve(client);
+      },
+      opened: () => opened,
+    };
+  }
+
+  test("asks wp-admin, then the front page, after the install's last command", async () => {
+    seedInstalled();
+    const client = loggingClient();
+    await installPluginUnderTest(
+      local,
+      artifact(),
+      {
+        ...files("wp-content/uploads/data"),
+        settleAfterInstall: "admin-request",
+      },
+      undefined,
+      reportSink(),
+      client.open,
+    );
+
+    const calls = wpCalls();
+    const admin = calls.indexOf("GET /wp-admin/");
+    expect(admin).toBe(calls.length - 2);
+    expect(calls.at(-1)).toBe("GET /");
+    expect(
+      calls.findIndex((c) => c.startsWith("plugin install ")),
+    ).toBeLessThan(admin);
+    // The stub site warns about its log and ownership; the settle itself has nothing to say.
+    expect(warnings.join("\n")).not.toMatch(/settling request/);
+  });
+
+  test("a reinstall part-way settles too, with the client its caller gives", async () => {
+    const client = loggingClient();
+    await replacePluginUnderTest(
+      local,
+      artifact(),
+      { ...files(), settleAfterInstall: "admin-request" },
+      reportSink(),
+      client.open,
+    );
+    expect(wpCalls().filter((c) => c.startsWith("GET "))).toEqual([
+      "GET /wp-admin/",
+      "GET /",
+    ]);
+  });
+
+  test("a product that does not ask opens no client and sends nothing", async () => {
+    const client = loggingClient();
+    await installPluginUnderTest(
+      local,
+      artifact(),
+      files(),
+      undefined,
+      reportSink(),
+      client.open,
+    );
+    expect(client.opened()).toBe(0);
+    expect(wpCalls().some((c) => c.startsWith("GET "))).toBe(false);
+  });
+
+  test("an opted-in reinstall whose caller gave no client is warned, never failed", async () => {
+    const report = reportSink();
+    await replacePluginUnderTest(
+      local,
+      artifact(),
+      { ...files(), settleAfterInstall: "admin-request" },
+      report,
+    );
+    expect(isInstalled()).toBe(true);
+    expect(warnings.join("\n")).toMatch(/no HTTP client was given/);
+    expect(report.attached.get("settle-request")).toMatch(/no HTTP client/);
+  });
+
+  test("a failing install sends no settling request", async () => {
+    const client = loggingClient();
+    await expect(
+      installPluginUnderTest(
+        local,
+        artifact(),
+        {
+          ...files(),
+          settleAfterInstall: "admin-request",
+          prepareActivation: () => Promise.reject(new Error("refused")),
+        },
+        undefined,
+        reportSink(),
+        client.open,
+      ),
+    ).rejects.toThrow(/refused/);
+    expect(client.opened()).toBe(0);
+  });
+});
+
 test.describe("teardownPluginUnderTest", () => {
   test("removes the plugin and attaches nothing when the log is clean", async () => {
     seedInstalled();
@@ -1202,8 +1334,8 @@ test.describe("teardownPluginUnderTest — work the plugin left running", () => 
   });
 
   // The whole point of the duty: the work has to be stopped while the plugin that runs it is still
-  // there, and after the log has been judged as the scenario left it.
-  test("asks the product to stop its work after the log is judged and before the plugin is removed", async () => {
+  // there, and before the log is judged — the work logs until it ends.
+  test("asks the product to stop its work before the log is judged and before the plugin is removed", async () => {
     seedInstalled();
     const calls: StopCall[] = [];
     const report = reportSink();
@@ -1220,14 +1352,12 @@ test.describe("teardownPluginUnderTest — work the plugin left running", () => 
     expect(calls).toHaveLength(1);
     const [call] = calls;
     expect(call?.installed).toBe(true);
+    expect(call?.callsBefore).toEqual([]);
     expect(
-      call?.callsBefore.some((line) =>
+      wpCalls().some((line) =>
         /^--skip-plugins --skip-themes eval .*debug\.log/.test(line),
       ),
     ).toBe(true);
-    expect(
-      call?.callsBefore.some((line) => line.startsWith("plugin uninstall")),
-    ).toBe(false);
     // An idle site is the common case, and it says nothing.
     expect(report.attached.size).toBe(0);
     expect(warnings).toEqual([]);
@@ -1273,6 +1403,49 @@ test.describe("teardownPluginUnderTest — work the plugin left running", () => 
 
     expect(isInstalled()).toBe(false);
     expect(existsSync(leftovers)).toBe(false);
+  });
+
+  // What the scenario's work logs while the stop waits for it is the scenario's: the verdict sees it.
+  test("judges what the work logged while the stop waited for it", async () => {
+    seedInstalled();
+
+    await expect(
+      teardownPluginUnderTest(
+        local,
+        "backwpup-pro",
+        {},
+        files(),
+        reportSink(),
+        () => {
+          process.env.WP_STUB_LOG =
+            "PHP Fatal error:  logged by the work as it ended\n";
+          return Promise.resolve("a backup of job 3 was still running");
+        },
+      ),
+    ).rejects.toThrow(DebugLogFatalError);
+    expect(isInstalled()).toBe(false);
+  });
+
+  test("a fatal logged while the stop failed still outranks the stop's failure", async () => {
+    seedInstalled();
+
+    await expect(
+      teardownPluginUnderTest(
+        local,
+        "backwpup-pro",
+        {},
+        files(),
+        reportSink(),
+        () => {
+          process.env.WP_STUB_LOG = "PHP Fatal error:  the real defect\n";
+          return Promise.reject(new Error("the job would not stop"));
+        },
+      ),
+    ).rejects.toThrow(DebugLogFatalError);
+    expect(errors.join("\n")).toMatch(
+      /a cleanup step also failed.*the job would not stop/,
+    );
+    expect(isInstalled()).toBe(false);
   });
 
   test("a fatal still outranks work that would not stop", async () => {
@@ -1378,6 +1551,39 @@ test.describe("installPluginUnderTest — work an earlier run left running", () 
       `before "${SCENARIO_TITLE}"`,
     );
     expect(isActive()).toBe(true);
+  });
+
+  // What that work logged while it was left to finish (a fatal in a request whose plugin folder had
+  // gone: seen on the twins) is the earlier run's, so the log is cleared again before the install.
+  test("clears debug.log again after work it had to stop, before the stale copy is removed", async () => {
+    seedInstalled();
+
+    await installPluginUnderTest(local, artifact(), files(), {
+      stop: () => Promise.resolve("a runner was still running"),
+      report: reportSink(),
+    });
+
+    const calls = wpCalls();
+    const clears = calls.flatMap((call, i) =>
+      call.includes("@unlink") ? [i] : [],
+    );
+    expect(clears).toHaveLength(2);
+    expect(clears[1]).toBeLessThan(
+      calls.findIndex((call) => call.startsWith("plugin uninstall")),
+    );
+  });
+
+  test("clears debug.log once when the stop found nothing running", async () => {
+    seedInstalled();
+
+    await installPluginUnderTest(local, artifact(), files(), {
+      stop: () => Promise.resolve(undefined),
+      report: reportSink(),
+    });
+
+    expect(wpCalls().filter((call) => call.includes("@unlink"))).toHaveLength(
+      1,
+    );
   });
 
   // Installing over work that is still writing to the site would hand the scenario a site nobody can

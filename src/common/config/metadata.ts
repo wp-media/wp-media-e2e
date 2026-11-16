@@ -7,6 +7,7 @@ import type {
   PrepareActivation,
   ResolveSiteDataDirs,
   SiteConfig,
+  SettleAfterInstall,
   SettleLeftovers,
   SiteResidue,
   StopRunningWork,
@@ -272,6 +273,37 @@ export function getPrepareActivation(
   product: string,
 ): PrepareActivation | undefined {
   return activationPreparers.get(product);
+}
+
+// Per-process registry: product -> what its install asks of the site over HTTP once active.
+const installSettles = new Map<string, SettleAfterInstall>();
+
+/**
+ * Registers what a product's `@plugin` install asks of the site once the plugin is active
+ * (`ProductConfig.settleAfterInstall`). Called while building the config, in each process. A product
+ * that needs no request is not registered.
+ *
+ * @param product - the product's name.
+ * @param settle - its settle, or `undefined`.
+ */
+export function registerSettleAfterInstall(
+  product: string,
+  settle: SettleAfterInstall | undefined,
+): void {
+  if (settle === undefined) return;
+  installSettles.set(product, settle);
+}
+
+/**
+ * A product's settle after install, or `undefined` when it declares none — the install then makes no
+ * request. Never throws, for the same reason as {@link getSiteResidue}.
+ *
+ * @param product - the product's name.
+ */
+export function getSettleAfterInstall(
+  product: string,
+): SettleAfterInstall | undefined {
+  return installSettles.get(product);
 }
 
 // Per-process registry: product -> how to stop the work it may still be doing on a site. A function,

@@ -1,4 +1,9 @@
-import { test, expect, type APIRequest } from "@playwright/test";
+import {
+  test,
+  expect,
+  type APIRequest,
+  type APIRequestContext,
+} from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,7 +12,13 @@ import { join } from "node:path";
 import { WP_ROCKET_SITE_DB_RESIDUE } from "./db-residue";
 import { LICENCE_PLUGIN_PATH, writeLicencePlugin } from "./licence";
 import { WP_ROCKET_INSTALL_OUTPUTS, WP_ROCKET_SITE_RESIDUE } from "./residue";
+import {
+  BACKGROUND_WORK_BUDGETS,
+  readBackgroundWork,
+  staleWork,
+} from "./background-work";
 import { WP_ROCKET_LOG_OPTIONS } from "./debug-log";
+import type { ScanDebugLogOptions } from "../../../common/wp/log";
 import { wpRocket } from "../config/wp-rocket.config";
 import {
   buildArtifactPlan,
@@ -18,6 +29,7 @@ import {
   installPluginUnderTest,
   teardownPluginUnderTest,
   type DeclaredResidue,
+  type LeftWork,
   type ScenarioReport,
 } from "../../../common/hooks/plugin-lifecycle";
 import {
@@ -26,10 +38,8 @@ import {
   resetElevationCaches,
   wpRootDir,
 } from "../../../common/wp/exec";
-import {
-  findSiteDbResidue,
-  isEmptyDbResidue,
-} from "../../../common/wp/db-residue";
+import { findSiteDbResidue } from "../../../common/wp/db-residue";
+import { evalPhp, phpLiteral } from "../../../common/wp/php";
 import { resetOwnershipCaches } from "../../../common/wp/ownership";
 import {
   registerSiteIdentityVerdicts,
@@ -52,13 +62,15 @@ import {
 import { removeTempDir } from "../../../common/__fixtures__/temp-dir";
 import type { ResolvedArtifact } from "../../../common/artifacts/types";
 import type { IdentityState } from "../../../common/wp/site-identity";
-import type { Transport } from "../../../common/config/types";
+import type { StopRunningWork, Transport } from "../../../common/config/types";
 
 /**
  * WP Rocket's declarations and licence through the real `@plugin` install and teardown on the SSH
  * twins, with the zip a run would build (`E2E_PLUGIN_REF`/`E2E_PLUGIN_ZIP` honoured; APVM caches it).
- * Licensed by the must-use plugin alone, activation writes `WP_CACHE` and a logged-out page is served
- * from cache once an admin request has written the site's config file; the outputs end the site's
+ * Licensed by the must-use plugin alone, activation writes `WP_CACHE`; the install's settling request
+ * (logged in, as a scenario's) writes the site's config file and, on Apache, the `.htaccess` block
+ * before anything else asks the site, and a logged-out page is then served from cache; the outputs
+ * end the site's
  * (verified in `site`, handed over in `legacy-777`, attempted and refused for want of sudo in
  * `no-sudo`); what an earlier run left owned by the transport's user is reclaimed when its whole tree
  * is that user's and it is no shared parent, else left with its contents untouched; and the teardown
@@ -80,6 +92,7 @@ const RESIDUE: DeclaredResidue = {
   db: WP_ROCKET_SITE_DB_RESIDUE,
   installOutputs: WP_ROCKET_INSTALL_OUTPUTS,
   prepareActivation: (transport) => writeLicencePlugin(transport),
+  settleAfterInstall: "admin-request",
 };
 
 /** A scenario report that only prints. */
@@ -88,6 +101,33 @@ const REPORT: ScenarioReport = {
   failed: false,
   attach: () => Promise.resolve(),
 };
+
+/**
+ * The teardown's log scan for a test that removes the plugin's folder under requests still running
+ * (the settle's background work, the pages and sitemaps WP Rocket's preload fetches): a request
+ * booting while `rm -rf` is part-way runs a half-deleted plugin and dies inside it. Measured: `Class
+ * "ActionScheduler_Lock" not found` as Action Scheduler's runner wakes; and a `TypeError` from
+ * `Lazyload\Subscriber::__construct()` (`string given`), reproduced by deleting only
+ * `inc/Dependencies/RocketLazyload/Assets.php`: its container hands over the class name when the
+ * class cannot load — never seen with the folder intact. Any of these is the test's own doing, so a
+ * fatal raised in a file of WP Rocket's folder, or a failed `require` of one, is let through; any
+ * other fatal (core, another plugin, the database) still fails it.
+ */
+const FOLDER_LOST_LOG_OPTIONS: ScanDebugLogOptions = {
+  ...WP_ROCKET_LOG_OPTIONS,
+  ignore: [
+    ...(WP_ROCKET_LOG_OPTIONS.ignore ?? []),
+    // Raised in one of its files: `… in <file>:<line>` (uncaught) or `… in <file> on line <n>`.
+    /PHP Fatal error: .* in \/\S*\/wp-content\/plugins\/wp-rocket\/\S+\.php(?::\d+| on line \d+)$/,
+    /Failed opening required '[^']*\/wp-content\/plugins\/wp-rocket\//,
+  ],
+};
+
+/** The product's stop, as the hooks read it from the registry: before each removal of the plugin. */
+const STOP: StopRunningWork = requireStop(wpRocket.stopRunningWork);
+
+/** What the Before hook hands the install: the stop, and the scenario to report to. */
+const LEFT_WORK: LeftWork = { stop: STOP, report: REPORT };
 
 /** The resolved zip, shared by every test of the run; built (or read from APVM's cache) once. */
 let artifact: ResolvedArtifact | undefined;
@@ -114,14 +154,21 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
           "site",
           playwright.request,
           async (transport, root) => {
+            // Logged in before the install, as a scenario's saved login is.
+            const openSettleClient = await settleOpener(
+              playwright.request,
+              twin,
+            );
             await installPluginUnderTest(
               transport,
               zip,
               RESIDUE,
-              undefined,
+              LEFT_WORK,
               REPORT,
+              openSettleClient,
             );
 
+            expectSettled(twin.stack, root, warnings.said());
             expect(ownerOf(twin.stack, `${root}/${LICENCE_PLUGIN_PATH}`)).toBe(
               "www-data:www-data",
             );
@@ -145,13 +192,10 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
               WP_ROCKET_LOG_OPTIONS,
               RESIDUE,
               REPORT,
+              STOP,
             );
-            expectNoDeclaredFiles(twin.stack, root);
-            expect(
-              isEmptyDbResidue(
-                await findSiteDbResidue(transport, WP_ROCKET_SITE_DB_RESIDUE),
-              ),
-            ).toBe(true);
+            await expectNothingRecreated(transport, twin.stack, root);
+            expect(debugLogFatals(twin.stack, root)).toEqual([]);
           },
         );
       } finally {
@@ -159,6 +203,9 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
       }
     });
 
+    // The settle's requests are still running when the folder goes (Action Scheduler's runner sleeps
+    // 5 s after its last batch; preloaded pages render after their action): the teardown's stop must
+    // wait for them before it sweeps, or they re-create rows behind it.
     test(`${twin.stack} site: a run that lost the plugin folder leaves rows the teardown sweeps`, async ({
       playwright,
     }) => {
@@ -168,14 +215,17 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
         "site",
         playwright.request,
         async (transport, root) => {
+          // Logged in before the install, as a scenario's saved login is.
+          const openSettleClient = await settleOpener(playwright.request, twin);
           await installPluginUnderTest(
             transport,
             zip,
             RESIDUE,
-            undefined,
+            LEFT_WORK,
             REPORT,
+            openSettleClient,
           );
-          // A run killed before its teardown, its copy then removed by hand: no uninstall can run.
+          // The copy removed at once, under the settle's requests still running: no uninstall can run.
           twinExec(twin.stack, [
             "rm",
             "-rf",
@@ -193,18 +243,134 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
           await teardownPluginUnderTest(
             transport,
             zip.slug,
-            WP_ROCKET_LOG_OPTIONS,
+            FOLDER_LOST_LOG_OPTIONS,
             RESIDUE,
             REPORT,
+            STOP,
           );
-          expectNoDeclaredFiles(twin.stack, root);
-          expect(
-            isEmptyDbResidue(
-              await findSiteDbResidue(transport, WP_ROCKET_SITE_DB_RESIDUE),
-            ),
-          ).toBe(true);
+          await expectNothingRecreated(transport, twin.stack, root);
         },
       );
+    });
+
+    // The stop's probe against Action Scheduler's real tables, on rows shaped as its store writes them:
+    // only WP Rocket's groups count, a claim counts while it holds a pending or running action, and
+    // what is older than the wait's budget is named, never waited for.
+    test(`${twin.stack} site: the stop counts only WP Rocket's own Action Scheduler work, and names stale work without waiting`, async ({
+      playwright,
+    }) => {
+      const zip = await wpRocketZip();
+      await onVariant(twin, "site", playwright.request, async (transport) => {
+        // Action Scheduler's tables, as a real install and its settle leave them; then quiet.
+        const openSettleClient = await settleOpener(playwright.request, twin);
+        await installPluginUnderTest(
+          transport,
+          zip,
+          RESIDUE,
+          LEFT_WORK,
+          REPORT,
+          openSettleClient,
+        );
+        await STOP(transport);
+
+        // Another plugin's batch running (WooCommerce's, say): none of WP Rocket's work.
+        const other = await seedQueue(transport, [
+          { claim: 0, group: "e2e-other", status: "in-progress", ago: 0 },
+          {
+            claim: 0,
+            group: "e2e-other",
+            status: "complete",
+            ago: 0,
+            logged: true,
+          },
+        ]);
+        const before = await readBackgroundWork(transport);
+        expect(before.claims).toEqual([]);
+        expect(before.inProgress).toEqual([]);
+        expect(before.lastRunAt ?? 0).toBeLessThan(before.now - 5);
+        let started = Date.now();
+        expect(await STOP(transport)).toBeUndefined();
+        expect(Date.now() - started).toBeLessThan(
+          BACKGROUND_WORK_BUDGETS.quietMs,
+        );
+
+        // WP Rocket's own: a running batch, a batch still pending, a batch done, one left stale.
+        const stale = 120;
+        const rocket = await seedQueue(
+          transport,
+          [
+            {
+              claim: 0,
+              group: "rocket-preload",
+              status: "in-progress",
+              ago: 0,
+            },
+            { claim: 1, group: "rocket", status: "pending", ago: 0 },
+            {
+              claim: 2,
+              group: "rocket-preload",
+              status: "complete",
+              ago: 0,
+              logged: true,
+            },
+            {
+              claim: 3,
+              group: "rocket-preload",
+              status: "in-progress",
+              ago: stale,
+            },
+          ],
+          [0, 0, 0, stale],
+        );
+        const look = await readBackgroundWork(transport);
+        expect(new Set(look.claims.map((c) => c.name))).toEqual(
+          new Set([0, 1, 3].map((i) => `claim ${String(rocket.claims[i])}`)),
+        );
+        expect(look.claims.map((c) => c.name)).not.toContain(
+          `claim ${String(other.claims[0])}`,
+        );
+        expect(new Set(look.inProgress.map((a) => a.name))).toEqual(
+          new Set(
+            [0, 3].map(
+              (i) =>
+                `action ${String(rocket.actions[i])} (e2e_hook_${String(i)})`,
+            ),
+          ),
+        );
+        expect(look.lastRunAt).toBeGreaterThan(look.now - 5);
+        expect(staleWork(look, BACKGROUND_WORK_BUDGETS.drainMs)).toEqual([
+          expect.stringMatching(
+            new RegExp(
+              `^claim ${String(rocket.claims[3])}, created 1[12]\\d\\.\\d s ago$`,
+            ),
+          ),
+          expect.stringMatching(
+            new RegExp(
+              `^action ${String(rocket.actions[3])} \\(e2e_hook_3\\), started 1[12]\\d\\.\\d s ago$`,
+            ),
+          ),
+        ]);
+
+        // Only the stale batch left (what a request killed outright leaves): a warning at once.
+        await evalPhp(
+          transport,
+          `global $wpdb;
+            $wpdb->query( "DELETE FROM {$wpdb->prefix}actionscheduler_actions WHERE action_id IN (${[0, 1, 2].map((i) => String(rocket.actions[i])).join(",")})" );`,
+          "dropping the twin's live batches",
+          "twin",
+          { skipPlugins: true, skipThemes: true },
+        );
+        started = Date.now();
+        const said = await STOP(transport);
+        expect(Date.now() - started).toBeLessThan(
+          BACKGROUND_WORK_BUDGETS.quietMs,
+        );
+        expect(said).toMatch(
+          new RegExp(
+            `^WP Rocket's Action Scheduler holds work no request is running any more \\(claim ${String(rocket.claims[3])}, created .*; action ${String(rocket.actions[3])} \\(e2e_hook_3\\), started .*\\): left by a request killed outright`,
+          ),
+        );
+      });
     });
 
     test(`${twin.stack} legacy-777: new outputs handed over; ubuntu's leftover leaves reclaimed, a shared parent and a leaf holding root's file left`, async ({
@@ -259,17 +425,24 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
               rootFile,
             ]);
 
+            // Logged in before the install, as a scenario's saved login is.
+            const openSettleClient = await settleOpener(
+              playwright.request,
+              twin,
+            );
             const started = Date.now();
             await installPluginUnderTest(
               transport,
               zip,
               RESIDUE,
-              undefined,
+              LEFT_WORK,
               REPORT,
+              openSettleClient,
             );
             console.log(
               `[twin] ${twin.stack} legacy-777 install: ${String(Date.now() - started)} ms`,
             );
+            expectSettled(twin.stack, root, warnings.said());
 
             for (const output of [
               LICENCE_PLUGIN_PATH,
@@ -313,6 +486,7 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
               WP_ROCKET_LOG_OPTIONS,
               RESIDUE,
               REPORT,
+              STOP,
             );
             expectNoDeclaredFiles(twin.stack, root);
           },
@@ -333,14 +507,21 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
           "no-sudo",
           playwright.request,
           async (transport, root) => {
+            // Logged in before the install, as a scenario's saved login is.
+            const openSettleClient = await settleOpener(
+              playwright.request,
+              twin,
+            );
             await installPluginUnderTest(
               transport,
               zip,
               RESIDUE,
-              undefined,
+              LEFT_WORK,
               REPORT,
+              openSettleClient,
             );
 
+            expectSettled(twin.stack, root, warnings.said());
             expect(wpCacheLine(twin.stack, root)).toMatch(/'WP_CACHE', true/);
             expect(ownerOf(twin.stack, `${root}/wp-content/cache`)).toBe(
               "ubuntu:ubuntu",
@@ -355,6 +536,7 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
               WP_ROCKET_LOG_OPTIONS,
               RESIDUE,
               REPORT,
+              STOP,
             );
             expectNoDeclaredFiles(twin.stack, root);
           },
@@ -392,6 +574,78 @@ async function wpRocketZip(): Promise<ResolvedArtifact> {
   }
   artifact = outcome.artifact;
   return artifact;
+}
+
+/** One action to seed: its claim (by index into the claims seeded), group, status and age. */
+interface SeededAction {
+  readonly claim: number;
+  readonly group: string;
+  readonly status: "pending" | "in-progress" | "complete";
+  /** Seconds since its last attempt (and its scheduled time, a second earlier). */
+  readonly ago: number;
+  /** Whether a log line records it, at its last attempt: a finished action's. */
+  readonly logged?: boolean;
+}
+
+/**
+ * Writes Action Scheduler rows straight into its tables, as its database store writes them (a claim's
+ * creation time; an action's group, status, claim and last attempt; a log line), with no plugin loaded
+ * so no runner picks them up. Hooks are `e2e_hook_<index>`.
+ *
+ * @param actions - the actions, in order.
+ * @param claimAges - each claim's age in seconds; one claim (age 0) when omitted.
+ * @returns the ids of the claims and actions, in order.
+ */
+async function seedQueue(
+  transport: Transport,
+  actions: readonly SeededAction[],
+  claimAges: readonly number[] = [0],
+): Promise<{ claims: number[]; actions: number[] }> {
+  const ids = JSON.parse(
+    await evalPhp(
+      transport,
+      `global $wpdb;
+      $p      = $wpdb->prefix;
+      $at     = function ( $ago ) { return gmdate( 'Y-m-d H:i:s', time() - $ago ); };
+      $claims = [];
+      foreach ( ${phpLiteral([...claimAges])} as $ago ) {
+        $wpdb->insert( "{$p}actionscheduler_claims", [ 'date_created_gmt' => $at( $ago ) ] );
+        $claims[] = (int) $wpdb->insert_id;
+      }
+      $ids = [];
+      foreach ( ${phpLiteral(actions.map((a) => ({ ...a, logged: a.logged === true })))} as $i => $a ) {
+        $group = $wpdb->get_var( $wpdb->prepare( "SELECT group_id FROM {$p}actionscheduler_groups WHERE slug = %s", $a['group'] ) );
+        if ( null === $group ) {
+          $wpdb->insert( "{$p}actionscheduler_groups", [ 'slug' => $a['group'] ] );
+          $group = $wpdb->insert_id;
+        }
+        $wpdb->insert( "{$p}actionscheduler_actions", [
+          'hook'                 => 'e2e_hook_' . $i,
+          'status'               => $a['status'],
+          'scheduled_date_gmt'   => $at( $a['ago'] + 1 ),
+          'scheduled_date_local' => $at( $a['ago'] + 1 ),
+          'args'                 => '[]',
+          'group_id'             => (int) $group,
+          'attempts'             => 'pending' === $a['status'] ? 0 : 1,
+          'last_attempt_gmt'     => $at( $a['ago'] ),
+          'last_attempt_local'   => $at( $a['ago'] ),
+          'claim_id'             => $claims[ $a['claim'] ],
+        ] );
+        $ids[] = (int) $wpdb->insert_id;
+        if ( $a['logged'] ) {
+          $wpdb->insert( "{$p}actionscheduler_logs", [ 'action_id' => $wpdb->insert_id, 'message' => 'action complete via e2e', 'log_date_gmt' => $at( $a['ago'] ), 'log_date_local' => $at( $a['ago'] ) ] );
+        }
+        if ( '' !== $wpdb->last_error ) {
+          WP_CLI::error( $wpdb->last_error );
+        }
+      }
+      echo wp_json_encode( [ 'claims' => $claims, 'actions' => $ids ] );`,
+      "seeding the twin's Action Scheduler rows",
+      "twin",
+      { skipPlugins: true, skipThemes: true },
+    ),
+  ) as { claims: number[]; actions: number[] };
+  return ids;
 }
 
 /**
@@ -435,27 +689,15 @@ async function onVariant(
 }
 
 /**
- * Logs in, loads wp-admin (WP Rocket writes the site's config file on an admin request), then asks
- * for the front page twice logged out: both carry WP Rocket's footer and a cached copy exists.
+ * Asks for the front page twice logged out: both carry WP Rocket's footer and a cached copy exists.
+ * No admin request of its own: the install's settling request wrote the config file caching needs.
  */
 async function expectCaching(
   twin: TwinCell,
   request: APIRequest,
   root: string,
 ): Promise<void> {
-  const site = twinSite(twin);
-  const admin = await request.newContext({ baseURL: site.baseURL });
-  try {
-    await admin.post("/wp-login.php", {
-      form: { log: site.username, pwd: site.password, testcookie: "1" },
-      headers: { Cookie: "wordpress_test_cookie=WP%20Cookie%20check" },
-    });
-    const dashboard = await admin.get("/wp-admin/");
-    expect(new URL(dashboard.url()).pathname).toMatch(/^\/wp-admin\//);
-  } finally {
-    await admin.dispose();
-  }
-  const visitor = await request.newContext({ baseURL: site.baseURL });
+  const visitor = await request.newContext({ baseURL: twinSite(twin).baseURL });
   try {
     for (let i = 0; i < 2; i += 1) {
       expect(await (await visitor.get("/")).text()).toContain(FOOTER);
@@ -472,6 +714,104 @@ async function expectCaching(
     "+0",
   ]);
   expect(cached.trim()).not.toBe("");
+}
+
+/**
+ * Logs in as the twin's administrator the way the auth setup does — the login POST alone, its
+ * redirect to wp-admin not followed (that GET would run the plugin's `admin_init` and do the settle's
+ * work for it) — and returns an opener for the settling request's client: a fresh context from that
+ * saved session, as the Before hook opens one from a scenario's `storageState`.
+ */
+async function settleOpener(
+  request: APIRequest,
+  twin: TwinCell,
+): Promise<() => Promise<APIRequestContext>> {
+  const site = twinSite(twin);
+  const login = await request.newContext({ baseURL: site.baseURL });
+  let session: Awaited<ReturnType<APIRequestContext["storageState"]>>;
+  try {
+    const answer = await login.post("/wp-login.php", {
+      form: { log: site.username, pwd: site.password, testcookie: "1" },
+      headers: { Cookie: "wordpress_test_cookie=WP%20Cookie%20check" },
+      maxRedirects: 0,
+    });
+    expect(answer.status()).toBe(302);
+    session = await login.storageState();
+  } finally {
+    await login.dispose();
+  }
+  expect(
+    session.cookies.some((cookie) =>
+      cookie.name.startsWith("wordpress_logged_in_"),
+    ),
+  ).toBe(true);
+  return () =>
+    request.newContext({ baseURL: site.baseURL, storageState: session });
+}
+
+/**
+ * Right after the install, whose settling request is the only one the site has had since its login (a
+ * POST whose redirect was not followed, sent before the plugin was installed): what only an admin
+ * request writes is there — the site's config file, and on Apache the `.htaccess` block — written by the web
+ * server (`www-data`), and the settle warned nothing.
+ */
+function expectSettled(stack: TwinStack, root: string, said: string): void {
+  expect(said).not.toMatch(/settling request/);
+  const configs = twinExec(stack, [
+    "find",
+    `${root}/wp-content/wp-rocket-config`,
+    "-maxdepth",
+    "1",
+    "-name",
+    "*.php",
+    "-printf",
+    "%u %f\\n",
+  ]).trim();
+  expect(configs).toMatch(/^www-data \S+\.php$/m);
+  if (stack === "apache") {
+    expect(
+      twinExec(stack, [
+        "grep",
+        "-c",
+        "# BEGIN WP Rocket",
+        `${root}/.htaccess`,
+      ]).trim(),
+    ).toBe("1");
+  }
+}
+
+/**
+ * After the teardown, once anything still running would have finished (the stop's quiet window):
+ * no declared file or database row is back. A request the teardown raced writes them after its
+ * sweep (measured on nginx: `_transient_wpr_dynamic_lists`).
+ */
+async function expectNothingRecreated(
+  transport: Transport,
+  stack: TwinStack,
+  root: string,
+): Promise<void> {
+  expectNoDeclaredFiles(stack, root);
+  await new Promise((resolve) =>
+    setTimeout(resolve, BACKGROUND_WORK_BUDGETS.quietMs),
+  );
+  expectNoDeclaredFiles(stack, root);
+  // Compared whole, so a failure names what came back.
+  expect(await findSiteDbResidue(transport, WP_ROCKET_SITE_DB_RESIDUE)).toEqual(
+    { options: [], tables: [], roles: [], capabilities: [] },
+  );
+}
+
+/** The fatal lines of the site's `debug.log`, read as root; none when there is no log. */
+function debugLogFatals(stack: TwinStack, root: string): string[] {
+  return twinExec(stack, [
+    "sh",
+    "-c",
+    'if [ -f "$1" ]; then grep "PHP Fatal" "$1" || true; fi',
+    "d",
+    `${root}/wp-content/debug.log`,
+  ])
+    .split("\n")
+    .filter((line) => line !== "");
 }
 
 /** Asserts no declared residue path is left: the cache folders, the config folder, the licence. */
@@ -528,6 +868,13 @@ function twinExec(stack: TwinStack, argv: readonly string[]): string {
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 30_000,
   });
+}
+
+/** The product's stop, which it must declare: the settling request starts work that outlives it. */
+function requireStop(stop: StopRunningWork | undefined): StopRunningWork {
+  if (stop === undefined)
+    throw new Error("WP Rocket declares no stopRunningWork");
+  return stop;
 }
 
 /** `user:group` of a path, read as root. */

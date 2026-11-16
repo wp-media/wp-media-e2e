@@ -470,7 +470,8 @@ only lines matching these (a plugin's path); `raw` is always the whole log.
 
 Presets in `src/projects/<product>/support/debug-log.ts`: `*_LOG_OPTIONS` scans every source;
 `*_OWN_LOG_OPTIONS` only that plugin (BackWPup matches Free and Pro paths; only the installed
-edition's appears).
+edition's appears). Their one `ignore`: WP Rocket's harmless table-creation race on its own tables
+(`WP_ROCKET_TABLE_CREATE_RACE`: `Table '<prefix>wpr_…' already exists for query CREATE TABLE`).
 
 **Most scenarios need none of this**: a product declares its preset as `ProductConfig.debugLog` and
 the `@plugin` hooks clear the log before a scenario and fail it on a fatal, log attached (see

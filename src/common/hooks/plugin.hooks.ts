@@ -25,9 +25,10 @@ import {
  * clean including the **files** the plugin wrote, which its own uninstall keeps. Work the plugin is
  * still doing is stopped before each removal: before the install, work a killed run left behind;
  * afterwards, the scenario's own. A scenario the drain skipped (`config/drain.ts`) is left alone.
- * Neither the edition nor the product is named here: the slug comes from the resolved artifact and
- * the product policy from the product's own config, so one hook pair serves `backwpup`,
- * `backwpup-pro` and `wp-rocket` alike.
+ * A product that asks for it (`ProductConfig.settleAfterInstall`) also gets a settling request —
+ * wp-admin, then the front page — once its plugin is active. Neither the edition nor the product is
+ * named here: the slug comes from the resolved artifact and the product policy from the product's own
+ * config, so one hook pair serves `backwpup`, `backwpup-pro` and `wp-rocket` alike.
  *
  * **This file must be listed in every product's `steps` globs.** A hook file outside them is
  * never imported, so its hooks register silently and the lifecycle simply never runs — the
@@ -42,7 +43,14 @@ Before(
     tags: PLUGIN_TAG,
     timeout: BEFORE_HOOK_TIMEOUT_MS,
   },
-  async ({ site, pluginArtifact, $testInfo }) => {
+  async ({
+    site,
+    pluginArtifact,
+    $testInfo,
+    playwright,
+    baseURL,
+    storageState,
+  }) => {
     // Playwright times a scenario and its hooks against one clock, so make room for both hooks
     // before spending any of the budget.
     $testInfo.setTimeout(extendedTimeout($testInfo.timeout));
@@ -54,6 +62,10 @@ Before(
       declaredResidue(product),
       leftWorkOf(product, report),
       report,
+      // The settling request's client: the bound site with the scenario's session (an empty one for
+      // `@noauth`). A request context, not the browser `context`, so a scenario without a page still
+      // launches no browser; opened only for a product that asks for the request.
+      () => playwright.request.newContext({ baseURL, storageState }),
     );
   },
 );
