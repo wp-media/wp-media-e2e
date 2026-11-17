@@ -13,6 +13,7 @@ import {
   REAL_STOP_DEACTIVATION,
   staleWork,
   stopWpRocketWork,
+  stopWpRocketWorkReport,
   workInFlight,
   type BackgroundWork,
   type BackgroundWorkDeps,
@@ -743,5 +744,59 @@ test.describe("deactivateForStop", () => {
     expect(REAL_DEPS.deactivate).toBe(deactivateForStop);
     expect(REAL_STOP_DEACTIVATION.deactivatePlainly).toBe(deactivatePlainly);
     expect(REAL_STOP_DEACTIVATION.force).toBe(forceDeactivateWpRocket);
+  });
+});
+
+test.describe("stopWpRocketWorkReport", () => {
+  test("names the deactivation it made, typed: plain, forced, or none when WP Rocket was not loaded", async () => {
+    const quiet = [work(), work({ listed: false })];
+    const plain = fakeSite(quiet);
+    expect(
+      await stopWpRocketWorkReport(
+        TRANSPORT,
+        BACKGROUND_WORK_BUDGETS,
+        plain.deps,
+      ),
+    ).toEqual({ said: undefined, deactivation: { kind: "plain" } });
+
+    const forced = fakeSite(quiet, FORCED);
+    const report = await stopWpRocketWorkReport(
+      TRANSPORT,
+      BACKGROUND_WORK_BUDGETS,
+      forced.deps,
+    );
+    expect(report.deactivation).toBe(FORCED);
+    expect(report.said).toBe(forcedNote(FORCED, true));
+
+    const absent = fakeSite([work({ listed: false, present: false })]);
+    expect(
+      await stopWpRocketWorkReport(
+        TRANSPORT,
+        BACKGROUND_WORK_BUDGETS,
+        absent.deps,
+      ),
+    ).toEqual({ said: undefined, deactivation: undefined });
+    expect(absent.log).not.toContain("deactivate");
+  });
+
+  test("says what stopWpRocketWork says, for the same site", async () => {
+    const script = [
+      work({ claims: [claim(4, 999)] }),
+      work({ listed: false, claims: [claim(4, 999)] }),
+      work({ listed: false, now: 1003 }),
+    ];
+    const said = await stopWpRocketWork(
+      TRANSPORT,
+      BACKGROUND_WORK_BUDGETS,
+      fakeSite(script, FORCED).deps,
+    );
+    const report = await stopWpRocketWorkReport(
+      TRANSPORT,
+      BACKGROUND_WORK_BUDGETS,
+      fakeSite(script, FORCED).deps,
+    );
+    expect(said).toBeDefined();
+    expect(report.said).toBe(said);
+    expect(report.deactivation).toBe(FORCED);
   });
 });

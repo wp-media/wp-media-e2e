@@ -28,7 +28,7 @@ src/
 ├── projects/products.ts          # the one product list (see "Adding a product" below)
 └── projects/<product>/
     ├── config/<product>.config.ts   # ProductConfig + sites.json/sites.*.json/sites.example.json
-    ├── fixtures.ts                  # this product's test instance: common's + its page objects
+    ├── fixtures.ts                  # this product's test instance: common's + its page objects or scenario state
     ├── features/**/*.feature        # this product's scenarios
     ├── pages/**/*.ts                # this product's page objects (+ their locator specs)
     ├── steps/**/*.ts                # this product's steps
@@ -63,7 +63,7 @@ step or the example sites file.
 
 Import `Given`, `When`, `Then`, `Before`, `After`, … from a `fixtures.ts`, **never** from
 `playwright-bdd`, so they bind to the extended test instance: your product's `fixtures.ts` if it has one
-(BackWPup does), giving steps its page objects; `common/fixtures.ts` only for product-agnostic steps and
+(BackWPup and WP Rocket do), giving steps its page objects; `common/fixtures.ts` only for product-agnostic steps and
 hooks.
 
 | Fixture            | Scope      | What it gives you                                                                                                                                                                                                                                                       |
@@ -97,6 +97,25 @@ await stageAndInstallPlugin(site.transport, artifact.zipPath, {
 > filesystem; on
 > `ssh`/`docker` the remote `wp` cannot see it, so it must be copied over first — what
 > `stageAndInstallPlugin` does (`stageArtifact` for other files).
+
+### WP Rocket's fixtures
+
+[`src/projects/wp-rocket/fixtures.ts`](../../src/projects/wp-rocket/fixtures.ts) adds **`visitor`**
+([`support/visitor.ts`](../../src/projects/wp-rocket/support/visitor.ts)): a visitor who is not logged
+in (WP Rocket caches no logged-in user by default), asking the bound site for pages over HTTP with a
+fresh client per visit; `open` records the visit, `peek` does not. Each visit's WP Rocket footprint is
+read by [`support/footprint.ts`](../../src/projects/wp-rocket/support/footprint.ts): `none`,
+`generated`, or `cached` — only the cache file's copy carries ` - Debug: cached@<time>`, so "served
+from cache" is never judged by timing. **An anonymous client needs an explicit empty
+`storageState`:** inside a test, `playwright.request.newContext` takes the project's `use` options,
+the scenario's saved login included (measured: the admin bar in the page). **`pageCache`** holds when this install happened
+(the main file's mtime, `support/install-time.ts`), read by the page-cache premise: a `cached@` older
+than it is a copy an earlier run left, never this install's.
+
+WP Rocket's debug log: within 2 min of a deactivation, a PHP-FPM worker may log two `include(): Failed
+to open stream` warnings per request for the deleted `wp-rocket-config/<host>.php` (WP Rocket tests it
+with `realpath()`, answered from PHP's realpath cache): warnings, never failures; back-to-back WP Rocket
+`@plugin` scenarios show them.
 
 ### BackWPup's fixtures
 

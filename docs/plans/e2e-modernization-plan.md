@@ -1,8 +1,8 @@
 # E2E Modernization Plan — `wp-rocket-e2e` → `wp-media-e2e`
 
-- Status: Phases 0–5 and 7 (terminal output, done 2026-11-01) done. **Next: Phase 12 — run as the
-  site** ([phase-12 plan](phase-12-site-identity-plan.md)), then Phase 11 — shared SSH server
-  profiles (open). The rest of Phase 6 (6H–6K) follows in
+- Status: Phases 0–5, 7 (terminal output, done 2026-11-01) and 12 (run as the site, done
+  2026-11-17, [phase-12 plan](phase-12-site-identity-plan.md)) done. **Next: Phase 11 — shared SSH
+  server profiles** (open). The rest of Phase 6 (6H–6K) follows in
   the [phase-6 plan](phase-6-feature-porting-plan.md). Phase 10 open. Phase 8 dropped. Phase 9 moved
   to the [orchestrator plan](orchestrator-plan.md). WP Rocket's port starts after Phase 10.
 - Merged in, both done: plugin artifacts (§7) and site file ownership (§8), formerly plans of their
@@ -28,9 +28,10 @@
   files the suite installs on a site are handed back to the site's own owner (§8).
 - Terminal output (Phase 7, done): one renderer for the suite and the orchestrator — live block and
   table on a terminal, plain stable lines piped, `E2E_OUTPUT=auto|plain|fancy`.
-- Next: Phase 12 — run as the site ([phase-12 plan](phase-12-site-identity-plan.md)): every site
+- Run as the site (Phase 12, done; [phase-12 plan](phase-12-site-identity-plan.md)): every site
   command runs as the web server's user and group through `sudo`, every `wp` call as the site's
-  WordPress admin (`--user`), with warned fallbacks. Then Phase 11 — shared SSH server profiles: a site may omit `host`, `username`, `privateKeyPath`
+  WordPress admin (`--user`), with warned fallbacks; WP Rocket's lifecycle and first `@plugin`
+  scenario. Next: Phase 11 — shared SSH server profiles: a site may omit `host`, `username`, `privateKeyPath`
   and `port`, while `rootDir` stays per site. Phase 6 resumes at 6H after it; Phase 10 (dependency check, cleanup)
   and WP Rocket's port (parity matrix, §4) follow.
 
@@ -319,8 +320,8 @@ Open, for WP Rocket's port:
 | 8 CI on real cells | dropped | below |
 | 9 Orchestrator | moved | orchestrator plan |
 | 10 Cleanup & validation | open | below |
-| 11 Shared SSH server profiles | after Phase 12 | below |
-| 12 Run as the site | in progress (12.1–12.10 done) | [phase-12 plan](phase-12-site-identity-plan.md) |
+| 11 Shared SSH server profiles | next (open) | below |
+| 12 Run as the site | done 2026-11-17 | [phase-12 plan](phase-12-site-identity-plan.md) |
 | WP Rocket port | after Phase 10 | phase-6 plan, "After Phase 10 — WP Rocket" |
 
 Phase 10 states no dependencies, effort or parallelism; Phase 11 states its own below.

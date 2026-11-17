@@ -8,7 +8,8 @@ Operating guide for AI agents (and humans) in this repository. Read it first, th
 End-to-end (E2E) tests for WP Media plugins: WP Rocket (performance), BackWPup (backups) and Imagify
 (image optimization), on **Playwright** (browser) and **Cucumber** (BDD).
 
-> **Current state:** WP Rocket and BackWPup run. Imagify is planned, not wired up — add it under
+> **Current state:** WP Rocket and BackWPup run (WP Rocket: its page cache from activation to removal,
+> on the SSH twins; no real WP Rocket cell yet). Imagify is planned, not wired up — add it under
 > `src/projects/` when work begins
 > ([authoring-tests.md → Adding a product](docs/guides/authoring-tests.md#adding-a-product)).
 
@@ -52,11 +53,11 @@ src/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
     └── <product>/
         ├── config/         # <product>.config.ts + sites.json / sites.*.json / sites.example.json
-        ├── fixtures.ts     # this product's test instance: common's + its page objects
+        ├── fixtures.ts     # this product's test instance: common's + its page objects or scenario state
         ├── features/       # *.feature (Gherkin)
         ├── pages/          # page objects (+ locator-contract specs)
         ├── steps/          # product-specific steps
-        └── support/        # debug-log presets, leftover declarations (files + database), WP Rocket's licence must-use plugin and in-place edits (its own patterns), REST barriers, WP-CLI readers, the CLI-under-test runner, running-job probes and stop, site setup
+        └── support/        # debug-log presets, leftover declarations (files + database), WP Rocket's licence must-use plugin and in-place edits (its own patterns), WP Rocket's anonymous HTTP visitor, page-cache footprint, `WP_CACHE`, deactivation-cause and uninstall-leftover checks, REST barriers, WP-CLI readers, the CLI-under-test runner, running-job probes and stop, site setup
 
 orchestrator/               # runs cells in loops. Layout and design: docs/plans/orchestrator-phase-0.5-plan.md §5, §4
 │                           # suite-imports.json (suite modules it may import) + import-boundary.spec.ts; config.example.json
@@ -224,6 +225,13 @@ generation fails. Shared fixtures:
 | `storageState` (override) | —      | The bound site's saved login, or an empty session for `@noauth`.                                                          |
 | device options (override) | —      | `viewport` / `userAgent` / `isMobile` / `hasTouch` / `deviceScaleFactor`: the `@mobile` profile, else desktop.            |
 
+WP Rocket's [`fixtures.ts`](src/projects/wp-rocket/fixtures.ts) adds `visitor`: a logged-out visitor
+asking for pages over HTTP, each visit's WP Rocket footprint read (`support/footprint.ts`: only a page
+served from its cache file carries `cached@<time>`), and `pageCache` (when this install happened: a
+cached copy dated before it is an earlier run's). Inside a test, `playwright.request.newContext`
+takes the project's `use` options, **the saved login included**: pass an empty `storageState` for an
+anonymous client.
+
 BackWPup's [`fixtures.ts`](src/projects/backwpup/fixtures.ts) adds page objects and scenario state —
 what each does: [authoring-tests.md → BackWPup's
 fixtures](docs/guides/authoring-tests.md#backwpups-fixtures). Rules to know before using them:
@@ -287,8 +295,8 @@ lives in a sibling module, unit-testable without it.
   footprint** (`ProductConfig.siteDbResidue`: options, tables, roles, capabilities — keyed off what is
   on the site, never off whether the plugin is installed; activation's `add_role()` keeps a leftover
   role as it is); write what the product needs before activation (`ProductConfig.prepareActivation`:
-  WP Rocket's dummy-licence must-use plugin, `support/licence.ts`, declared as residue; a failure
-  ends the install; `wp-config.php` never edited); note which **install outputs** exist
+  WP Rocket's dummy-licence must-use plugin, `support/licence.ts`, declared as residue — a `mu-plugins`
+  folder it had to create stays, empty, after the teardown; a failure ends the install; `wp-config.php` never edited); note which **install outputs** exist
   (`ProductConfig.installOutputs`: what activation writes outside the plugin's folder; one batched
   check, none when undeclared); stage
   and install the cell's artifact with `--activate`, its files handed to the **site's** ownership;
@@ -688,9 +696,9 @@ history:
 - [`phase-6-feature-porting-plan.md`](docs/plans/phase-6-feature-porting-plan.md) — feature porting
   (BackWPup first); supersedes the parent plan's Phase 6.
 - [`phase-12-site-identity-plan.md`](docs/plans/phase-12-site-identity-plan.md) — every site command
-  as the web server's identity (`sudo -u/-g`), `wp --user=<admin>`, warned fallbacks: built and
-  rolled out (Part A done: `"auto"` the default, both `pro` cells live). Part B, next, readies WP
-  Rocket's lifecycle.
+  as the web server's identity (`sudo -u/-g`), `wp --user=<admin>`, warned fallbacks, and WP Rocket's
+  lifecycle (licence, settle, forced deactivation, in-place cleanup, its first `@plugin` scenario):
+  done; its decisions and facts.
 - [`orchestrator-plan.md`](docs/plans/orchestrator-plan.md) — the orchestrator, a long-running service
   running cells on a server (supersedes the parent plan's Phase 9); includes Phase 0 (done): the run
   contract and each suite change's decision.

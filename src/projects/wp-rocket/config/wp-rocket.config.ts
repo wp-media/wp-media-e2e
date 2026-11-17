@@ -52,6 +52,8 @@ export const wpRocket: ProductConfig = {
   features: "src/projects/wp-rocket/features/**/*.feature",
   steps: [
     "src/common/fixtures.ts",
+    // This product's test instance (its scenario state): steps bound to it fail to generate without it.
+    "src/projects/wp-rocket/fixtures.ts",
     // Shared scenario hooks (e.g. the plugin lifecycle). Hooks only register when their file is
     // imported, and this glob is the only thing that imports them — omit it and the hooks are
     // silently absent rather than failing.

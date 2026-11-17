@@ -28,6 +28,11 @@ export const WP_ROCKET_TABLE_CREATE_RACE = new RegExp(
  * so a fatal triggered anywhere still surfaces. Add patterns to `ignore` for lines confirmed
  * benign from real test runs — discovered from output, not guessed.
  *
+ * Expected, not ignored (warnings never fail a scenario): within 2 min of a deactivation deleting
+ * `wp-rocket-config/<host>.php`, a PHP-FPM worker that had resolved it logs two `include(): Failed to
+ * open stream` warnings per request — WP Rocket tests the file with `realpath()`, which PHP answers from
+ * its realpath cache (`realpath_cache_ttl`, 120 s). Back-to-back WP Rocket `@plugin` scenarios show them.
+ *
  * @example
  * ```ts
  * const scan = await scanDebugLog(transport, WP_ROCKET_LOG_OPTIONS);
