@@ -163,9 +163,9 @@ if [ "$1" = "eval" ]; then
     *leftover-footprint*)
       if [[ "$2" == *delete_option* ]]; then rm -f "$S/db-residue"; fi
       if [ -e "$S/db-residue" ]; then
-        printf '{"prefix":"wp_","options":["backwpup_version"],"tables":["wp_bwpup_backups"],"roles":[],"capabilities":[]}'
+        printf '{"prefix":"wp_","options":["backwpup_version"],"tables":["wp_bwpup_backups"],"roles":[],"capabilities":[],"cronEvents":[]}'
       else
-        printf '{"prefix":"wp_","options":[],"tables":[],"roles":[],"capabilities":[]}'
+        printf '{"prefix":"wp_","options":[],"tables":[],"roles":[],"capabilities":[],"cronEvents":[]}'
       fi ;;
   esac
 fi
@@ -2520,6 +2520,7 @@ test.describe("dbResidueMessage", () => {
     tables: ["wp_t"],
     roles: [],
     capabilities: [],
+    cronEvents: [],
   };
 
   test("before a scenario, blames an earlier run", () => {
@@ -2562,6 +2563,82 @@ test.describe("dbResidueMessage", () => {
         "1 table(s), 2 role(s) (myplugin_admin, myplugin_check), 3 capability grant(s) on " +
         "administrator, shop_manager. An earlier run's plugin files were removed without its " +
         "uninstall ever running.",
+    );
+  });
+
+  // A stale event gives a fresh install's object a schedule it was never given, so the line counts
+  // the events and names each hook once.
+  test("counts the WP-Cron events it removed and names their hooks once", () => {
+    const withCron = {
+      ...removed,
+      cronEvents: [
+        { hook: "myplugin_cleanup", time: 100, args: "[]" },
+        { hook: "myplugin_cron", time: 100, args: '{"arg":4}' },
+        { hook: "myplugin_cron", time: 200, args: '{"arg":"restart"}' },
+      ],
+    };
+    expect(dbResidueMessage(withCron, "after", false)).toBe(
+      "[hooks] after the scenario, cleared a leftover plugin footprint from the site: 2 option(s), " +
+        "1 table(s), 3 WP-Cron event(s) (myplugin_cleanup, myplugin_cron). The plugin's own " +
+        "uninstall did not remove them, or a request that outlived it re-created them. Its " +
+        "WP-Cron events can be left even by its own removal.",
+    );
+  });
+
+  // A plugin's own deactivation and uninstall may clear only some of its events, so WP-Cron events
+  // alone blame that removal, never a missed uninstall or a failed teardown.
+  const cronOnly = {
+    options: [],
+    tables: [],
+    roles: [],
+    capabilities: [],
+    cronEvents: [{ hook: "myplugin_cron", time: 100, args: "[]" }],
+  };
+  const cronOnlyLine = (when: string): string =>
+    `[hooks] ${when}, cleared a leftover plugin footprint from the site: 0 option(s), 0 table(s), ` +
+    "1 WP-Cron event(s) (myplugin_cron). The plugin's own deactivation and uninstall can leave " +
+    "its WP-Cron events behind.";
+
+  test("before a scenario, WP-Cron events alone blame the plugin's own removal", () => {
+    expect(dbResidueMessage(cronOnly, "before", false)).toBe(
+      cronOnlyLine("before installing"),
+    );
+  });
+
+  test("after one, WP-Cron events alone blame the plugin's own removal, whether or not its uninstall failed", () => {
+    expect(dbResidueMessage(cronOnly, "after", false)).toBe(
+      cronOnlyLine("after the scenario"),
+    );
+    expect(dbResidueMessage(cronOnly, "after", true)).toBe(
+      cronOnlyLine("after the scenario"),
+    );
+  });
+
+  test("before a scenario, WP-Cron events beside other leftovers keep the earlier run's cause and add the WP-Cron note", () => {
+    expect(
+      dbResidueMessage(
+        { ...cronOnly, roles: ["myplugin_admin"] },
+        "before",
+        false,
+      ),
+    ).toBe(
+      "[hooks] before installing, cleared a leftover plugin footprint from the site: 0 option(s), " +
+        "0 table(s), 1 role(s) (myplugin_admin), 1 WP-Cron event(s) (myplugin_cron). An earlier " +
+        "run's plugin files were removed without its uninstall ever running. Its WP-Cron events " +
+        "can be left even by its own removal.",
+    );
+  });
+
+  test("after one whose uninstall failed, WP-Cron events beside a capability keep that cause and add the WP-Cron note", () => {
+    const withCapability = {
+      ...cronOnly,
+      capabilities: [{ role: "administrator", capability: "myplugin" }],
+    };
+    expect(dbResidueMessage(withCapability, "after", true)).toBe(
+      "[hooks] after the scenario, cleared a leftover plugin footprint from the site: 0 option(s), " +
+        "0 table(s), 1 capability grant(s) on administrator, 1 WP-Cron event(s) (myplugin_cron). " +
+        "The plugin's own uninstall failed in this scenario's teardown, so it could not remove " +
+        "them. Its WP-Cron events can be left even by its own removal.",
     );
   });
 });

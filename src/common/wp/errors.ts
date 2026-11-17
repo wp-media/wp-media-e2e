@@ -19,8 +19,11 @@
  */
 
 // Type-only, so it is erased at runtime and this module stays free of a cycle with the exec layer.
-import type { CapabilityGrant, FoundDbResidue } from "./db-residue";
+import type { CapabilityGrant, CronEvent, FoundDbResidue } from "./db-residue";
 import type { ElevationSupport } from "./transport-exec";
+import { printableLine } from "../text";
+import { capLine } from "../terminal/layout";
+import { TEXT_PALETTE } from "../terminal/palette";
 
 /** A plugin expected to be installed is not one WordPress lists (e.g. before a removal-under-test). */
 export class PluginNotInstalledError extends Error {
@@ -319,7 +322,10 @@ export class SiteResidueRemovalFailedError extends Error {
  * something is actively putting them back, which is what a still-installed copy of the plugin does
  * on every request. Naming every survivor at once, because the *shape* of what stayed is the clue:
  * options alone point at a filter, the table alone at a second process re-creating it, roles
- * at a roles option something else rewrites.
+ * at a roles option something else rewrites, WP-Cron events at code that keeps cron elsewhere and
+ * answers `pre_unschedule_hook` — or at a WP-Cron run that rescheduled a recurring event (the sweep
+ * retries once before it gives up). Every line is the site's text, so it is printed masked and capped
+ * ({@link survivorLine}); the fields keep the values as read.
  */
 export class SiteDbResidueRemovalFailedError extends Error {
   /** The option names still present after removal. */
@@ -334,6 +340,9 @@ export class SiteDbResidueRemovalFailedError extends Error {
   /** The declared capabilities still held after removal. */
   readonly capabilities: readonly CapabilityGrant[];
 
+  /** The events of declared WP-Cron hooks still scheduled after removal. */
+  readonly cronEvents: readonly CronEvent[];
+
   constructor(survivors: FoundDbResidue) {
     const lines = [
       ...survivors.options.map((option) => `  option     ${option}`),
@@ -342,19 +351,41 @@ export class SiteDbResidueRemovalFailedError extends Error {
       ...survivors.capabilities.map(
         ({ role, capability }) => `  capability ${capability} (on ${role})`,
       ),
-    ];
+      ...survivors.cronEvents.map(
+        ({ hook, args }) => `  cron event ${hook} ${args}`,
+      ),
+    ].map(survivorLine);
+    const cronHint =
+      survivors.cronEvents.length > 0
+        ? "\n  A WP-Cron run in progress also puts a recurring event back (it reschedules the " +
+          "event before running it); the removal was retried once."
+        : "";
     super(
       `A plugin's leftover database footprint could not be removed from the site; ` +
         `${String(lines.length)} item(s) survived:\n${lines.join("\n")}\n` +
         "  Check that the plugin is really uninstalled — an installed copy re-creates its own " +
-        "options, tables and roles on every request, so nothing can be swept while it is there.",
+        "options, tables, roles and WP-Cron events on every request, so nothing can be swept " +
+        `while it is there.${cronHint}`,
     );
     this.name = "SiteDbResidueRemovalFailedError";
     this.options = survivors.options;
     this.tables = survivors.tables;
     this.roles = survivors.roles;
     this.capabilities = survivors.capabilities;
+    this.cronEvents = survivors.cronEvents;
   }
+}
+
+/**
+ * One survivor line of a {@link SiteDbResidueRemovalFailedError}, safe to print: the site's text
+ * masked ({@link printableLine}: a WP-Cron event's arguments can carry a credential), then capped so
+ * a huge argument list cannot flood a report.
+ *
+ * @param line - the line, indented.
+ * @returns the line, masked and at most {@link capLine}'s cap.
+ */
+function survivorLine(line: string): string {
+  return capLine(printableLine(line), TEXT_PALETTE.symbol("ellipsis"));
 }
 
 /** How many fatal lines a {@link DebugLogFatalError} quotes before it truncates. */

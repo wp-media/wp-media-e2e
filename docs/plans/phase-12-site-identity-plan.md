@@ -1217,9 +1217,11 @@ Read at `develop` @ 9788d19 (3.24.1-beta2, APVM); S1, S2, S5, S6 still hold ther
     BerlinDB tables (`wp_wpr_*`, measured); the 10 `rocket_*` capabilities on `administrator`
     (`Capabilities/Manager.php`, measured). No role. Measured: a deactivate + uninstall leaves none of
     it; a lost plugin folder leaves 20 options (50 since 12.13's settle), 8 tables, 10 grants, all swept. Not swept (by design):
-    user meta `rocket_boxes`, post meta `_rocket_exclude_*`, the 18 cron hooks its uninstall clears
-    (in core's `cron`, which the sweep protects), Action Scheduler's tables/options (shared library,
-    the uninstall keeps them too), core rows.
+    user meta `rocket_boxes`, post meta `_rocket_exclude_*`, Action Scheduler's tables/options
+    (shared library, the uninstall keeps them too), core rows. Not declared yet: the 18 cron hooks its
+    uninstall clears (`WPRocketUninstall::$events`): six carry none of its option fragments, and a
+    fragment for them would widen the option sweep too, unmeasured; a hook without its plugin runs
+    nothing.
 - **Contradiction found → `SiteResidueRemoveOnly`:** every plain `siteResidue` path is also a data
   directory the Before creates `0777` and hands over (`prepareSiteDataDirs`). WP Rocket's folders
   would lose their `0755` and the licence file would be `mkdir`ed. `{ path, prepare: false }` is only

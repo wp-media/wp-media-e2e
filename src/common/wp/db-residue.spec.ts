@@ -11,6 +11,7 @@ import { join } from "node:path";
 
 import {
   PROTECTED_CAPABILITIES,
+  PROTECTED_CRON_HOOKS,
   PROTECTED_OPTIONS,
   PROTECTED_ROLES,
   PROTECTED_TABLES,
@@ -19,11 +20,12 @@ import {
   isEmptyDbResidue,
   normaliseOptionFragment,
   normaliseResidueCapability,
+  normaliseResidueCronHook,
   normaliseResidueRole,
   normaliseResidueTable,
   removeSiteDbResidue,
 } from "./db-residue";
-import type { CapabilityGrant } from "./db-residue";
+import type { CapabilityGrant, CronEvent } from "./db-residue";
 import { SiteDbResidueRemovalFailedError } from "./errors";
 import type { LocalTransport } from "../config/types";
 
@@ -95,6 +97,7 @@ function found(
   tables: string[] = [],
   roles: string[] = [],
   capabilities: CapabilityGrant[] = [],
+  cronEvents: CronEvent[] = [],
 ): string {
   return JSON.stringify({
     prefix: "wp_",
@@ -102,6 +105,7 @@ function found(
     tables,
     roles,
     capabilities,
+    cronEvents,
   });
 }
 
@@ -123,6 +127,19 @@ const WITH_ROLES = {
 
 /** A capability BackWPup grants a role it does not own, as the scan reports it. */
 const ADMIN_GRANT = { role: "administrator", capability: "backwpup_jobs" };
+
+/** A declaration with WP-Cron hooks, for the cases about the `cron` option. */
+const WITH_CRON = {
+  ...BACKWPUP,
+  cronHooks: ["backwpup_cron", "backwpup_check_cleanup"],
+};
+
+/** A job's event left behind, as the scan reports it. */
+const JOB_EVENT: CronEvent = {
+  hook: "backwpup_cron",
+  time: 1_900_000_000,
+  args: '{"arg":4}',
+};
 
 /** The values a snippet carries as base64 literals, decoded — how a declaration reaches the PHP. */
 function decodedLiterals(call: string): string[] {
@@ -255,6 +272,76 @@ test.describe("normaliseResidueCapability", () => {
   });
 });
 
+test.describe("normaliseResidueCronHook", () => {
+  const fragments = ["backwpup", "bwpup"];
+
+  test("accepts a hook carrying one of the product's names and trims it", () => {
+    expect(normaliseResidueCronHook(" backwpup_cron ", fragments)).toBe(
+      "backwpup_cron",
+    );
+  });
+
+  // Unscheduling one stops core's update checks, clean-ups or scheduled posts — refused even when a
+  // careless fragment would admit it.
+  test("refuses each of WordPress's own hooks", () => {
+    for (const hook of PROTECTED_CRON_HOOKS) {
+      expect(() => normaliseResidueCronHook(hook, [hook])).toThrow(
+        /one of WordPress's own WP-Cron hooks/,
+      );
+    }
+    // The whole list, pinned: dropping one would let a product unschedule it unnoticed.
+    expect(PROTECTED_CRON_HOOKS).toEqual([
+      "delete_expired_transients",
+      "do_pings",
+      "importer_scheduled_cleanup",
+      "publish_future_post",
+      "recovery_mode_clean_expired_keys",
+      "update_network_counts",
+      "upgrader_scheduled_cleanup",
+      "wp_delete_temp_updater_backups",
+      "wp_https_detection",
+      "wp_maybe_auto_update",
+      "wp_privacy_delete_old_export_files",
+      "wp_privacy_personal_data_cleanup_requests",
+      "wp_scheduled_auto_draft_delete",
+      "wp_scheduled_delete",
+      "wp_site_health_scheduled_check",
+      "wp_split_shared_term_batch",
+      "wp_update_comment_type_batch",
+      "wp_update_plugins",
+      "wp_update_themes",
+      "wp_update_user_counts",
+      "wp_version_check",
+    ]);
+  });
+
+  test("refuses another plugin's hook", () => {
+    expect(() =>
+      normaliseResidueCronHook("woocommerce_cleanup_sessions", fragments),
+    ).toThrow(/carries none of the product's names \(backwpup, bwpup\)/);
+  });
+
+  test("refuses a hook when the declaration names no fragment at all", () => {
+    expect(() => normaliseResidueCronHook("backwpup_cron", [])).toThrow(
+      /names no `optionsContaining` fragment/,
+    );
+  });
+
+  test("refuses anything but lowercase letters, digits, underscore and hyphen", () => {
+    for (const hook of [
+      "Backwpup_cron",
+      "backwpup cron",
+      "backwpup'cron",
+      "backwpup/cron",
+      "",
+    ]) {
+      expect(() => normaliseResidueCronHook(hook, fragments)).toThrow(
+        /only lowercase letters/,
+      );
+    }
+  });
+});
+
 test.describe("assertNoProtectedOptions", () => {
   /** The guard under test, wrapped so a void call can be handed to `toThrow`. */
   const check =
@@ -295,6 +382,7 @@ test.describe("findSiteDbResidue", () => {
       tables: [],
       roles: [],
       capabilities: [],
+      cronEvents: [],
     });
     expect(calls()).toEqual([]);
   });
@@ -306,6 +394,7 @@ test.describe("findSiteDbResidue", () => {
       tables: ["wp_bwpup_backups"],
       roles: [],
       capabilities: [],
+      cronEvents: [],
     });
   });
 
@@ -316,6 +405,7 @@ test.describe("findSiteDbResidue", () => {
       tables: [],
       roles: ["backwpup_check"],
       capabilities: [ADMIN_GRANT],
+      cronEvents: [],
     });
   });
 
@@ -329,13 +419,14 @@ test.describe("findSiteDbResidue", () => {
 
   // Every kind is required in the reply: a site that left one out must not read as holding none.
   test("refuses a reply missing roles or carrying a malformed capability", async () => {
-    for (const missing of ["roles", "capabilities"]) {
+    for (const missing of ["roles", "capabilities", "cronEvents"]) {
       const reply: Record<string, unknown> = {
         prefix: "wp_",
         options: [],
         tables: [],
         roles: [],
         capabilities: [],
+        cronEvents: [],
       };
       Reflect.deleteProperty(reply, missing);
       replies(JSON.stringify(reply));
@@ -350,11 +441,72 @@ test.describe("findSiteDbResidue", () => {
         tables: [],
         roles: [],
         capabilities: [{ role: "administrator" }],
+        cronEvents: [],
       }),
     );
     await expect(findSiteDbResidue(local(), WITH_ROLES)).rejects.toThrow(
       /did not describe a footprint/,
     );
+  });
+
+  test("reports the events of declared WP-Cron hooks the site holds", async () => {
+    const cleanup = { hook: "backwpup_check_cleanup", time: 5, args: "[]" };
+    replies(found([], [], [], [], [cleanup, JOB_EVENT]));
+    expect(await findSiteDbResidue(local(), WITH_CRON)).toEqual({
+      options: [],
+      tables: [],
+      roles: [],
+      capabilities: [],
+      cronEvents: [cleanup, JOB_EVENT],
+    });
+  });
+
+  test("carries the declared WP-Cron hooks into the snippet", async () => {
+    replies(found());
+    await findSiteDbResidue(local(), WITH_CRON);
+    expect(decodedLiterals(calls()[0] ?? "")).toContain(
+      '["backwpup_cron","backwpup_check_cleanup"]',
+    );
+    expect(calls()[0]).toContain("_get_cron_array()");
+  });
+
+  // A malformed event must not read as no event.
+  test("refuses a reply carrying a malformed WP-Cron event", async () => {
+    for (const event of [
+      { hook: "backwpup_cron", time: 1, args: { arg: 4 } },
+      { hook: "backwpup_cron", time: "1", args: "[]" },
+      { hook: "backwpup_cron", time: 1.5, args: "[]" },
+      { time: 1, args: "[]" },
+    ]) {
+      replies(
+        JSON.stringify({
+          prefix: "wp_",
+          options: [],
+          tables: [],
+          roles: [],
+          capabilities: [],
+          cronEvents: [event],
+        }),
+      );
+      await expect(findSiteDbResidue(local(), WITH_CRON)).rejects.toThrow(
+        /did not describe a footprint/,
+      );
+    }
+  });
+
+  test("asks the site nothing for a declaration whose every list is empty", async () => {
+    expect(
+      isEmptyDbResidue(
+        await findSiteDbResidue(local(), {
+          optionsContaining: [],
+          tables: [],
+          roles: [],
+          capabilities: [],
+          cronHooks: [],
+        }),
+      ),
+    ).toBe(true);
+    expect(calls()).toEqual([]);
   });
 
   // Plugins stay out of the request: the product's own plugin re-creates its footprint on `init`,
@@ -403,6 +555,7 @@ test.describe("removeSiteDbResidue", () => {
       tables: [],
       roles: [],
       capabilities: [],
+      cronEvents: [],
     });
     expect(calls()).toEqual([]);
   });
@@ -428,6 +581,7 @@ test.describe("removeSiteDbResidue", () => {
       tables: ["wp_bwpup_backups"],
       roles: [],
       capabilities: [],
+      cronEvents: [],
     });
     // Scan, remove, verify — and the middle one is the only call that deletes.
     expect(calls()).toHaveLength(3);
@@ -452,6 +606,9 @@ test.describe("removeSiteDbResidue", () => {
       "backwpup_version",
     ]);
     expect((error as Error).message).toMatch(/re-creates its own/);
+    // Only WP-Cron events earn a second removal; nor is a WP-Cron run named as a cause here.
+    expect(calls()).toHaveLength(3);
+    expect((error as Error).message).not.toContain("WP-Cron run");
   });
 
   test("removes the roles and capabilities it found and reports them", async () => {
@@ -461,6 +618,7 @@ test.describe("removeSiteDbResidue", () => {
       tables: [],
       roles: ["backwpup_check"],
       capabilities: [ADMIN_GRANT],
+      cronEvents: [],
     });
     expect(calls()).toHaveLength(3);
     expect(calls()[1]).toContain("remove_role( $role )");
@@ -501,6 +659,122 @@ test.describe("removeSiteDbResidue", () => {
         capabilities: ["manage_options"],
       }),
     ).rejects.toThrow(/one of WordPress's own capabilities/);
+    expect(calls()).toEqual([]);
+  });
+
+  test("removes the WP-Cron events it found, hook by hook, and reports them", async () => {
+    replies(found([], [], [], [], [JOB_EVENT]), found(), found());
+    expect(await removeSiteDbResidue(local(), WITH_CRON)).toEqual({
+      options: [],
+      tables: [],
+      roles: [],
+      capabilities: [],
+      cronEvents: [JOB_EVENT],
+    });
+    expect(calls()).toHaveLength(3);
+    expect(calls()[1]).toContain("wp_unschedule_hook( $hook )");
+    expect(calls()[2]).not.toContain("wp_unschedule_hook");
+  });
+
+  // `wp_unschedule_hook` can be answered by a filter without touching the `cron` option; only a
+  // re-read proves the events went. The removal is retried once first (a WP-Cron run in flight can
+  // put a recurring event back), so the stub answers the same survivor to both re-reads.
+  test("fails naming a WP-Cron event that survived the removal and its retry", async () => {
+    replies(
+      found([], [], [], [], [JOB_EVENT]),
+      found(),
+      found([], [], [], [], [JOB_EVENT]),
+      found(),
+      found([], [], [], [], [JOB_EVENT]),
+    );
+    const error = await removeSiteDbResidue(local(), WITH_CRON).catch(
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(SiteDbResidueRemovalFailedError);
+    expect((error as SiteDbResidueRemovalFailedError).cronEvents).toEqual([
+      JOB_EVENT,
+    ]);
+    expect((error as Error).message).toContain(
+      'cron event backwpup_cron {"arg":4}',
+    );
+    expect((error as Error).message).toMatch(
+      /WP-Cron run in progress .* retried once/,
+    );
+    expect(calls()).toHaveLength(5);
+    expect(calls()[3]).toContain("wp_unschedule_hook( $hook )");
+  });
+
+  // A WP-Cron run that read the array before the removal wrote it reschedules a recurring event
+  // right after; one more removal clears it.
+  test("removes WP-Cron events a second time when only they survived the first", async () => {
+    replies(
+      found([], [], [], [], [JOB_EVENT]),
+      found(),
+      found([], [], [], [], [JOB_EVENT]),
+      found(),
+      found(),
+    );
+    expect((await removeSiteDbResidue(local(), WITH_CRON)).cronEvents).toEqual([
+      JOB_EVENT,
+    ]);
+    expect(calls()).toHaveLength(5);
+  });
+
+  // Anything beside the events is not a WP-Cron run's doing: no retry.
+  test("does not retry when an option survived beside a WP-Cron event", async () => {
+    replies(
+      found(["backwpup_version"], [], [], [], [JOB_EVENT]),
+      found(),
+      found(["backwpup_version"], [], [], [], [JOB_EVENT]),
+    );
+    await expect(removeSiteDbResidue(local(), WITH_CRON)).rejects.toThrow(
+      SiteDbResidueRemovalFailedError,
+    );
+    expect(calls()).toHaveLength(3);
+  });
+
+  // An event's arguments are the site's data: a credential in them is masked, a huge list capped.
+  test("masks and caps a surviving WP-Cron event's arguments in the message", async () => {
+    const leaky: CronEvent = {
+      hook: "backwpup_cron",
+      time: 1,
+      args: '{"url":"https://admin:hunter2secret@example.com/"}',
+    };
+    const huge: CronEvent = {
+      hook: "backwpup_cron",
+      time: 2,
+      args: "x".repeat(2000),
+    };
+    replies(
+      found([], [], [], [], [leaky, huge]),
+      found(),
+      found([], [], [], [], [leaky, huge]),
+    );
+    const error = await removeSiteDbResidue(local(), WITH_CRON).catch(
+      (caught: unknown) => caught,
+    );
+    const message = (error as Error).message;
+    expect(message).not.toContain("hunter2secret");
+    expect(message).toContain("https://***@example.com/");
+    const hugeLine = message.split("\n").find((line) => line.includes("xxx"));
+    expect(hugeLine).toBeDefined();
+    // ASCII plus "…", one UTF-16 unit each: the length is the code-point count capLine caps at 500.
+    expect(hugeLine).toHaveLength(500);
+    expect(hugeLine?.endsWith("…")).toBe(true);
+    // The field keeps what the site holds; only the message is masked.
+    expect((error as SiteDbResidueRemovalFailedError).cronEvents).toEqual([
+      leaky,
+      huge,
+    ]);
+  });
+
+  test("refuses a core WP-Cron hook without asking the site anything", async () => {
+    await expect(
+      removeSiteDbResidue(local(), {
+        ...BACKWPUP,
+        cronHooks: ["wp_version_check"],
+      }),
+    ).rejects.toThrow(/one of WordPress's own WP-Cron hooks/);
     expect(calls()).toEqual([]);
   });
 

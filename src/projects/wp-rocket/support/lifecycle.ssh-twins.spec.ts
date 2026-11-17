@@ -1097,7 +1097,7 @@ async function expectNothingRecreated(
   expectNoDeclaredFiles(stack, root);
   // Compared whole, so a failure names what came back.
   expect(await findSiteDbResidue(transport, WP_ROCKET_SITE_DB_RESIDUE)).toEqual(
-    { options: [], tables: [], roles: [], capabilities: [] },
+    { options: [], tables: [], roles: [], capabilities: [], cronEvents: [] },
   );
 }
 

@@ -8,10 +8,11 @@ import type { SiteDbResidue } from "../../../common/wp/db-residue";
  * path was skipped.
  *
  * Not swept, by design: user meta `rocket_boxes` and post meta `_rocket_exclude_*` (the sweep reads
- * options, tables, roles and capabilities only); the 18 cron hooks its uninstall clears (they live in
- * core's `cron` option, which the sweep never touches; a hook without its plugin runs nothing);
- * Action Scheduler's tables and options (a library other plugins share, its uninstall keeps them);
- * core rows.
+ * no meta); Action Scheduler's tables and options (a library other plugins share, its uninstall keeps
+ * them); core rows. Not declared yet: the 18 WP-Cron hooks its uninstall clears (3.24.1's
+ * `WPRocketUninstall::$events`): six carry none of the fragments below
+ * (`rocket_cache_dir_size_check`, `action_scheduler_run_queue_rucss`, …), and a fragment added for
+ * them would widen the option sweep too, unmeasured; a hook without its plugin runs nothing.
  */
 
 /**
