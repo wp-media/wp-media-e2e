@@ -37,6 +37,8 @@ test.describe("readRunDescription", () => {
       pluginVersion: "9.99.99",
     };
     expect(readRunDescription(plugin)).toEqual(plugin);
+    const versioned = { ...RUN, suiteVersion: "1.1.0" };
+    expect(readRunDescription(versioned)).toEqual(versioned);
     for (const reportsKeep of [0, 20]) {
       expect(readRunDescription({ ...RUN, reportsKeep })).toEqual({
         ...RUN,
@@ -68,6 +70,20 @@ test.describe("readRunDescription", () => {
       expect(readRunDescription(options), JSON.stringify(options)).toEqual({
         missing: field,
       });
+    }
+  });
+
+  // Display only: a wrong one costs the header its version ("unknown"), never the run's reports.
+  test("drops a suite version that is not a string, keeping every other field and the options given", () => {
+    for (const suiteVersion of [1, null, ["1.1.0"], { v: "1.1.0" }, true]) {
+      const options = { ...RUN, configDir: "/repo", suiteVersion };
+      const read = readRunDescription(options);
+      expect(read, JSON.stringify(suiteVersion)).toEqual({
+        ...RUN,
+        configDir: "/repo",
+      });
+      expect(read).not.toHaveProperty("suiteVersion");
+      expect(options.suiteVersion).toBe(suiteVersion);
     }
   });
 });

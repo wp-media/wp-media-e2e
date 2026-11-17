@@ -358,6 +358,9 @@ export default class TerminalReporter implements Reporter {
               ? { requestedRef: run.requestedRef }
               : {}),
             scenarios: this.tally.scenarios.total,
+            ...(run.suiteVersion !== undefined
+              ? { suiteVersion: run.suiteVersion }
+              : {}),
           },
           this.width,
         ),
