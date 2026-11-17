@@ -36,11 +36,12 @@ prints() {
 # Runs a command as ubuntu through a fresh PAM session (current groups, pam_umask), as SSH does.
 as_ubuntu() { su -s /bin/sh ubuntu -c "$1"; }
 
-# Paths under the site whose owner:group differs from <owner:group>, wp-config.php left out when
-# the variant gives it to root. Usage: wrong_owner <owner:group>
+# Paths under the site whose owner:group differs from <owner:group>, wp-config.php (and .htaccess)
+# left out when the variant gives them to root or the web server. Usage: wrong_owner <owner:group>
 wrong_owner() {
   local skip=()
   ((V_WPCONFIG_ROOT)) && skip=(! -path "$TWIN_ROOT/wp-config.php")
+  ((V_WEB_CONFIG)) && skip=(! -path "$TWIN_ROOT/wp-config.php" ! -path "$TWIN_ROOT/.htaccess")
   find "$TWIN_SITE_DIR" "${skip[@]}" \( ! -user "${1%%:*}" -o ! -group "${1##*:}" \) -print
 }
 
@@ -48,6 +49,7 @@ wrong_owner() {
 wrong_mode() {
   local skip=()
   ((V_WPCONFIG_ROOT)) && skip=(! -path "$TWIN_ROOT/wp-config.php")
+  ((V_WEB_CONFIG)) && skip=(! -path "$TWIN_ROOT/wp-config.php" ! -path "$TWIN_ROOT/.htaccess")
   find "$TWIN_SITE_DIR" "${skip[@]}" -type "$1" ! -perm "$2" -print
 }
 
@@ -171,6 +173,13 @@ check "every directory is ${V_DIR_MODE}" prints_nothing wrong_mode d "$V_DIR_MOD
 check "every file is ${V_FILE_MODE}" prints_nothing wrong_mode f "$V_FILE_MODE"
 if ((V_WPCONFIG_ROOT)); then
   check "wp-config.php is root:www-data 644" prints "root:www-data 644" stat -c '%U:%G %a' "$TWIN_ROOT/wp-config.php"
+fi
+if ((V_WEB_CONFIG)); then
+  for name in "${TWIN_WEB_CONFIG_FILES[@]}"; do
+    [[ "$name" == .htaccess && "$TWIN_STACK" == nginx ]] && continue
+    check "${name} is www-data:www-data 644" prints "www-data:www-data 644" stat -c '%U:%G %a' "$TWIN_ROOT/$name"
+    check "ubuntu cannot write ${name}" as_ubuntu "test ! -w '$TWIN_ROOT/$name'"
+  done
 fi
 
 if ((V_IN_GROUP)); then

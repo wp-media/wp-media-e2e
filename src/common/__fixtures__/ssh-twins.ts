@@ -125,6 +125,7 @@ export const TWIN_VARIANTS = [
   "owner-mismatch",
   "no-wp",
   "wpconfig-root",
+  "web-config",
 ] as const;
 
 /** One twin variant. */

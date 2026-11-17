@@ -193,7 +193,11 @@ export const PLUGIN_TAG = "@plugin";
  *
  * A product declaring files it edits in place (`configEdits`) adds **one `wp eval` per hook** — the
  * record before the install, the restore after the residue sweep — no WordPress booted, so about one
- * round-trip (~1–5 s), well inside the margin above.
+ * round-trip (~1–5 s), well inside the margin above. A file held for root (one this run's commands
+ * cannot write) costs more, only on such a site: the sudo probe (once per process), per held file two
+ * `readlink`s and root's put-back (bounded at `PUT_BACK_TIMEOUT_S`, 20 s, reached only when a FIFO
+ * blocks its open), then a second `wp eval` — a few seconds, 3 × 20 s at worst for WP Rocket's three
+ * files; inside the After's margin, and the Before's unless every other bound is hit at once.
  *
  * Applied per hook — so a hang is reported as a hook timeout naming the hook, rather than as an
  * opaque scenario timeout — **and** added to the scenario's own budget by {@link extendedTimeout},

@@ -76,15 +76,17 @@ export interface EngineInterrupt {
  * @param mode - record (reconciling first) or restore.
  * @param edits - the declaration, as the registry would hold it.
  * @param interrupt - a kill, or a path swapped for a link, mid-run.
+ * @param hold - hold for root what this user cannot finish (the engine's `$e2e_hold`).
  */
 export function runEngine(
   sandbox: EngineSandbox,
   mode: "record" | "restore",
   edits: ConfigEdits,
   interrupt?: EngineInterrupt,
+  hold = false,
 ): EngineRun {
   const snippet = join(sandbox.base, `${mode}.php`);
-  writeFileSync(snippet, configEditsPhp(mode, sandbox.recordStem, edits));
+  writeFileSync(snippet, configEditsPhp(mode, sandbox.recordStem, edits, hold));
   const result = spawnSync("php", [HARNESS, snippet, sandbox.root], {
     encoding: "utf8",
     env:

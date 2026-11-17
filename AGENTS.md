@@ -47,7 +47,7 @@ src/
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm + warm-lines.ts its output, pin)
 │   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection, the in-place cleanup engine on local PHP (config-edits-engine + harness), a slowly-read child (slow-reader), a child on a pty nobody reads (paused-pty), a command on a real pty via `script` (pty), the live region's tmux driver (live-tmux*), the compatibility matrix's probes (compat/; the orchestrator's is `orchestrator/__fixtures__/compat-probe.ts`), fake terminal/exit/clock (terminal-fakes), the live block's synthetic product (live-block/), the failure block's (failures/), raw Allure results, a stub Allure CLI and a stop at a chosen check (allure.ts), a web server serving the identity probe (probe-web-server.ts), a FIFO's blocked reader released, or fed chunk by chunk, within a deadline, or a FIFO tapped to prove nothing was written through a path (fifo.ts), a `dd` taking `conv=excl` where the runner's (BSD) lacks it (excl-dd.ts), a `.tar.gz` listed from its raw headers (tar-listing.ts), an in-process SSH server that runs what it is sent, with a recording fake `sudo` (ssh-server.ts; `denySudo` all or one `-u` user, `sudoNoise` its unresolvable-host line), the option parsing every fake `sudo` shares (fake-sudo.ts), arguments that must survive every command line (hostile-arguments.ts), the SSH twins' gate, sites, variants, `resetTwin` and the cross-worker lock `withTwin` (ssh-twins.ts: `E2E_SSH_TWINS=1`), a shell command that dies with its spawner even on SIGKILL (tether.ts; `php -S` and the SSH server's commands)
-│   └── wp/                 # WordPress over WP-CLI (exec — exec/wpCli by identity state, wpCli's `--user` in wp-user — over transport-exec, php + php-literal, staging + site-staging (the `site` state's inbox), plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, install-outputs, config-edits + config-edits-declaration (in-place cleanup), ownership + owner-probe, paths, cache, db, teardown, errors; site-identity + web-identity + run-as-argv: who site commands run as; sudo-noise: sudo's `unable to resolve host` line removed)
+│   └── wp/                 # WordPress over WP-CLI (exec — exec/wpCli by identity state, wpCli's `--user` in wp-user — over transport-exec, php + php-literal, staging + site-staging (the `site` state's inbox), plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, install-outputs, config-edits + config-edits-declaration + config-edits-root (in-place cleanup, its root fallback), ownership + owner-probe, paths, cache, db, teardown, errors; site-identity + web-identity + run-as-argv: who site commands run as; sudo-noise: sudo's `unable to resolve host` line removed)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
     └── <product>/
@@ -330,7 +330,10 @@ lives in a sibling module, unit-testable without it.
   footprint; clear the **files it left** (an uninstall keeps its data, and per-scenario reinstalls
   would fill the disk); once the plugin is removed, **put back the files it edited in place** — only
   what its own declared edits explain, byte for byte; anything else warned (`config-edits`), never
-  touched. All six always run, independently (the last only after a removal); the log verdict wins and other failures
+  touched; a file so judged that the run's commands cannot write (or whose mode they cannot set back)
+  is finished by root in place — outside `site`, unless `elevate: false` or no passwordless sudo
+  (then warned, as before; a root failure before any write is warned too, only a write cut short fails;
+  `wp/config-edits-root.ts`). All six always run, independently (the last only after a removal); the log verdict wins and other failures
   are logged. Having to stop work is reported; work that _won't_ stop is a failure. Leftovers neither
   the site's commands nor root (no elevation, `elevate: false`) could remove are reported, not failed
   ([wordpress-automation.md](docs/architecture/wordpress-automation.md#left-over-plugin-data-wpresiduets)).
@@ -744,7 +747,8 @@ this file goes in the right `docs/` file, linked from the [Documentation map](#d
   `asTransportUser`; `web-identity.ts`: the web probe, its sweep, `site-identity.json`;
   `run-as-argv.ts`: the sudo wrapper).
 - In-place cleanup (`config-edits.ts`: `recordConfigEdits`, `restoreConfigEdits`, `recordStemFor`, the
-  engine; `config-edits-declaration.ts`: `normaliseConfigEdits`, answers, `configEditsReport`).
+  engine; `config-edits-declaration.ts`: `normaliseConfigEdits`, answers, `configEditsReport`;
+  `config-edits-root.ts`: the root fallback, `PUT_BACK_SCRIPT`).
 - Residue (`residue.ts`: `parseResidueDeclaration`, `SiteResidueFamily`, `resolveSiteResidue`,
   `prepareResolvedDataDirs`, `isDeclaredResidue`) and the footprint sweep (`db-residue.ts`:
   `SiteDbResidue`, `findSiteDbResidue`, `removeSiteDbResidue`, `PROTECTED_OPTIONS`, `PROTECTED_TABLES`,

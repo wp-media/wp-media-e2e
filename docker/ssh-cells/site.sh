@@ -89,6 +89,13 @@ if ((V_WPCONFIG_ROOT)); then
   chown root:www-data "$TWIN_ROOT/wp-config.php"
   chmod 0644 "$TWIN_ROOT/wp-config.php"
 fi
+if ((V_WEB_CONFIG)); then
+  for name in "${TWIN_WEB_CONFIG_FILES[@]}"; do
+    [[ -e "$TWIN_ROOT/$name" ]] || continue
+    chown www-data:www-data "$TWIN_ROOT/$name"
+    chmod 0644 "$TWIN_ROOT/$name"
+  done
+fi
 
 say "ubuntu $(if ((V_IN_GROUP)); then echo in; else echo outside; fi) www-data"
 if ((V_IN_GROUP)); then

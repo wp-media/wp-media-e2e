@@ -56,6 +56,7 @@ const EXPECTED: Readonly<
   "owner-mismatch": { state: "owner-not-web", logs: true },
   "no-wp": { state: "no-wp", logs: false },
   "wpconfig-root": { state: "site", logs: false },
+  "web-config": { state: "owner-not-web", logs: false },
 };
 
 /** The banner's issue for sudo logging command lines. */

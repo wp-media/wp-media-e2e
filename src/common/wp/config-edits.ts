@@ -6,6 +6,11 @@ import {
   parseRecordAnswer,
   parseRestoreAnswer,
 } from "./config-edits-declaration";
+import {
+  mayHoldForRoot,
+  mergeRootPutBack,
+  putBackHeld,
+} from "./config-edits-root";
 import type { RecordAnswer, RestoreAnswer } from "./config-edits-declaration";
 import type { ConfigEdits, Transport } from "../config/types";
 
@@ -33,6 +38,12 @@ import type { ConfigEdits, Transport } from "../config/types";
  *   that changed is reported, never changed (the bytes still go back in place).
  *   The record is removed last, once every path has a verdict; a run killed before leaves it, and the
  *   next record step **reconciles** it — restores from it — before recording anew.
+ * - **Root fallback** (`./config-edits-root.ts`): a file judged restorable that the identity cannot
+ *   write, or whose mode it cannot set back, is **held** — the engine keeps the record (and, reconciling,
+ *   records nothing yet) and says what root may finish; root writes the recorded bytes in place; the
+ *   engine then runs again, finding them back, and removes the record (or records). Never in `site`,
+ *   with `transport.elevate: false` or without passwordless sudo: the file is then warned about and
+ *   left. Removals (a file or folder the plugin created) are never held.
  * - Both run as `wp eval --skip-wordpress` through the site's identity: WordPress is never booted, so
  *   a `wp-config.php` that stops it booting is still put back. No byte of a tracked file leaves the
  *   host, and no message carries one.
@@ -74,7 +85,8 @@ export function recordStemFor(transport: Transport, slug: string): string {
 /**
  * The engine, without its inputs ({@link configEditsPhp} prepends them): `$e2e_mode` (`record` or
  * `restore`), `$e2e_stem` (the record folder, {@link recordStemFor}), `$e2e_spec` (the declaration), `$e2e_max` and
- * `$e2e_stale` (seconds). Runs in the WordPress root (the working directory). PHP 7.0+.
+ * `$e2e_stale` (seconds), `$e2e_hold` (hold for root). Runs in the WordPress root (the working
+ * directory). PHP 7.0+.
  */
 export const CONFIG_EDITS_PHP = String.raw`
 // What a failure adds to its message: what this run already did that the answer would have said.
@@ -307,7 +319,24 @@ $e2e_write_back = function ( $path, $before, $bytes, $sha256 ) use ( $e2e_dir, $
 	}
 	return true;
 };
-$e2e_restore_file = function ( $i, $file, $recorded ) use ( $e2e_root, $e2e_dir, $e2e_stat, $e2e_read, $e2e_candidates, $e2e_write_back, $e2e_fail ) {
+// What root may finish for a file this run judged (see the module doc): the file as $s saw it and the
+// SHA-256 of its bytes as judged (root writes only while it holds them), the record copy whose bytes
+// go back, and whether they still must ($write) or only the mode.
+$e2e_held = function ( $s, $recorded, $judged, $write, $cut ) use ( $e2e_dir, $e2e_uid ) {
+	return array(
+		'dir'     => $e2e_dir,
+		'copy'    => $recorded['copy'],
+		'uid'     => $e2e_uid,
+		'dev'     => (string) $s['dev'],
+		'ino'     => (string) $s['ino'],
+		'sha256'  => $recorded['sha256'],
+		'judged'  => $judged,
+		'mode'    => $recorded['mode'],
+		'write'   => $write,
+		'resumed' => $cut,
+	);
+};
+$e2e_restore_file = function ( $i, $file, $recorded ) use ( $e2e_root, $e2e_dir, $e2e_stat, $e2e_read, $e2e_candidates, $e2e_write_back, $e2e_fail, $e2e_hold, $e2e_held ) {
 	$outcome = array( 'kind' => 'file', 'index' => $i );
 	if ( null === $recorded ) {
 		return $outcome + array( 'result' => 'not-recorded' );
@@ -344,7 +373,8 @@ $e2e_restore_file = function ( $i, $file, $recorded ) use ( $e2e_root, $e2e_dir,
 		// Never touched, its mode included.
 		return $outcome + array( 'result' => $was ? 'unrecognized' : 'appeared' );
 	} elseif ( ! is_writable( $was ? $path : dirname( $path ) ) ) {
-		return $outcome + array( 'result' => 'unwritable' );
+		// Held for root only to write recorded bytes back in place, never to remove a file.
+		return $outcome + array( 'result' => 'unwritable' ) + ( $was && $e2e_hold ? array( 'held' => $e2e_held( $s, $recorded, hash( 'sha256', $current ), true, $cut ) ) : array() );
 	} elseif ( $was ) {
 		if ( ! $e2e_write_back( $path, $s, $bytes, $recorded['sha256'] ) ) {
 			return $outcome + array( 'result' => 'replaced' );
@@ -370,6 +400,9 @@ $e2e_restore_file = function ( $i, $file, $recorded ) use ( $e2e_root, $e2e_dir,
 				'recorded' => $recorded['mode'],
 				'restored' => @chmod( $path, $recorded['mode'] ),
 			);
+			if ( ! $outcome['mode']['restored'] && $e2e_hold ) {
+				$outcome['held'] = $e2e_held( $now, $recorded, $recorded['sha256'], false, false );
+			}
 		}
 		if ( $now['uid'] !== $recorded['uid'] || $now['gid'] !== $recorded['gid'] ) {
 			$outcome['owner'] = array(
@@ -451,6 +484,7 @@ $e2e_unusable = function ( $meta ) use ( $e2e_root, $e2e_dir ) {
 	return null;
 };
 // Restores from the record and removes it: array( 'outcomes' => … ), or array( 'unusable' => why ).
+// An outcome held for root keeps it instead: array( 'outcomes' => …, 'held' => true ).
 $e2e_restore = function () use ( $e2e_spec, $e2e_dir, $e2e_read, $e2e_drop_or_fail, $e2e_unusable, $e2e_restore_file, $e2e_restore_created, $e2e_restore_dir ) {
 	$meta   = json_decode( $e2e_read( $e2e_dir . '/meta.json' ), true );
 	$reason = $e2e_unusable( $meta );
@@ -478,6 +512,12 @@ $e2e_restore = function () use ( $e2e_spec, $e2e_dir, $e2e_read, $e2e_drop_or_fa
 	foreach ( $e2e_spec['createdDirs'] as $i => $dir ) {
 		$outcomes[] = $e2e_restore_dir( $i, $dir, isset( $dirs[ $dir ] ) ? $dirs[ $dir ] : null );
 	}
+	foreach ( $outcomes as $outcome ) {
+		if ( isset( $outcome['held'] ) ) {
+			// Root reads its copy next; the run after root asks again, and removes it.
+			return array( 'outcomes' => $outcomes, 'held' => true );
+		}
+	}
 	// Last: every path has its verdict.
 	$e2e_drop_or_fail( $e2e_dir );
 	return array( 'outcomes' => $outcomes );
@@ -495,6 +535,20 @@ if ( 'restore' === $e2e_mode ) {
 }
 $e2e_restored   = $e2e_has_record ? $e2e_restore() : array();
 $e2e_reconciled = isset( $e2e_restored['outcomes'] ) ? $e2e_restored['outcomes'] : null;
+if ( isset( $e2e_restored['held'] ) ) {
+	// Nothing recorded yet: the killed run's record stays for root, and this step runs again after it.
+	echo json_encode(
+		array(
+			'reconciled' => $e2e_reconciled,
+			'unusable'   => null,
+			'discarded'  => false,
+			'swept'      => 0,
+			'unswept'    => 0,
+			'held'       => true,
+		)
+	), "\n";
+	return;
+}
 $e2e_discarded  = false;
 if ( null !== $e2e_reconciled ) {
 	// The answer is lost if recording fails: its error says what was already done.
@@ -535,11 +589,13 @@ echo json_encode(
  * @param mode - record (reconciling first) or restore.
  * @param stem - the record folder without its identity ({@link recordStemFor}).
  * @param edits - the product's validated declaration.
+ * @param hold - hold for root what the identity cannot finish, keeping the record (module doc).
  */
 export function configEditsPhp(
   mode: "record" | "restore",
   stem: string,
   edits: ConfigEdits,
+  hold = false,
 ): string {
   const spec = {
     files: edits.files,
@@ -553,61 +609,97 @@ export function configEditsPhp(
     `$e2e_spec = ${phpLiteral(spec)};`,
     `$e2e_max = ${phpLiteral(MAX_OPERATIONS)};`,
     `$e2e_stale = ${phpLiteral(STALE_RECORD_DAYS * 86_400)};`,
+    `$e2e_hold = ${phpLiteral(hold)};`,
     CONFIG_EDITS_PHP,
   ].join("\n");
 }
 
 /**
  * Before a scenario: reconciles a record a killed run left (restores from it), then records the
- * tracked paths anew — see the module doc.
+ * tracked paths anew — see the module doc. A reconcile holding a file for root runs the engine again
+ * once root has finished it.
  *
  * @param transport - the site.
  * @param slug - the plugin under test.
  * @param edits - the product's validated declaration.
  * @returns what was reconciled, discarded and swept, or that the record folder is blocked.
- * @throws Error when the command fails or answers unreadably.
+ * @throws Error when a command fails or answers unreadably (a root put-back cut short included).
  */
 export async function recordConfigEdits(
   transport: Transport,
   slug: string,
   edits: ConfigEdits,
 ): Promise<RecordAnswer> {
-  return parseRecordAnswer(
-    await evalPhp(
-      transport,
-      configEditsPhp("record", recordStemFor(transport, slug), edits),
-      "recording the files the plugin edits",
-      "wp/config-edits",
-      { skipWordPress: true },
-    ),
+  const stem = recordStemFor(transport, slug);
+  const run = async (hold: boolean): Promise<RecordAnswer> =>
+    parseRecordAnswer(
+      await evalPhp(
+        transport,
+        configEditsPhp("record", stem, edits, hold),
+        "recording the files the plugin edits",
+        "wp/config-edits",
+        { skipWordPress: true },
+      ),
+      edits,
+    );
+  const first = await run(await mayHoldForRoot(transport));
+  if (!first.held) return first;
+  const root = await putBackHeld(
+    transport,
+    stem,
     edits,
+    first.reconciled ?? [],
   );
+  const second = await run(false);
+  return {
+    ...second,
+    reconciled: mergeRootPutBack(
+      first.reconciled ?? [],
+      root,
+      second.reconciled ?? [],
+    ),
+  };
 }
 
 /**
  * After a scenario: puts back what only the plugin's own edits changed, then removes the record — see
- * the module doc.
+ * the module doc. An answer holding a file for root runs the engine again once root has finished it.
  *
  * @param transport - the site.
  * @param slug - the plugin under test.
  * @param edits - the product's validated declaration.
  * @returns every tracked path's outcome, or that there was no record, an unusable one, or a blocked
  * record folder.
- * @throws Error when the command fails (the record is then kept) or answers unreadably.
+ * @throws Error when a command fails (the record is then kept) or answers unreadably.
  */
 export async function restoreConfigEdits(
   transport: Transport,
   slug: string,
   edits: ConfigEdits,
 ): Promise<RestoreAnswer> {
-  return parseRestoreAnswer(
-    await evalPhp(
-      transport,
-      configEditsPhp("restore", recordStemFor(transport, slug), edits),
-      "putting back the files the plugin edits",
-      "wp/config-edits",
-      { skipWordPress: true },
+  const stem = recordStemFor(transport, slug);
+  const run = async (hold: boolean): Promise<RestoreAnswer> =>
+    parseRestoreAnswer(
+      await evalPhp(
+        transport,
+        configEditsPhp("restore", stem, edits, hold),
+        "putting back the files the plugin edits",
+        "wp/config-edits",
+        { skipWordPress: true },
+      ),
+      edits,
+    );
+  const first = await run(await mayHoldForRoot(transport));
+  if (first.kind !== "restored" || !first.held) return first;
+  const root = await putBackHeld(transport, stem, edits, first.outcomes);
+  const second = await run(false);
+  return {
+    kind: "restored",
+    held: false,
+    outcomes: mergeRootPutBack(
+      first.outcomes,
+      root,
+      second.kind === "restored" ? second.outcomes : [],
     ),
-    edits,
-  );
+  };
 }
