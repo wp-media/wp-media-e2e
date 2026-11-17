@@ -108,7 +108,7 @@ cell, plugin (as the run will build it), sites and servers, settings, the notifi
 **by name**, then every warning, what a start would refuse included:
 
 ```text
-dry run · nothing is run · config .orchestrator/config.json · state .orchestrator/
+dry run · nothing is run · suite 1.1.0 · config .orchestrator/config.json · state .orchestrator/
 1 task (bpng)
 bpng · BackWPup Pro on nginx
   backwpup pro@nginx · develop · version 9.99.99 · every scenario · cooldown 5m
@@ -139,7 +139,7 @@ a container restarting into a new PID namespace reads its own lock as another's 
 One line per event; a run's own output goes to its `run.log`:
 
 ```text
-10:15:30 orchestrator  started · 1 task (bpng) · .orchestrator/ · pid 4242
+10:15:30 orchestrator  started · suite 1.1.0 · 1 task (bpng) · .orchestrator/ · pid 4242
 10:15:31 bpng  bpng-12 started · backwpup pro@nginx · develop · .orchestrator/runs/bpng-12/run.log
 11:09:41 bpng  bpng-12 ⚠ flaky · 52 scenarios: 51 passed, 1 flaky · 54m 10s · reports/backwpup/pro@nginx/<RUN_ID>
 11:09:42 bpng  slack ✓ · datator ✓ 201
@@ -209,6 +209,9 @@ npm run orchestrator -- start --help
   task for real. It notices and refuses (exit 1), naming the `--` form.
 - `--task a b --task c` selects tasks; an unknown id is refused. Without it, every task runs.
 - A relative `--config` is from the folder you ran npm in.
+- `--version`, the dry run's first line and the `started` line (`suite <v>`, read once as it starts)
+  name the checkout's `package.json` version; not SemVer 2.0 (`v1.1.0`), over 64 characters or
+  unreadable: `unknown`.
 - Run it only through `npm run orchestrator`, never `npx`, `npm exec` or the `tsx` CLI: they put a
   process between you and it, and signals then go astray.
 
@@ -344,7 +347,9 @@ made one).
 ## Notifications
 
 - **Slack**: one message per run, every status — the outcome, counts, plugin and commit, each site's
-  WordPress and PHP, up to 20 failed then flaky scenarios with their first error line, the reason for
+  WordPress and PHP, `Suite: <v>` (`run.finished`'s `suite.version`: the run's own `run-facts.json`
+  version, else the orchestrator's boot-time one — always for a run whose end could not be read —,
+  else `null`, shown `unknown`), up to 20 failed then flaky scenarios with their first error line, the reason for
   a run that did not test or was stopped, and where its report is: `Report:` gives the
   [bundle](#report-bundle)'s download command with `reports.sshHost`, its path without; no bundle,
   the raw report folder (`scp -r`). Success is `200 ok`; anything else is logged, no retry.

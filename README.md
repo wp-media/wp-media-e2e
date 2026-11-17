@@ -145,7 +145,7 @@ Each run writes `reports/<product>/<cell>/<RUN_ID>/`:
   what a script watches and what the orchestrator reads at the end. Schema:
   [`results-schema.ts`](src/common/reporting/results-schema.ts).
 - **`run-facts.json`** — what the run tested: the plugin (ref, full commit, zip, **SHA-256**), each
-  site's WordPress, PHP, web server and database, the run's name and verdict. Rewritten as each setup
+  site's WordPress, PHP, web server and database, the suite's version, the run's name and verdict. Rewritten as each setup
   ends, so a killed run's still says what it had (`"status": "running"`).
 
 **Every report says up front what it tested**, in one line —
@@ -268,3 +268,6 @@ npm run lint         # eslint .
 npm run format:check # prettier --check .
 npm run test:unit    # unit/integration specs
 ```
+
+On each suite release, bump `package.json`'s version (`npm version <x.y.z> --no-git-tag-version`):
+the `[run]` header, run facts, the orchestrator and Slack show it.
