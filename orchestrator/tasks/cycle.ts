@@ -140,6 +140,11 @@ export interface CycleDeps {
   /** The checkout the runs start in: absolute. */
   readonly checkout: string;
   /**
+   * The suite's version the orchestrator read at its start: what a run's `run.finished` names when the
+   * run's own facts do not. Absent when it could not be read.
+   */
+  readonly suiteVersion?: string;
+  /**
    * The config's runs settings and secrets, for the run's environment and pruning; its `reports`, for
    * the bundle and the `scp` host its lines name.
    */
@@ -537,6 +542,7 @@ class Cycle {
         secrets: this.deps.secrets,
         endedAt,
         bundle,
+        ...this.suiteVersion(),
       });
     } catch (error) {
       this.say(
@@ -747,6 +753,7 @@ class Cycle {
         log: identity.log,
         hadFolder,
         bundle,
+        ...this.suiteVersion(),
         secrets: this.deps.secrets,
       });
     } catch (error) {
@@ -998,6 +1005,17 @@ class Cycle {
    */
   private failure(error: unknown): string {
     return failureLine(error, MAX_RUN_FAILURE_LENGTH, this.deps.secrets);
+  }
+
+  /**
+   * The orchestrator's suite version as an event input's field: spread, so an unknown one stays
+   * absent rather than `undefined`.
+   *
+   * @returns `{ suiteVersion }`, or nothing when it is unknown.
+   */
+  private suiteVersion(): { readonly suiteVersion?: string } {
+    const { suiteVersion } = this.deps;
+    return suiteVersion === undefined ? {} : { suiteVersion };
   }
 
   /**

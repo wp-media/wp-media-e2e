@@ -63,6 +63,13 @@ test.describe("datatorPayload", () => {
     expect(payload.test_cases).toHaveLength(52);
   });
 
+  test("carries no suite version: the record is the same, byte for byte, whatever the event's", () => {
+    const sent = JSON.stringify(payloadOf());
+    for (const version of ["2.0.0", null])
+      expect(JSON.stringify(payloadOf({ suite: { version } }))).toBe(sent);
+    expect(sent).not.toMatch(/"suite"|"version"|1\.1\.0/);
+  });
+
   test("posts only runs that tested: passed, flaky and failed", () => {
     const posted: Record<RunStatus, boolean> = {
       passed: true,

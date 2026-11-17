@@ -33,6 +33,7 @@ import { RESULTS_FILE } from "../src/common/reporting/results-schema";
 import { reply, startSink } from "./__fixtures__/http-sink";
 import type { CheckedProduct } from "./config/check";
 import { loadProductList, type ProductList } from "./config/product-list";
+import { RUN_FACTS_FILE } from "./runs/facts";
 import { runIdentity } from "./runs/identity";
 import { launchRun } from "./runs/launch";
 import { readLeaderStart } from "./runs/leader";
@@ -1873,6 +1874,116 @@ test.describe("start — what it says about itself", () => {
     expect(existsSync(join(CHECKOUT, "orchestrator", "start.ts"))).toBe(true);
     expect(KILL_SETTLE_MS).toBe(60_000);
     expect(EXIT_WAIT_MS).toBe(5_000);
+  });
+});
+
+test.describe("start — the suite's version in Slack", () => {
+  /**
+   * One `--once` run of `bpng` over the fake suite, its Slack message posted to a local sink.
+   *
+   * @param runFacts - the `run-facts.json` the run writes beside its results; none when absent.
+   * @param more - deps replacing the rig's: the version reader.
+   * @returns the message's text, as posted.
+   */
+  async function postedText(
+    runFacts: Record<string, unknown> | undefined,
+    more: Partial<StartDeps> = {},
+  ): Promise<string> {
+    const sink = await startSink(reply(200, "ok"));
+    try {
+      const config = await writeConfig({
+        tasks: [TASKS[0]],
+        notifications: {
+          slack: { webhookUrl: "https://hooks.slack.com/services/T0/B0/r3" },
+        },
+      });
+      const { reportDir } = runIdentity({
+        taskId: "bpng",
+        product: "backwpup",
+        cell: "pro@nginx",
+        number: 1,
+        startedAt: T0,
+        stateDir,
+        checkout,
+      });
+      const r = rig(
+        (id) => {
+          const behaviour = runner(id, 1, "passed");
+          return runFacts === undefined
+            ? behaviour
+            : {
+                ...behaviour,
+                writes: [
+                  ...(behaviour.writes ?? []),
+                  {
+                    path: join(reportDir, RUN_FACTS_FILE),
+                    text: JSON.stringify(runFacts),
+                  },
+                ],
+              };
+        },
+        {
+          ...more,
+          notifications: {
+            // Slack's request goes to the local sink, never to Slack.
+            fetch: (input, init) =>
+              fetch(
+                `${sink.url}${new URL(input instanceof Request ? input.url : String(input)).pathname}`,
+                init,
+              ),
+          },
+        },
+      );
+      expect(await start({ config, once: true, tasks: ["bpng"] }, r.deps)).toBe(
+        0,
+      );
+      expect(sink.requests).toHaveLength(1);
+      const body = JSON.parse(sink.requests[0]?.body ?? "{}") as {
+        text?: string;
+      };
+      return body.text ?? "";
+    } finally {
+      await sink.close();
+    }
+  }
+
+  /** `run-facts.json` of version 1 naming `suiteVersion`, nothing else this reader needs. */
+  const factsWith = (suiteVersion: unknown): Record<string, unknown> => ({
+    v: 1,
+    suiteVersion,
+    setupFailures: [],
+    cells: [],
+  });
+
+  test("a run that left no facts is posted with the orchestrator's boot-time version", async () => {
+    const text = await postedText(undefined, {
+      readSuiteVersion: () => "1.1.0",
+    });
+    expect(text.split("\n")).toContain("Suite: 1.1.0");
+  });
+
+  test("the run's own facts win over the orchestrator's version", async () => {
+    const text = await postedText(factsWith("1.2.0-rc.1"), {
+      readSuiteVersion: () => "1.1.0",
+    });
+    const lines = text.split("\n");
+    expect(lines).toContain("Suite: 1.2.0-rc.1");
+    expect(lines).not.toContain("Suite: 1.1.0");
+  });
+
+  test("facts with a version that is not valid SemVer fall back to the orchestrator's", async () => {
+    const text = await postedText(factsWith("v1.2.0"), {
+      readSuiteVersion: () => "1.1.0",
+    });
+    expect(text.split("\n")).toContain("Suite: 1.1.0");
+    expect(text).not.toContain("v1.2.0");
+  });
+
+  test("a run with neither its own nor the orchestrator's version is posted as unknown", async () => {
+    const text = await postedText(undefined, {
+      readSuiteVersion: () => undefined,
+    });
+    expect(text.split("\n")).toContain("Suite: unknown");
   });
 });
 

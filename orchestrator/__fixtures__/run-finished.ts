@@ -63,6 +63,7 @@ export function finishedEvent(
         php: "8.5.10",
       },
     ],
+    suite: { version: "1.1.0" },
     status: "failed",
     reason: null,
     startedAt: "2026-10-13T10:15:31.042Z",

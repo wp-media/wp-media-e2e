@@ -59,11 +59,28 @@ export function parseSuiteVersion(text: string): string | undefined {
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
     return undefined;
   const version: unknown = (parsed as { version?: unknown }).version;
-  return typeof version === "string" &&
-    version.length <= MAX_VERSION_LENGTH &&
-    SEMVER.test(version)
-    ? version
-    : undefined;
+  return isSuiteVersion(version) ? version : undefined;
+}
+
+/**
+ * Whether a value is a version this module would show: SemVer 2.0, at most 64 characters. The one
+ * validity rule, for readers of a version written elsewhere (a run's facts) as well as for
+ * `package.json`'s. Pure.
+ *
+ * @param value - any value.
+ * @returns `true` for a valid version string.
+ * @example
+ * ```ts
+ * isSuiteVersion("1.1.0-rc.1"); // true
+ * isSuiteVersion("v1.1.0"); // false
+ * ```
+ */
+export function isSuiteVersion(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length <= MAX_VERSION_LENGTH &&
+    SEMVER.test(value)
+  );
 }
 
 /**

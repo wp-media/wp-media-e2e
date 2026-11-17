@@ -145,6 +145,34 @@ test.describe("endRun", () => {
     expect(end.event.scenarios).toHaveLength(1);
   });
 
+  test("names the suite's version from the run's facts, else the orchestrator's, else null", async () => {
+    const withVersion = (version: string): string =>
+      JSON.stringify({
+        ...(JSON.parse(factsText()) as object),
+        suiteVersion: version,
+      });
+    const suiteOf = async (
+      facts: string | undefined,
+      suiteVersion?: string,
+    ): Promise<unknown> =>
+      (
+        await endRun(
+          await input(
+            { results: PASSED, ...(facts === undefined ? {} : { facts }) },
+            suiteVersion === undefined ? {} : { suiteVersion },
+          ),
+        )
+      ).event.suite;
+    expect(await suiteOf(withVersion("1.2.0"), "1.1.0")).toEqual({
+      version: "1.2.0",
+    });
+    await rm(join(root, "reports"), { recursive: true, force: true });
+    expect(await suiteOf(factsText(), "1.1.0")).toEqual({ version: "1.1.0" });
+    await rm(join(root, "reports"), { recursive: true, force: true });
+    expect(await suiteOf(undefined, "1.1.0")).toEqual({ version: "1.1.0" });
+    expect(await suiteOf(undefined)).toEqual({ version: null });
+  });
+
   test("takes a failed setup's reason from the facts, masked", async () => {
     const results = streamOf([
       runBegin(1),

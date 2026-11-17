@@ -118,6 +118,8 @@ export interface RunEndInput {
   readonly endedAt: Date;
   /** The run's download bundle, when one was built. */
   readonly bundle?: RunFinishedInput["bundle"];
+  /** The suite's version the orchestrator read at its start: the event's when the facts name none. */
+  readonly suiteVersion?: string;
 }
 
 /**
@@ -173,6 +175,9 @@ export async function endRun(input: RunEndInput): Promise<RunEnd> {
     reportDir: identity.reportDir,
     log: identity.log,
     ...(input.bundle === undefined ? {} : { bundle: input.bundle }),
+    ...(input.suiteVersion === undefined
+      ? {}
+      : { suiteVersion: input.suiteVersion }),
     secrets,
   });
   return { outcome, event };
