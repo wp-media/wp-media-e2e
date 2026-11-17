@@ -162,6 +162,9 @@ export const COMMAND_TIMEOUT_MS = 20_000;
  * (sudo 1.9.15p5's measured message, no `sudo:` prefix, quoting the whole command, newlines kept).
  * While `$E2E_FAKE_SUDO_DENY.noise` exists, it first prints the line a host that cannot resolve its
  * own name adds to every sudo call ({@link FAKE_SUDO_NOISE}).
+ * While `$E2E_FAKE_SUDO_DENY.sees` exists ({@link SshTestServer.sudoSees}), a call as the user it
+ * names (`root`: no `-u`) runs its command, rather than `exec`ing it, with the folder it names opened
+ * `0700`, then closed `000` again: the more a privileged user can search, stood in for.
  */
 const FAKE_SUDO = `#!/bin/sh
 if [ -e "$E2E_FAKE_SUDO_DENY.noise" ]; then echo '${FAKE_SUDO_NOISE}' >&2; fi
@@ -181,6 +184,16 @@ if [ -e "$E2E_FAKE_SUDO_DENY" ]; then
       echo 'sudo: a password is required' >&2
     fi
     exit 1
+  fi
+fi
+if [ -e "$E2E_FAKE_SUDO_DENY.sees" ]; then
+  { read -r who; read -r dir; } < "$E2E_FAKE_SUDO_DENY.sees"
+  if [ "$who" = "\${E2E_FAKE_SUDO_USER:-root}" ]; then
+    chmod 700 "$dir"
+    "$@"
+    s=$?
+    chmod 000 "$dir"
+    exit "$s"
   fi
 fi
 exec "$@"
@@ -344,6 +357,15 @@ export interface SshTestServer {
    * @param on - whether it does.
    */
   sudoNoise(on: boolean): void;
+  /**
+   * Makes the fake `sudo`, running as `who` (`root`, or a `-u` user), search `dir` while the
+   * transport's user cannot (left `000` around each call), or stops it (`undefined`).
+   *
+   * @param seen - who sees which folder.
+   */
+  sudoSees(
+    seen: { readonly who: string; readonly dir: string } | undefined,
+  ): void;
   /**
    * An ssh transport for this server, rooted at {@link root}. Its host is never resolved: connect
    * through {@link steerNodeSsh}.
@@ -628,6 +650,11 @@ async function listen(
       const noise = `${layout.sudoDeny}.noise`;
       if (on) writeFileSync(noise, "");
       else rmSync(noise, { force: true });
+    },
+    sudoSees(seen) {
+      const file = `${layout.sudoDeny}.sees`;
+      if (seen === undefined) rmSync(file, { force: true });
+      else writeFileSync(file, `${seen.who}\n${seen.dir}\n`);
     },
     transport: (overrides = {}) => ({
       mode: "ssh",

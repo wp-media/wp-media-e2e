@@ -277,13 +277,16 @@ test.describe("SSH twins: ownership, residue, log and files by identity state", 
           execAsTransport(transport, "test", ["-e", `${root}/${DATA_DIR}`]),
         ).resolves.toMatchObject({ exitCode: 1 });
         const roots = rootCalls(log.since());
-        // Elevation is probed, then root removes the survivor and re-checks it; nothing else.
+        // Elevation is probed, then root removes the survivor and re-checks it (residue's one `sh`
+        // gone-check); nothing else.
         expect(roots.some((line) => /COMMAND=\S*\/rm -rf -- /.test(line))).toBe(
           true,
         );
         expect(
           roots.filter(
-            (line) => !/COMMAND=\S*\/(true|rm|test)( |$)/.test(line),
+            (line) =>
+              !/COMMAND=\S*\/(true|rm)( |$)/.test(line) &&
+              !/COMMAND=\S*\/sh -c .* e2e-residue-gone \S+$/.test(line),
           ),
         ).toEqual([]);
       });

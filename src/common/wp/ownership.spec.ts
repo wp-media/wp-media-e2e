@@ -1189,7 +1189,7 @@ test.describe("normalizeOwnership — the catch-all is its own reason", () => {
   });
 
   test("so a real chown failure is still reported after one", async () => {
-    // No `readlink` on PATH ⇒ the resolution probe cannot start ⇒ the catch-all.
+    // No `sh` (nor `readlink`) on PATH ⇒ the resolution probe cannot start ⇒ the catch-all.
     const first = await captureConsole(async () => {
       expect(
         await normalizeOwnership(local, "wp-content/plugins/backwpup-pro"),
@@ -1197,7 +1197,9 @@ test.describe("normalizeOwnership — the catch-all is its own reason", () => {
     });
     expect(first.join("\n")).toMatch(/could not be corrected/);
 
-    // Same site, same run: the probe can now answer, and the chown is what fails.
+    // Same site, same run: the probe can now answer (the resolution runs `readlink` from `sh`),
+    // and the chown is what fails.
+    symlinkSync("/bin/sh", join(binDir, "sh"));
     stub("readlink", 'printf "%s" "$3"');
     process.env.FAIL_CHOWN = "1";
     const second = await captureConsole(async () => {

@@ -1,6 +1,6 @@
 # Phase 12 — Run as the site: the web server's identity for every site command
 
-Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8, 12.9 and 12.10 done 2026-11-12; 12.11 (live rollout, default `"auto"`), 12.11b, 12.12 and 12.13 done 2026-11-13; 12.14, 12.15a and 12.15b done 2026-11-16; 12.16 next. Parent:
+Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8, 12.9 and 12.10 done 2026-11-12; 12.11 (live rollout, default `"auto"`), 12.11b, 12.12 and 12.13 done 2026-11-13; 12.14, 12.15a, 12.15b and 12.15c done 2026-11-16; 12.16 next. Parent:
 [e2e-modernization-plan.md](e2e-modernization-plan.md) (§3 phase table). Reverses that plan's §8.2
 rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of WP Rocket's port
 ([phase-6 plan §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket)).
@@ -1542,9 +1542,8 @@ already match (`:105-110`).
   - Before it, the target must resolve (`readlink -f`, as the transport's user) to exactly `<real
     root>/<path>` (`resolvesInPlace`): no link at it or in any parent. Not `assertResolvedInsideRoot`
     — measured on a twin: a parent linked into a folder the SSH user cannot enter (`/root/x`) does not
-    resolve, its walk up then reaches the root and passes; this spec's twin test caught it. **Open**
-    (its own fix, not 12.15b): every other elevated target (residue's `rm -rf`, ownership) still
-    relies on that check.
+    resolve, its walk up then reaches the root and passes; this spec's twin test caught it. Fixed for
+    every other elevated target in 12.15c; `resolvesInPlace` stays (stricter: no link at all).
   - Gates: never in `site` (the record is the web server's, and a file it cannot write is not the
     plugin's doing), never with `elevate: false` (unprobed), never without passwordless sudo (asked
     only once something is held): then the second run answers `unwritable`, as before.
@@ -1676,6 +1675,57 @@ already match (`:105-110`).
   merge); restore always holds, record never holds, record's second run holds, restore skips root.
   PHP's failed-`chmod` hold: not unit-testable (needs a file the runner owns but cannot `chmod`),
   covered by the WP Rocket twin's apache mode-only path.
+
+### 12.15c — Resolved-path guard fail-closed (done 2026-11-16)
+
+- **Bug:** `assertResolvedInsideRoot`/`assertAllResolvedInsideRoot` stepped up on **any** `readlink -f`
+  failure: `<root>/wp-content/link -> /root/x` fails `EACCES`, the walk passed it at the root, so
+  residue's root `rm -rf`, ownership grants, plugin-dir removal, staging, site-staging, the web probe
+  and BackWPup's content copy could act through it. Anyone writing the docroot can plant one.
+- **Fix** (`wp/transport-exec.ts`): one fixed `sh` script per target (`$1` target; was 1 + one
+  `readlink` per level walked) resolves the target **and its parent** (NUL-separated, exact) and walks
+  up only past a path proved absent — unseen by `test -e` under a parent it can enter (`(cd "$p")`:
+  BusyBox's `test -x` reads mode bits, "no" for root at `000`), or an unseen parent proved in its
+  turn, up to `/` (no root-length bound: a link may spell the root shorter than a `rootDir` alias). A
+  dangling link is followed by the script from its own folder (≤ 40 hops); a `readlink` killed by a
+  signal, `-f` or not, kills the script (`CommandKilledError`). Exits: 0, 3 unsearchable, 4
+  unfollowable (exists, `ELOOP`/`ENOTDIR`/> 40 links); anything else unknown. Absent paths pass.
+- **Audit (2026-11-16), fixed:** (1) an unsearchable folder (`uploads` `0700` `www-data`) refused every
+  residue path beneath it → exit 3 re-runs the same script as the identity (`ResolveOptions.identity`,
+  lazy; residue removal and data-dir prep pass it), then root (`elevationSupport` `available`); refused
+  only if none can, naming the host prerequisite. Also found: residue's re-read (`test -e -o -L`) read
+  such leftovers as removed, so root never retried them (develop too) → one `sh` check, gone only under
+  an enterable ancestor. (2) refusals name their cause: root unresolvable, outside (resolved path),
+  unfollowable, unsearchable (who was asked). (3) see Fix. (4) no `trim()`: `resolveOnTarget` keeps
+  what readlink printed less the transport's one newline; the script's output is exact, and `-ef`
+  catches macOS's `readlink -f` dropping a trailing newline. (5) parent checked too (`<root>/X -> /out`,
+  `/out/name -> <root>/…`). (6) see Fix.
+- **Also fixed (found here, measured):** BusyBox `readlink -f` resolves a dangling **relative** link
+  from the working directory: `uploads/evil -> sub/gone` with `uploads/sub -> /out` was judged
+  `<root>/sub/gone` (inside) on the `docker` transport, where commands run in the root.
+- **Not changed:** `resolveOnTarget` (root, `resolvesInPlace`'s file, plugin-dir) still trusts one
+  `readlink -f` (a name ending `\r` loses it: `resolvesInPlace`'s exact comparison then refuses);
+  `resolvesInPlace` stays stricter (no link at all, exact path). Callers other than residue get root's
+  retry only (in `site` their folders are the identity's own).
+- **Verified:** 37 harness cases × macOS `sh`, ubuntu:24.04, BusyBox `wordpress:cli` (as uid 1000 and
+  as root): same verdicts but macOS refusing a trailing-newline name (fail-closed). Mutants killed:
+  old walk, no self-exists, no parent-exists, no enter-check, relative link as absolute, no dangling
+  hop, `readlink -f` before the hop, no signal propagation (both reads), no root/identity retry, residue
+  without identity, old re-read, unsearchable as unfollowable, no root message, `trim()` (TS, both),
+  no `-ef`, no parent check, no root skip, root-length bound. Equivalent: bare `$(readlink -f)` (`-ef`
+  catches it), `-L` beside `-e`.
+- **Specs:** `transport-exec.spec.ts` (36: local; ssh server: command count, a failing/BusyBox-like/
+  killed `readlink`, the fake `sudo` seeing a folder as root or the identity — `sudoSees` in the
+  fixture), `housekeeping.site.ssh.spec.ts` (residue under an unsearchable `uploads`: identity, root,
+  link out, neither), `transport-exec.ssh-twins.spec.ts` (`/root` link refused as outside, a
+  `www-data` `0700` folder passed as root, refused with `elevate: false`; both stacks).
+- **Changed specs** (the guard now runs `sh`, refuses earlier and names causes):
+  `housekeeping.site.ssh.spec.ts` (root-mkdir failure from a `0500` parent, not a file there),
+  `housekeeping.ssh-twins.spec.ts` (root's re-check is the `sh` gone-check, not `test`),
+  `web-identity.ssh.spec.ts` (the FIFO plant waits until the guard is done with the target on BSD),
+  `ownership.spec.ts` (`sh` put on the stub `PATH` for the second call), `staging.site.ssh.spec.ts`
+  (expects the script's command line), `transport-exec.spec.ts`/twins (`could not be resolved` split
+  into the cause's wording; a `/root` link is now refused as outside once root resolves it).
 
 ### 12.16 — WP Rocket lifecycle scenario
 
