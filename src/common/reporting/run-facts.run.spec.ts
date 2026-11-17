@@ -39,6 +39,12 @@ import {
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const FIXTURE_DIR = join(REPO_ROOT, "src/common/__fixtures__/results");
 const PRODUCT = "factsprobe";
+/** The checkout's own version: the facts name it, read from the repository, not the run's folder. */
+const SUITE_VERSION = (
+  JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
+    version: string;
+  }
+).version;
 
 /** How long one child may take: `bddgen`, a short run, or Allure's generation. */
 const CHILD_TIMEOUT_MS = 90_000;
@@ -289,15 +295,24 @@ test.describe("the run facts, through the real runner, in the rendered reports",
       title: TITLE_X,
       runName: "facts <probe> & co",
       requestedRef: "develop",
+      suiteVersion: SUITE_VERSION,
     });
-    expect(properties?.split("\n").slice(0, 4)).toEqual([
+    const lines = properties?.split("\n") ?? [];
+    expect(lines.slice(0, 4)).toEqual([
       "Status=passed",
       "Plugin=unknown\\: artifacts setup skipped",
       "Site=unknown\\: auth setup skipped",
       `Cell=${PRODUCT} \\u00B7 x`,
     ]);
+    // The suite's version is the last fact, in Allure's metadata and in the Cucumber banner.
+    expect(lines.filter((line) => line !== "").at(-1)).toBe(
+      `Suite=${SUITE_VERSION}`,
+    );
 
     const folder = reportDir("x", "normal");
+    expect(readFileSync(join(folder, CUCUMBER_REPORT_FILE), "utf8")).toContain(
+      `<th scope="row">Suite</th><td>${SUITE_VERSION}</td></tr></table>`,
+    );
     expect(await renderHtmlTitle(page, folder)).toBe(TITLE_X);
     expect(await renderCucumber(page, folder)).toEqual({
       first: BANNER_ID,
