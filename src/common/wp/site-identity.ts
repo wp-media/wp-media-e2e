@@ -661,6 +661,19 @@ export function registerSiteIdentityVerdicts(
 }
 
 /**
+ * The pre-flight's verdict this process was given for the site's install
+ * ({@link registerSiteIdentityVerdicts}): who the web server's PHP runs as, for code judging what the
+ * web server can do. `undefined` when none was given — a site not on `auto`, or a failed probe.
+ *
+ * @param transport - the site's transport.
+ */
+export function siteIdentityVerdict(
+  transport: Transport,
+): SiteIdentityVerdict | undefined {
+  return verdicts.get(installKey(transport));
+}
+
+/**
  * The site's identity state, resolved once per install per process (concurrent callers share one
  * resolution).
  *

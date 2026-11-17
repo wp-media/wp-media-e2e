@@ -1,6 +1,6 @@
 # Phase 12 — Run as the site: the web server's identity for every site command
 
-Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8, 12.9 and 12.10 done 2026-11-12; 12.11 (live rollout, default `"auto"`), 12.11b, 12.12 and 12.13 done 2026-11-13; 12.14, 12.15a, 12.15b and 12.15c done 2026-11-16; 12.16 next. Parent:
+Status: planned 2026-11-10, audited the same day (§7); done 2026-11-17. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8, 12.9 and 12.10 done 2026-11-12; 12.11 (live rollout, default `"auto"`), 12.11b, 12.12 and 12.13 done 2026-11-13; 12.14, 12.15a, 12.15b and 12.15c done 2026-11-16; 12.16 done 2026-11-17: **Phase 12 done.** Parent:
 [e2e-modernization-plan.md](e2e-modernization-plan.md) (§3 phase table). Reverses that plan's §8.2
 rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of WP Rocket's port
 ([phase-6 plan §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket)).
@@ -257,7 +257,7 @@ Code never cites this plan; docs may.
 
 | # | Delivers | Depends | Parallel with | Effort / difficulty |
 | --- | --- | --- | --- | --- |
-| 12.0a | Twin images, `system.sh`, `site.sh` variants | — | 12.1, 12.2 | M / M |
+| 12.0a | Twin images, `system.sh`, `site.sh` variants (done 2026-11-10) | — | 12.1, 12.2 | M / M |
 | 12.0b | Compose, npm scripts, sites overlays, `transport.port`, twin CI (done 2026-11-10) | 12.0a | 12.3 | S / S |
 | 12.1 | ssh command line: our quoting, `cd … &&`; an executing ssh test server (done 2026-11-10) | — | 12.0a, 12.2 | S / M |
 | 12.2 | Config: `runAs`, `umask`, `wpUser` (done 2026-11-10) | — | 12.0a, 12.1 | S / S |
@@ -269,12 +269,12 @@ Code never cites this plan; docs may.
 | 12.8 | Install outputs, handed over in fallback (done 2026-11-12) | 12.7 | 12.9, 12.10 | S / S |
 | 12.9 | Pre-flight and healthcheck reports, banner, sudoers checks (done 2026-11-12) | 12.3–12.6 | 12.8, 12.10 | M / M |
 | 12.10 | BackWPup on the new system; the two-user scenario opts back; private folder (done 2026-11-12) | 12.0b, 12.5–12.7; step 4 also 12.9 | 12.8, 12.9 (steps 1–3) | M / M |
-| 12.11 | Docs, decision record, live verification, default `"auto"` | 12.0b–12.10 | — | M / M |
-| 12.12 | WP Rocket declarations and licence | 12.11 | 12.13 | S / M |
-| 12.13 | Settling admin request after install | 12.11 | 12.12 | S / M |
-| 12.14 | Deactivation-recovery chain | 12.12 | — | S / M |
-| 12.15 | In-place cleanup of `wp-config.php`, `.htaccess`, `advanced-cache.php` | 12.14 | — | M / H |
-| 12.16 | WP Rocket lifecycle scenario | 12.12–12.15 | — | S / M |
+| 12.11 | Docs, decision record, live verification, default `"auto"` (done 2026-11-13) | 12.0b–12.10 | — | M / M |
+| 12.12 | WP Rocket declarations and licence (done 2026-11-13) | 12.11 | 12.13 | S / M |
+| 12.13 | Settling admin request after install (done 2026-11-13) | 12.11 | 12.12 | S / M |
+| 12.14 | Deactivation-recovery chain (done 2026-11-16) | 12.12 | — | S / M |
+| 12.15 | In-place cleanup of `wp-config.php`, `.htaccess`, `advanced-cache.php` (12.15a–c done 2026-11-16) | 12.14 | — | M / H |
+| 12.16 | WP Rocket lifecycle scenario (done 2026-11-17) | 12.12–12.15 | — | S / M |
 
 ### Twin variants (12.0a) and what each must produce
 
@@ -1727,14 +1727,66 @@ already match (`:105-110`).
   (expects the script's command line), `transport-exec.spec.ts`/twins (`could not be resolved` split
   into the cause's wording; a `/root` link is now refused as outside once root resolves it).
 
-### 12.16 — WP Rocket lifecycle scenario
+### 12.16 — WP Rocket lifecycle scenario (done 2026-11-17)
 
-- `src/projects/wp-rocket/features/plugin-lifecycle.feature`, `@plugin`:
-  > WP Rocket serves a cached page once activated and leaves the site as it found it when removed.
-  - "Cached" means the footer comment plus a second request served from cache.
-- Runs on both twins in `site`, `no-sudo` and `wpconfig-root`. On a WP Rocket cell once the operator
-  creates one (none exists, §1.3).
-- Done: green everywhere; tracked files byte-identical after each run; no warning in `site`.
+- `features/plugin-lifecycle.feature`, `@plugin`: "WP Rocket serves a cached page once activated, and
+  once removed its page footprint and the folders its uninstall deletes are gone" (renamed at the
+  audit: WP Rocket does not leave the site as it found it — it writes `WP_CACHE` false and leaves an
+  emptied `advanced-cache.php`; "as it found it" is the teardown's put-back, proved by
+  `lifecycle.ssh-twins.spec.ts`). Steps `steps/page-cache.steps.ts`; WP Rocket's `fixtures.ts` (new)
+  adds `visitor` (`support/visitor.ts`): logged out, HTTP, a fresh client per visit (`open` records,
+  `peek` does not), and `pageCache` (when this install happened).
+- **Cache signal** (`support/footprint.ts`, read from 3.24.1 `Buffer/class-cache.php`
+  `get_rocket_footprint`/`maybe_process_buffer`): the footprint comment ends the page; a generated page
+  has none of ` - Debug: cached@<time>`, which only the cache file holds (served by
+  `advanced-cache.php` or the server's rewrite rules). White-label forms read too. Never timing.
+- **Logged out:** `cache_logged_user` is 0 on first install (`rocket_first_install`) and the
+  logged-in cookie is then a rejected cookie (`get_rocket_cache_reject_cookies`). Measured: inside a
+  test `playwright.request.newContext` takes the project's `use` options, the saved login included
+  (the admin bar, no footprint): the visitor passes an empty `storageState`.
+- **Steps:** (1) `WP_CACHE` on (`support/wp-cache.ts`, `wp eval`). WP Rocket writes it as the site's
+  commands (activation) and as the web server (`maybe_set_wp_cache` on `admin_init`: the settling
+  request), so **skipped** only when **neither** can write `wp-config.php` (`wpconfig-root`), naming
+  both users; PHP's identity is the commands' in `site` (and docker/local), else the pre-flight's
+  verdict (`siteIdentityVerdict`), judged from the file's mode (group-writable counts: PHP's other
+  groups are unknown); unknown → "may write" → fail, never skip. Off with either able → fail. The
+  plugin's main file's mtime is read first (`support/install-time.ts`: WordPress's unzip writes
+  contents, so the install dates it): a `cached@` older than it is a killed run's copy and passes none
+  of the steps (never the Given's own time: preload may cache the page before it). Then the home page is peeked until a page carries a footprint (≤ 15 s):
+  where the settling admin request wrote `WP_CACHE` (`web-config`: WP-CLI as `ubuntu` cannot), PHP-FPM's
+  opcache runs the old `wp-config.php` for up to `opcache.revalidate_freq` (2 s on the twins; measured
+  failing without the wait). (2) two visits: the first has a footprint, the second `cached`, both
+  since the install. (3) removal: `stopWpRocketWorkReport` (deactivate, let preload/Action Scheduler
+  finish; returns the deactivation typed) then `uninstallPlugin`. A **forced** deactivation is judged
+  by WP Rocket's own causes as the site's commands (`support/deactivation-causes.ts`: no writable
+  `wp-config.php` where `find_wpconfig_path` looks; `$is_apache` and `.htaccess` unwritable): none →
+  fail (a WP Rocket regression); else warned as the hooks warn a recovered deactivation
+  (`console.warn` + `forced-deactivation` attachment; the hooks add no annotation). Reachable on
+  `web-config`. The hooks' own stop says a forced deactivation in its warned `stopped-running-work`
+  note (`forcedNote`), consistent.
+  (4) a new visit has no footprint (no processing, no stale copy via `.htaccess` rules a WP-CLI
+  deactivation leaves); nothing `WP_ROCKET_UNINSTALL_REMOVES` names is left (`support/uninstall-leftovers.ts`),
+  checked before the teardown's sweep would hide it.
+- **"As it found it"** split: the scenario asserts what WP Rocket owns (public page, its uninstall's
+  folders); byte identity of `wp-config.php`/`.htaccess`/`advanced-cache.php` is the teardown's put-back
+  (warned otherwise), proved by `lifecycle.ssh-twins.spec.ts` and checked per run below.
+- **Live (twins, 3.24.1 `develop` 4d37b19, both stacks):** `site`, `no-sudo`, `web-config` green;
+  `wpconfig-root` skipped, its teardown green (forced deactivation warned, file untouched). After the
+  audit fixes (same build): `web-config`'s forced deactivation warned by the step (`forced-deactivation`,
+  wpconfig cause for `ubuntu`), green; `wpconfig-root` still skipped, naming both users (`www-data`
+  twice in `site`). WP-CLI has `$is_apache` false (measured), so `.htaccess` is never a cause of the
+  stop's deactivation. Tracked
+  paths (`wp-config.php`, `.htaccess`, `advanced-cache.php`, `cache/`, `wp-rocket-config/`; type, owner,
+  mode, inode, SHA-256) identical before/after every run, no record left in `/tmp`; the empty
+  `mu-plugins` folder stays (12.12's decision). `site`: no suite warning, no PHP warning.
+- **WP Rocket findings (not ours, not masked):** `Buffer\Config::get_config_file_path()` tests the
+  config file with `realpath()`, which PHP-FPM answers from its realpath cache (`realpath_cache_ttl`
+  120 s): within 2 min of a deactivation deleting `wp-rocket-config/<host>.php`, each request in a
+  worker that had resolved it logs two `include(): Failed to open stream` warnings (reproduced: file
+  created, 8 requests, deleted, 8 requests → 16). Back-to-back WP Rocket `@plugin` scenarios will log
+  them (warnings, not failures). `web-config`'s `chmod(): Operation not permitted` warnings are
+  WordPress's direct filesystem on a file another user owns (`fallback/owner-not-web`).
+- On a real WP Rocket cell once the operator creates one (none exists, §1.3).
 
 ## 5. Risks
 

@@ -8,9 +8,13 @@ import {
   classifyRunProbe,
   decideIdentityState,
   describeIdentityState,
+  registerSiteIdentityVerdicts,
+  resetSiteIdentityCaches,
   runIdentityFrom,
   runProbeArgv,
+  siteIdentityVerdict,
 } from "./site-identity";
+import { installKey } from "./transport-exec";
 import { RUN_AS_NAME, RUN_AS_SCRIPT } from "./run-as-argv";
 import type {
   FallbackReason,
@@ -878,4 +882,20 @@ test("asTransportUser on docker and local only drops wpUser: they have no runAs"
 test("asTransportUser is idempotent: a copy comes back as it is", () => {
   const copy = asTransportUser(SSH);
   expect(asTransportUser(copy)).toBe(copy);
+});
+
+// ── Registered verdicts ──────────────────────────────────────────────────────────────────────────
+
+test("siteIdentityVerdict answers the verdict registered for the site's install, and nothing for another", () => {
+  resetSiteIdentityCaches();
+  try {
+    expect(siteIdentityVerdict(SSH)).toBeUndefined();
+    registerSiteIdentityVerdicts(new Map([[installKey(SSH), IS_WEB]]));
+    expect(siteIdentityVerdict(SSH)).toBe(IS_WEB);
+    // The install, not the object: a copy with another runAs is the same site.
+    expect(siteIdentityVerdict({ ...SSH, runAs: false })).toBe(IS_WEB);
+    expect(siteIdentityVerdict({ ...SSH, host: "other.test" })).toBeUndefined();
+  } finally {
+    resetSiteIdentityCaches();
+  }
 });

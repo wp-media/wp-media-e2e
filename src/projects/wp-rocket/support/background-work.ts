@@ -611,6 +611,31 @@ export async function stopWpRocketWork(
   budgets: BackgroundWorkBudgets = BACKGROUND_WORK_BUDGETS,
   deps: BackgroundWorkDeps = REAL_DEPS,
 ): Promise<string | undefined> {
+  return (await stopWpRocketWorkReport(transport, budgets, deps)).said;
+}
+
+/** What {@link stopWpRocketWorkReport} did. */
+export interface StopReport {
+  /** What {@link stopWpRocketWork} says; `undefined` when there is nothing to say. */
+  readonly said: string | undefined;
+  /** The deactivation it made; `undefined` when WP Rocket was not loaded (none was needed). */
+  readonly deactivation: StopDeactivation | undefined;
+}
+
+/**
+ * {@link stopWpRocketWork}, also returning the deactivation it made, typed: for a caller that judges
+ * a forced one (a scenario asserting WP Rocket's removal), never by matching the words.
+ *
+ * @param transport - the site to settle.
+ * @param budgets - how long each part may take; the hooks' own by default.
+ * @param deps - the I/O; real by default.
+ * @throws as {@link stopWpRocketWork} does.
+ */
+export async function stopWpRocketWorkReport(
+  transport: Transport,
+  budgets: BackgroundWorkBudgets = BACKGROUND_WORK_BUDGETS,
+  deps: BackgroundWorkDeps = REAL_DEPS,
+): Promise<StopReport> {
   const first = await readSteadily(transport, deps, budgets.pollMs);
   const loaded = first.listed && first.present;
   // Until when a request could load WP Rocket, as far as this first look can tell: always while it is
@@ -623,7 +648,10 @@ export async function stopWpRocketWork(
       : Number.NEGATIVE_INFINITY;
   const foundFirst = workInFlight(first, budgets, firstCutoff);
   if (!loaded && foundFirst.length === 0) {
-    return staleNote(staleWork(first, budgets.drainMs));
+    return {
+      said: staleNote(staleWork(first, budgets.drainMs)),
+      deactivation: undefined,
+    };
   }
 
   let gate: string;
@@ -662,9 +690,11 @@ export async function stopWpRocketWork(
       : deactivation?.kind === "forced"
         ? forcedNote(deactivation, !stillActive)
         : undefined;
-  return (
-    [said, stale].filter((part) => part !== undefined).join(" ") || undefined
-  );
+  return {
+    said:
+      [said, stale].filter((part) => part !== undefined).join(" ") || undefined,
+    deactivation,
+  };
 }
 
 /**

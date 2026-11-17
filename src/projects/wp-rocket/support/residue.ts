@@ -22,6 +22,15 @@ const CACHE_DIRS = [
 const CONFIG_DIR = "wp-content/wp-rocket-config";
 
 /**
+ * What WP Rocket's own uninstall deletes from the filesystem (`WPRocketUninstall`): its cache folders
+ * and its config folder — not `wp-content/cache` itself, nor `advanced-cache.php`.
+ */
+export const WP_ROCKET_UNINSTALL_REMOVES: readonly string[] = [
+  ...CACHE_DIRS,
+  CONFIG_DIR,
+];
+
+/**
  * What activation may write outside the plugin's folder (`ProductConfig.installOutputs`). Measured
  * (twin, licensed): `advanced-cache.php`, `cache/{wp-rocket,min,busting,critical-css}` and
  * `wp-rocket-config`; the other cache folders appear on later requests, and are declared so an
@@ -44,7 +53,7 @@ export const WP_ROCKET_INSTALL_OUTPUTS: readonly string[] = [
  * (`./config-edits.ts`).
  */
 export const WP_ROCKET_SITE_RESIDUE: readonly SiteResidue[] = [
-  ...[...CACHE_DIRS, CONFIG_DIR].map((path): SiteResidue => ({
+  ...WP_ROCKET_UNINSTALL_REMOVES.map((path): SiteResidue => ({
     path,
     prepare: false,
   })),
