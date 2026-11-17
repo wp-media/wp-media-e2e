@@ -316,10 +316,17 @@ test.describe("site state: through an inbox", () => {
     const sent = server.commands.slice(before);
     const removal = sent.indexOf(asSite("rm", ["-rf", "--", area]));
     expect(removal).toBeGreaterThan(-1);
-    // Where the area really leads is asked first, as the transport's user.
-    expect(sent.slice(0, removal)).toContain(
-      asTransport("readlink", ["-f", "--", area]),
-    );
+    // Where the area really leads is asked first, as the transport's user: the resolved-path
+    // guard's one `sh -c <script> <name> <area>`.
+    const head = `${asTransport("sh", ["-c"])} `;
+    const tail = asTransport("x", ["e2e-resolve-path", area])
+      .split("exec 'x'")
+      .at(1);
+    expect(
+      sent
+        .slice(0, removal)
+        .some((line) => line.startsWith(head) && line.endsWith(tail ?? "-")),
+    ).toBe(true);
     expect(readFileSync(stagedPath(), "utf8")).toBe(SOURCE_TEXT);
     expect(warnings).toEqual([
       expect.stringMatching(

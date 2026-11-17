@@ -20,7 +20,7 @@ import {
 } from "./paths";
 import { SiteResidueRemovalFailedError } from "./errors";
 import { errorMessage } from "../guards";
-import type { ElevationSupport, ExecResult } from "./exec";
+import type { ElevationSupport, ExecResult, ResolveOptions } from "./exec";
 import type { SiteResidue, Transport } from "../config/types";
 
 /**
@@ -593,7 +593,13 @@ async function prepareOneDataDir(
   // privileged `chmod 0777` and, later, a privileged `rm -rf` act outside the site while every
   // lexical check agreed. Measured: content outside the root was removed that way. Checked before
   // `mkdir`, which happily follows a linked parent and would hide it.
-  await assertResolvedInsideRoot(transport, target, root, describe);
+  await assertResolvedInsideRoot(
+    transport,
+    target,
+    root,
+    describe,
+    resolvingAsIdentity(transport),
+  );
   // The guard above lets a link that stays inside the site through — and `chmod` follows the link it
   // is given: a data directory linked at the root would open the root itself `0777`, as root if need
   // be. A data directory is a directory; a link where one belongs is refused, wherever it leads.
@@ -846,17 +852,41 @@ async function removeAll(
 }
 
 /**
- * Whether anything is still at `path`, a link included — dangling or not. `test -e` alone follows a
- * link, so a dangling one the transport's user could not unlink would read as gone and never be
- * retried with privileges. One command (`-o`, which GNU, BusyBox and BSD `test` all take), so the
- * check costs no extra round-trip; `test` takes no `--`, and the path is absolute, so it cannot be
- * read as an operator.
+ * `sh -c` script, `$1` an absolute path: exits 0 only once nothing is **proved** to be there — not a
+ * link (`-L`: `-e` alone follows one, so a dangling link the transport's user could not unlink would
+ * read as gone and never be retried with privileges), and its nearest existing ancestor a folder the
+ * user can search — entered, `(cd "$p")`, never `test -x`, which BusyBox answers from the mode bits
+ * (root: "no" at `000`) — or a file, so nothing can be beneath it. Under a folder it cannot search,
+ * `test -e` fails as `EACCES` just as for an absent path: measured, `uploads` at `0700` another
+ * user's read every leftover in it as removed, so root was never asked. Any other exit (that one,
+ * `sudo` refusing, no `sh`) reads as "still there".
+ */
+const GONE_SCRIPT = [
+  '{ [ -e "$1" ] || [ -L "$1" ]; } && exit 1',
+  "p=$1",
+  'while [ "$p" != / ]; do',
+  "  p=${p%/*}",
+  '  [ -n "$p" ] || p=/',
+  '  [ -e "$p" ] || continue',
+  '  [ -d "$p" ] || exit 0',
+  '  (cd "$p") 2>/dev/null && exit 0',
+  "  exit 1",
+  "done",
+  "exit 0",
+].join("\n");
+
+/** `$0` of {@link GONE_SCRIPT}'s shell, so a process listing says what it is. */
+const GONE_NAME = "e2e-residue-gone";
+
+/**
+ * Whether anything may still be at `path` ({@link GONE_SCRIPT}): one command, so the check costs no
+ * extra round-trip.
  *
  * @param path - the absolute path removal acted on.
  * @param run - how to run one command, at the privilege this pass uses.
  */
 async function stillThere(path: string, run: Runner): Promise<boolean> {
-  return (await run("test", ["-e", path, "-o", "-L", path])).exitCode === 0;
+  return (await run("sh", ["-c", GONE_SCRIPT, GONE_NAME, path])).exitCode !== 0;
 }
 
 /**
@@ -964,6 +994,22 @@ export async function removeSiteResidue(
 }
 
 /**
+ * Lets the resolved-path guard ask the site's identity, in `site`, about a folder the transport's
+ * user cannot search: the web server's folders are its own (a `0700` `uploads/`), and it removes
+ * there first anyway. The state is resolved only if the guard needs it.
+ *
+ * @param transport - the target site's transport.
+ */
+function resolvingAsIdentity(transport: Transport): ResolveOptions {
+  return {
+    identity: async () => {
+      const state = await resolveSiteIdentity(transport);
+      return state.kind === "site" ? state : undefined;
+    },
+  };
+}
+
+/**
  * The two removal passes over what was found — see {@link removeSiteResidue}.
  *
  * What it costs does not grow with what it finds: the root is resolved once, a family is checked
@@ -1006,6 +1052,7 @@ async function removeFound(
     [...targets.paths, ...targets.families.keys()],
     root,
     describeRemoval(root),
+    resolvingAsIdentity(transport),
   );
 
   const removal = await removeTargetsEscalating(transport, root, targets);

@@ -556,8 +556,11 @@ directories** on the QA cell before this existed.
   28. So the root is resolved once (`assertAllResolvedInsideRoot`), a family is checked once via its
   parent (its members are listed directories, never links, so inside the root exactly when the parent
   is), each pass removes everything in one `rm -rf` (chunked at 200 paths) and re-reads with one
-  listing per family plus a `test -e p -o -L p` per path (a dangling link counts). A failed re-listing with the parent still there counts
-  every member as a survivor: "could not look" never reads "gone".
+  listing per family plus one `sh` check per path: gone only once nothing is there (a dangling link
+  counts) **and** its nearest existing ancestor is a folder the pass can enter, or a file — under a
+  folder it cannot search `test -e` fails as for an absent path, and leftovers in a `0700` `uploads`
+  read as removed, so root was never asked (measured). A failed re-listing with the parent still there
+  counts every member as a survivor: "could not look" never reads "gone".
 - `normaliseResiduePath` rejects anything not below the root: absolute, escaping, a directory
   WordPress owns (`wp-content/uploads` and friends), or inside `wp-admin`/`wp-includes`. It guards
   against a config typo, not a hostile config.
@@ -745,10 +748,30 @@ But a link in any **parent** is resolved by the kernel first: with `wp-content/u
 `rm -rf <root>/wp-content/uploads/backwpup` deleted `/out/backwpup` and `mkdir -p` created
 `/out/newdir` (measured), while every lexical guard agreed.
 
-So `assertResolvedInsideRoot` ([`wp/transport-exec.ts`](../../src/common/wp/transport-exec.ts)) asks **where the path really leads**: it resolves target and root with
-`readlink -f` and requires the first inside the second. A path not yet there cannot be a link, so it
-walks up to the deepest existing ancestor (not relying on `readlink -f` tolerating one missing
-component, which GNU and BusyBox do and others do not). An unresolvable path is **refused**: unknown reads as no. It runs
+So `assertResolvedInsideRoot` ([`wp/transport-exec.ts`](../../src/common/wp/transport-exec.ts)) asks **where the path really leads**: it resolves the root
+with `readlink -f` (once per batch; one that does not resolve is refused as such), then each target
+**and its parent** with one fixed `sh` script per target, and requires both inside the root — `rm -rf`
+and `chown -h` act on the last entry in its parent, so `<root>/X -> /out` with `/out/name -> <root>/…`
+is refused although `name` leads back in (the root itself as a target skips the parent). A path not yet
+there cannot be a link, so the script walks up to the deepest existing ancestor (GNU and BusyBox
+`readlink -f` tolerate one absent last component, BSD/macOS none), stepping past a component **only
+once it is proved absent**: unseen by `test -e` under a parent the user can enter (`(cd "$p")`, never
+`test -x`, which BusyBox answers from the mode bits). No bound at the root's length: a link may spell
+the root shorter than a `rootDir` alias of it. A dangling link is followed by the script itself, from
+the link's folder (≤ 40 hops): BusyBox's `readlink -f` reads a dangling relative link from the working
+directory (measured: `uploads/evil -> sub/gone` judged `<root>/sub/gone` while the kernel follows
+`uploads/sub`, a link out). Output is exact (`$(… && echo .)`, NUL-separated; macOS's `readlink -f`
+drops a trailing newline, caught by `-ef`), so a sibling `<root> ` or `<root>⏎` never reads as the
+root. Each refusal names its cause: leads outside (the resolved path), exists but cannot be followed
+(a loop, > 40 links, a file where a folder should be), or **cannot be searched**. A folder on the way
+the transport's user cannot enter (`uploads` at `0700`, the web server's) is resolved again by whoever
+can: the site's identity in `site` when the caller passes it (residue removal and data-directory
+preparation do), then root when `elevationSupport` is `available` (`docker`: always); only if none
+can is the target refused — a **host prerequisite**: the transport's user must be able to search every
+folder down to it, or have passwordless `sudo` (no `transport.elevate: false`). (Before 12.15c any
+`readlink` failure stepped up: `<root>/wp-content/link -> /root/x` fails with `EACCES` and the walk
+passed it at the root, measured on the nginx twin.) Cost: one command per target, plus the root once;
+the retries only on that path. A killed `readlink` kills the script (`CommandKilledError`). It runs
 before every privileged path: ownership normalisation (warns, returns `failed`), data-directory
 preparation and residue removal (both throw). Removal is guarded before **both** passes: the unprivileged pass still runs as root when the transport's user is root (a container, a root SSH login), and deleting elsewhere is wrong at any privilege. Verified on a live container: with a linked ancestor, preparation and removal both
 refused and the outside directory kept its contents and `0700` mode.

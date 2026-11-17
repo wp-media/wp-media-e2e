@@ -108,7 +108,11 @@ alias is never run) ([the ssh command line](../architecture/wordpress-automation
   survived; `wp` is never elevated. Needs passwordless `sudo` for the
   transport's user on `local`/`ssh` (nothing on `docker`). `false` where that user must stay
   unprivileged; cleanup then reports what it could not remove
-  ([elevated housekeeping](../architecture/wordpress-automation.md#elevated-housekeeping)).
+  ([elevated housekeeping](../architecture/wordpress-automation.md#elevated-housekeeping)). Root
+  also resolves a path under a folder the transport's user cannot search (`uploads` at `0700`, the
+  web server's); with neither root nor, in `site`, the identity able to, every privileged step on such
+  a path is **refused** (residue removal fails the scenario): the host must then let the transport's
+  user search every folder down to it ([symlinks](../architecture/wordpress-automation.md#symlinks)).
 - **`fileOwner`** (**leave it unset**) — who should own the files the suite installs, `"user:group"`,
   or `false` to switch ownership normalisation off for the site. WP-CLI installs as the transport's
   user, which the web server is not, so the suite restores the ownership the install already uses, read

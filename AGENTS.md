@@ -573,7 +573,9 @@ automatically, and that verification **must not** be skipped. Mirrored as a comm
   Override per site with `transport.fileOwner` (`"user:group"`, or `false`).
 - An elevated target built from `rootDir` passes the lexical guards in `wp/paths.ts` and
   `assertResolvedInsideRoot` (`wp/transport-exec.ts`), which refuses a path a symlink in any parent leads out of
-  the docroot, or one it cannot resolve. A symlink **at** an ownership target (inside the root, so it
+  the docroot (the target or the folder holding it), or one it cannot resolve (it steps up only past a
+  component proved absent; a folder the transport's user cannot search is resolved again as the
+  site's identity, if passed, then root — refused only when none can). A symlink **at** an ownership target (inside the root, so it
   passes) is refused by the grant's own root command (`GRANT_SCRIPT`): `chmod` follows an operand.
 - Leftovers: `ProductConfig.siteResidue` (files, `wp/residue.ts`; as the site's commands run first —
   the identity in `site` —, then only what survived elevated; `transport.elevate: false` refuses elevation) and `ProductConfig.siteDbResidue`

@@ -34,7 +34,8 @@ import {
  * `sudo` — here a `sudo` that stands in for root by lending the user write access to the root for the
  * one command (and setting `E2E_ROOT=1` for it) — or reported `not-writable` when elevation is refused
  * or unavailable. A wrapped `readlink` (the resolved-path guard's tool) can answer "outside the root"
- * for one path, or plant a symlink at it right after answering: the race between guard and write.
+ * for one path, or plant a symlink at it once the guard is done with it: the race between guard and
+ * write.
  */
 
 let server: SshTestServer;
@@ -82,9 +83,14 @@ test.beforeAll(async () => {
       'if [ "$mode" = outside ] && [ "$last" = "$target" ]; then echo /elsewhere/probe.php; exit 0; fi',
       'if [ "$mode" = segv ] && [ "$last" = "$target" ]; then kill -SEGV $$; fi',
       `'${real("readlink")}' "$@"; s=$?`,
-      'if [ "$mode" = plant ] && [ "$last" = "$target" ]; then',
+      // `plant` once the guard is done with the target: after a resolve of it that succeeded (GNU,
+      // BusyBox: an absent last component resolves), else after the guard's walk has moved on to
+      // its folder (BSD resolves no absent path, so the walk first proves the target absent).
+      `armed='${readlinkMode}.armed'`,
+      'if [ "$mode" = plant ] && [ "$last" = "$target" ] && [ "$s" -ne 0 ]; then : > "$armed"; fi',
+      'if [ "$mode" = plant ] && { { [ "$last" = "$target" ] && [ "$s" -eq 0 ]; } || { [ "$last" != "$target" ] && [ -e "$armed" ]; }; }; then',
       `  chmod u+w '${started.root}'; ln -s "$(cat '${plantTo}')" "$target"; chmod u-w '${started.root}'`,
-      `  rm -f '${readlinkMode}'`,
+      `  rm -f '${readlinkMode}' "$armed"`,
       "fi",
       "exit $s",
       "",

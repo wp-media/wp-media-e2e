@@ -3,6 +3,7 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
@@ -479,15 +480,22 @@ test.describe("residue in the site state: as the site first, root only for what 
   test("a root mkdir that fails hands nothing over and throws", async () => {
     const transport = siteTransport();
     const from = await settled(transport, "site");
+    test.skip(process.getuid?.() === 0, "root writes through any mode");
     refuse("mkdir", "e2e-data");
-    // A file where the data directory's parent belongs: root's `mkdir -p` fails too.
-    rmSync(join(server.root, "wp-content", "uploads"), { recursive: true });
-    writeFileSync(join(server.root, "wp-content", "uploads"), "");
+    // The data directory's parent searchable but not writable: the fake `sudo` runs root's
+    // `mkdir -p` as this user, so it fails too. (Not a file there: the resolved-path guard refuses
+    // a path through a file before any mkdir.)
+    const uploads = join(server.root, "wp-content", "uploads");
+    chmodSync(uploads, 0o500);
 
     // The advice names who ran the refused mkdir: the identity, never the transport's user.
-    await expect(prepareSiteDataDirs(transport, [DATA_DIR])).rejects.toThrow(
-      /could not `mkdir -p -- .*Site commands run as the site's identity, www-data:\S+: make the parent directory writable by www-data/s,
-    );
+    try {
+      await expect(prepareSiteDataDirs(transport, [DATA_DIR])).rejects.toThrow(
+        /could not `mkdir -p -- .*Site commands run as the site's identity, www-data:\S+: make the parent directory writable by www-data/s,
+      );
+    } finally {
+      chmodSync(uploads, 0o755);
+    }
     expect(
       rootCallsSince(from).filter((argv) => argv.includes("chown")),
     ).toEqual([]);
@@ -554,6 +562,75 @@ test.describe("residue in the site state: as the site first, root only for what 
     expect(rootRm).toEqual([
       ["-n", "--", "rm", "-rf", "--", join(server.root, kept)],
     ]);
+  });
+});
+
+test.describe("residue beneath a folder the transport's user cannot search", () => {
+  test.skip(process.getuid?.() === 0, "root enters a folder at mode 000");
+
+  let uploads = "";
+
+  test.beforeEach(() => {
+    uploads = join(server.root, "wp-content", "uploads");
+    mkdirSync(join(server.root, DATA_DIR, "nested"), { recursive: true });
+    chmodSync(uploads, 0o000);
+  });
+
+  test.afterEach(() => {
+    server.sudoSees(undefined);
+    chmodSync(uploads, 0o755);
+  });
+
+  test("in the site state the identity resolves and removes it, with no root call", async () => {
+    const transport = siteTransport();
+    const from = await settled(transport, "site");
+    server.sudoSees({ who: "www-data", dir: uploads });
+
+    await removeSiteResidue(transport, [DATA_DIR]);
+
+    expect(rootCallsSince(from)).toEqual([]);
+    chmodSync(uploads, 0o755);
+    expect(existsSync(join(server.root, DATA_DIR))).toBe(false);
+  });
+
+  test("outside it, root resolves and removes it", async () => {
+    const transport = server.transport({ runAs: false });
+    const from = await settled(transport, "disabled");
+    server.sudoSees({ who: "root", dir: uploads });
+
+    await removeSiteResidue(transport, [DATA_DIR]);
+
+    expect(
+      rootCallsSince(from).filter((argv) => argv.includes("rm")),
+    ).toHaveLength(1);
+    chmodSync(uploads, 0o755);
+    expect(existsSync(join(server.root, DATA_DIR))).toBe(false);
+  });
+
+  test("a link out beneath it is refused once root resolves it, and nothing outside is touched", async () => {
+    const outside = mkdtempSync(join(server.base, "outside-"));
+    writeFileSync(join(outside, "keep"), "x");
+    chmodSync(uploads, 0o755);
+    rmSync(join(server.root, DATA_DIR), { recursive: true });
+    symlinkSync(outside, join(server.root, DATA_DIR));
+    chmodSync(uploads, 0o000);
+    const transport = server.transport({ runAs: false });
+    await settled(transport, "disabled");
+    server.sudoSees({ who: "root", dir: uploads });
+
+    await expect(
+      removeSiteResidue(transport, [`${DATA_DIR}/nested`]),
+    ).rejects.toThrow(/really resolves to .*outside it/);
+    expect(existsSync(join(outside, "keep"))).toBe(true);
+  });
+
+  test("with neither the identity nor root it is refused, naming what the host must allow", async () => {
+    const transport = server.transport({ runAs: false, elevate: false });
+    await settled(transport, "disabled");
+
+    await expect(removeSiteResidue(transport, [DATA_DIR])).rejects.toThrow(
+      /cannot be searched by the transport's user, so .*must let the transport's user search \(`x`\) every folder down to it, or give it passwordless `sudo`/s,
+    );
   });
 });
 

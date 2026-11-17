@@ -1017,8 +1017,9 @@ export async function execElevated(
     console.info(
       `[wp/exec] using elevated privileges on ${describeTarget(transport)} for housekeeping the ` +
         "transport's user is not permitted to do — removing files the web server owns, reading its " +
-        "debug.log, keeping a copy of wp-content around a command that rewrites it, or dropping " +
-        "the pre-flight's short-lived identity probe into the WordPress root. Only " +
+        "debug.log, keeping a copy of wp-content around a command that rewrites it, dropping " +
+        "the pre-flight's short-lived identity probe into the WordPress root, or resolving a " +
+        "path through a folder the transport's user cannot search. Only " +
         "housekeeping is ever elevated; WP-CLI is never root.",
     );
   }
@@ -1036,7 +1037,9 @@ export async function execElevated(
  *
  * `readlink -f` is the portable choice — GNU and BusyBox both resolve links and both tolerate the
  * **last** component being absent, which a path about to be created always is. Neither resolves a
- * path missing more than that, which is why the caller falls back to the parent.
+ * path missing more than that, which is why `assertResolvedInsideRoot` walks up to an ancestor. Not
+ * for a path that may be a dangling link: BusyBox reads a relative one from the working directory
+ * (`assertResolvedInsideRoot` follows those itself).
  *
  * @param transport - the target site's transport.
  * @param absolutePath - the path to resolve, absolute on the target.
@@ -1053,40 +1056,64 @@ export async function resolveOnTarget(
     "--",
     absolutePath,
   ]);
-  const resolved = stdout.trim();
-  return exitCode === 0 && resolved !== "" ? resolved : undefined;
+  // Never trimmed: every transport drops exactly one final newline (readlink's), and a name's own
+  // trailing blanks are part of it (a sibling `<root> ` must not read as the root). A name ending in
+  // `\r` still loses it (`\r\n` is dropped whole): an exact comparison against it then refuses.
+  return exitCode === 0 && stdout !== "" ? stdout : undefined;
+}
+
+/** Who else may resolve a path for {@link assertResolvedInsideRoot}. */
+export interface ResolveOptions {
+  /**
+   * The site's identity, in the `site` state over `ssh` (`exec`'s `execAsSite` argument), else
+   * `undefined`: asked before root when the transport's user cannot search a folder on the way — the
+   * web server's folders are the identity's own. Called only then.
+   */
+  readonly identity?: () => Promise<
+    { readonly target: SudoTarget; readonly umask: string } | undefined
+  >;
 }
 
 /**
- * Refuses a privileged target whose **resolved** path leaves the site's WordPress root.
+ * Refuses a privileged target whose **resolved** path, or the folder holding its last entry, leaves
+ * the site's WordPress root.
  *
  * `assertSafeElevatedTarget` (in `./paths.ts`) settles the same question lexically; this settles it
  * against the filesystem, which is the half a string comparison cannot see. Both run, and they fail
  * for different reasons, so an operator is told which.
  *
- * A path that does not exist yet cannot be a symlink, so what matters is its **deepest existing
- * ancestor** — this walks up to it rather than relying on `readlink -f` tolerating an absent
- * component, which GNU and BusyBox do and other implementations do not. If nothing on the path
- * resolves, nothing is known about where a root command would land, and the only safe reading of
- * "unknown" is "no".
+ * One fixed script per target ({@link RESOLVE_PATH_SCRIPT}) resolves the target and its parent:
+ * `rm -rf`/`chown -h` act on a last entry **in its parent**, so `<root>/X -> /out` with
+ * `/out/name -> <root>/…` must refuse `<root>/X/name` although the name leads back in. A path that
+ * does not exist yet is judged by its deepest existing ancestor, stepped up to only once all below it
+ * is **proved absent**; one that exists but does not resolve (a link loop, a file where a folder
+ * should be) is refused, never judged by an ancestor — measured: `<root>/wp-content/link -> /root/x`
+ * resolved nowhere, and an earlier walk passed it at the root. A folder on the way the transport's
+ * user cannot search hides what lies beyond it: the same script is then run as the site's identity
+ * (`options.identity`) and, with passwordless `sudo` (`docker`: always), as root, and the target is
+ * refused only when none could see — the host prerequisite named in the message. Unknown is read
+ * as "no".
  *
  * @param transport - the target site's transport.
  * @param target - the absolute path the privileged command would act on.
  * @param root - the site's WordPress root, as the transport resolved it.
  * @param describeRejection - builds the message from the rule that was broken.
- * @throws Error built by `describeRejection`.
+ * @param options - who else may resolve it.
+ * @throws Error built by `describeRejection`; {@link CommandKilledError} if a `readlink` was killed.
  */
 export async function assertResolvedInsideRoot(
   transport: Transport,
   target: string,
   root: string,
   describeRejection: (reason: string) => string,
+  options: ResolveOptions = {},
 ): Promise<void> {
   await assertAllResolvedInsideRoot(
     transport,
     [target],
     root,
     describeRejection,
+    options,
   );
 }
 
@@ -1099,33 +1126,61 @@ export async function assertResolvedInsideRoot(
  * @param targets - the absolute paths privileged commands would act on; none does nothing.
  * @param root - the site's WordPress root, as the transport resolved it.
  * @param describeRejection - builds the message from the rule that was broken.
+ * @param options - who else may resolve them.
  * @returns the root as it resolved for the check (`undefined` with no targets): a caller re-checking
  * it at the moment it acts compares against this.
- * @throws Error built by `describeRejection`, for the first target that fails.
+ * @throws Error built by `describeRejection`, for the first target that fails;
+ * {@link CommandKilledError} if a `readlink` was killed.
  */
 export async function assertAllResolvedInsideRoot(
   transport: Transport,
   targets: readonly string[],
   root: string,
   describeRejection: (reason: string) => string,
+  options: ResolveOptions = {},
 ): Promise<string | undefined> {
   if (targets.length === 0) return undefined;
   const realRoot = await resolveOnTarget(transport, root);
+  if (realRoot === undefined) {
+    throw new Error(
+      describeRejection(
+        `the site's root "${root}" itself could not be resolved, so where a privileged command ` +
+          "would land is unknown",
+      ),
+    );
+  }
+  const inside = (path: string): boolean =>
+    path === realRoot || path.startsWith(`${realRoot}/`);
   for (const target of targets) {
-    const realTarget = await resolveDeepestExisting(transport, target, root);
-    if (realRoot === undefined || realTarget === undefined) {
+    const checked = withoutTrailingSlashes(target);
+    const { resolution, askedAs } = await resolvePath(
+      transport,
+      checked,
+      options,
+    );
+    if (resolution.kind !== "resolved") {
+      throw new Error(
+        describeRejection(unresolvedReason(target, resolution, askedAs)),
+      );
+    }
+    if (!inside(resolution.target)) {
       throw new Error(
         describeRejection(
-          `"${target}" could not be resolved on this site, so where a privileged command would ` +
-            "land is unknown",
+          `"${target}" really resolves to "${resolution.target}", which is outside it — a ` +
+            "symbolic link on the way there points out of the site",
         ),
       );
     }
-    if (realTarget !== realRoot && !realTarget.startsWith(`${realRoot}/`)) {
+    // The root's own parent is outside by definition; the root as a target has no entry to protect.
+    if (
+      checked !== withoutTrailingSlashes(root) &&
+      !inside(resolution.parent)
+    ) {
       throw new Error(
         describeRejection(
-          `"${target}" really resolves to "${realTarget}", which is outside it — a symbolic link ` +
-            "on the way there points out of the site",
+          `the folder holding "${target}" really resolves to "${resolution.parent}", which is ` +
+            "outside it — a symbolic link on the way there points out of the site, and a command " +
+            "acting on the last entry would act in that folder",
         ),
       );
     }
@@ -1133,28 +1188,220 @@ export async function assertAllResolvedInsideRoot(
   return realRoot;
 }
 
+/** `/` kept; any other path's trailing slashes dropped, so the script's `${c%/*}` is its parent. */
+function withoutTrailingSlashes(path: string): string {
+  return path.replace(/(?<=.)\/+$/, "");
+}
+
+/** `$0` of {@link RESOLVE_PATH_SCRIPT}'s shell, so a process listing says what it is. */
+const RESOLVE_PATH_NAME = "e2e-resolve-path";
+
+/** How many dangling links {@link RESOLVE_PATH_SCRIPT} follows before refusing (`SYMLOOP_MAX`'s usual 40). */
+const DANGLING_HOPS = 40;
+
+/** {@link RESOLVE_PATH_SCRIPT}'s exit: a folder on the way exists but the user cannot search it. */
+const EXIT_UNSEARCHABLE = 3;
+
+/** {@link RESOLVE_PATH_SCRIPT}'s exit: a path on the way exists but cannot be followed. */
+const EXIT_UNFOLLOWABLE = 4;
+
 /**
- * Resolves `target`, or its nearest ancestor that exists, without leaving `root`'s depth.
+ * `sh -c` script, `$1` an absolute path (no trailing slash): prints `<target>\0<parent>\0`, what `$1`
+ * and its parent really are (each its deepest existing ancestor when absent), and exits 0; else exits
+ * {@link EXIT_UNSEARCHABLE} or {@link EXIT_UNFOLLOWABLE}, printing nothing. A failing `readlink -f`
+ * does not say why: the path may be absent, or exist and not be followable — a link into a folder the
+ * user cannot enter (`EACCES`), a loop (`ELOOP`), a path through a file (`ENOTDIR`). Stepping past
+ * those would judge an ancestor in their place, and a root command would then act through them.
+ *
+ * `walk` judges a path `c` with parent `p`, in order:
+ * - a dangling link (`test -L`, not `test -e`) is replaced by its target (one level, relative to `p`)
+ *   and judged the same way, at most {@link DANGLING_HOPS} times. Done here, never left to
+ *   `readlink -f`: BSD's resolves no absent path, and BusyBox's resolves a dangling **relative** link
+ *   against the working directory (measured: `uploads/evil -> sub/gone` judged `<root>/sub/gone`
+ *   while the kernel follows `uploads/sub`, there a link out of the root);
+ * - `readlink -f` resolves `c`: kept, if `c` is absent (GNU and BusyBox resolve a missing last
+ *   entry) or the result is the same file (`-ef`: macOS's drops a name's trailing newline);
+ * - any other `c` that `test -e` sees exists, and is unfollowable, whatever kept `readlink` from it;
+ * - an unseen `c` is absent when `p` is a directory the user can search — proved by entering it,
+ *   `(cd "$p")`, never `test -x`, which BusyBox answers from the mode bits (root: "no" at `000`) —
+ *   (its `lstat` can then fail only as `ENOENT`); an unsearchable `p` is {@link EXIT_UNSEARCHABLE}
+ *   (someone else may see), any
+ *   other existing `p` (a file) unfollowable, and an unseen `p` is judged in its own turn — up to `/`,
+ *   with no bound at the root: a link may lead to a shorter spelling of it, and the caller compares.
+ *
+ * Exact output: `$(… && echo .)` then dropping `.` and exactly one newline keeps a name's own
+ * trailing newlines, which a bare `$(…)` strips (a sibling `<root>⏎` would read as the root). A
+ * `readlink` killed by a signal kills the script by it too, as the transport's callers expect of a
+ * killed command. POSIX `sh` only (dash, BusyBox ash, macOS `sh`), plus `test -ef`, which all three
+ * have.
+ */
+const RESOLVE_PATH_SCRIPT = [
+  "nl='",
+  "'",
+  'die() { kill -"$(($1 - 128))" "$$"; exit "$1"; }',
+  "walk() {",
+  "  c=$1 hops=0",
+  "  while :; do",
+  "    p=${c%/*}",
+  '    [ -n "$p" ] || p=/',
+  '    if [ -L "$c" ] && [ ! -e "$c" ]; then',
+  `      [ "$hops" -lt ${String(DANGLING_HOPS)} ] || return ${String(EXIT_UNFOLLOWABLE)}`,
+  '      t=$(readlink -- "$c" && echo .)',
+  "      s=$?",
+  '      [ "$s" -gt 128 ] && die "$s"',
+  `      [ "$s" -eq 0 ] || return ${String(EXIT_UNFOLLOWABLE)}`,
+  "      t=${t%.}",
+  '      t=${t%"$nl"}',
+  "      case $t in /*) c=$t ;; *) c=$p/$t ;; esac",
+  "      hops=$((hops + 1))",
+  "      continue",
+  "    fi",
+  '    r=$(readlink -f -- "$c" && echo .)',
+  "    s=$?",
+  '    [ "$s" -gt 128 ] && die "$s"',
+  "    r=${r%.}",
+  '    r=${r%"$nl"}',
+  '    if [ "$s" -eq 0 ] && [ -n "$r" ]; then',
+  '      { [ ! -e "$c" ] || [ "$r" -ef "$c" ]; } && return 0',
+  `      return ${String(EXIT_UNFOLLOWABLE)}`,
+  "    fi",
+  // A link reaching here is not dangling (taken above), so `-e` sees every `c` that exists.
+  `    { [ -e "$c" ] || [ "$c" = / ]; } && return ${String(EXIT_UNFOLLOWABLE)}`,
+  '    if [ -d "$p" ]; then',
+  `      (cd "$p") 2>/dev/null || return ${String(EXIT_UNSEARCHABLE)}`,
+  '    elif [ -e "$p" ]; then',
+  `      return ${String(EXIT_UNFOLLOWABLE)}`,
+  "    fi",
+  "    c=$p",
+  "  done",
+  "}",
+  'walk "$1" || exit',
+  "a=$r",
+  "q=${1%/*}",
+  '[ -n "$q" ] || q=/',
+  'walk "$q" || exit',
+  'printf \'%s\\0%s\\0\' "$a" "$r"',
+].join("\n");
+
+/** What one run of {@link RESOLVE_PATH_SCRIPT} said. */
+export type PathResolution =
+  | {
+      readonly kind: "resolved";
+      /** The target, or its deepest existing ancestor, resolved. */
+      readonly target: string;
+      /** Its parent, the same way. */
+      readonly parent: string;
+    }
+  | { readonly kind: "unsearchable" }
+  | { readonly kind: "unfollowable" }
+  /** Anything else: the script could not run (a missing `sh`, `sudo` refusing), or its output was not its own. */
+  | { readonly kind: "unknown"; readonly exitCode: number };
+
+/**
+ * Reads one run of {@link RESOLVE_PATH_SCRIPT}. Pure.
+ *
+ * @param result - the run's outcome.
+ * @returns the verdict; `unknown` for an exit or output the script never produces.
+ */
+export function readPathResolution(result: ExecResult): PathResolution {
+  const { exitCode, stdout } = result;
+  if (exitCode === EXIT_UNSEARCHABLE) return { kind: "unsearchable" };
+  if (exitCode === EXIT_UNFOLLOWABLE) return { kind: "unfollowable" };
+  const parts = stdout.split("\0");
+  const [target, parent, rest] = parts;
+  if (
+    exitCode === 0 &&
+    parts.length === 3 &&
+    rest === "" &&
+    target?.startsWith("/") === true &&
+    parent?.startsWith("/") === true
+  ) {
+    return { kind: "resolved", target, parent };
+  }
+  return { kind: "unknown", exitCode };
+}
+
+/**
+ * Runs {@link RESOLVE_PATH_SCRIPT} on `path` as the transport's user, then — only while the answer
+ * is `unsearchable` — as the site's identity and as root, when each is available. A later `unknown`
+ * (its `sudo` refused) never replaces an earlier verdict.
  *
  * @param transport - the target site's transport.
- * @param target - the absolute path to resolve.
- * @param root - the site's WordPress root; the walk stops once it is shorter than this.
- * @returns the resolved path of the deepest existing ancestor, or `undefined` if none resolved.
+ * @param path - the absolute path, without trailing slashes.
+ * @param options - who else may resolve it.
+ * @returns the last verdict, and who was asked (for the message).
+ * @throws Error if a transport failed; {@link CommandKilledError} if a `readlink` was killed.
  */
-async function resolveDeepestExisting(
+async function resolvePath(
   transport: Transport,
-  target: string,
-  root: string,
-): Promise<string | undefined> {
-  let current = target;
-  while (current.length >= root.length) {
-    const resolved = await resolveOnTarget(transport, current);
-    if (resolved !== undefined) return resolved;
-    const parent = posix.dirname(current);
-    if (parent === current) return undefined;
-    current = parent;
+  path: string,
+  options: ResolveOptions,
+): Promise<{ resolution: PathResolution; askedAs: readonly string[] }> {
+  const args = ["-c", RESOLVE_PATH_SCRIPT, RESOLVE_PATH_NAME, path];
+  const askedAs = ["the transport's user"];
+  let resolution = readPathResolution(
+    await execAsTransport(transport, "sh", args),
+  );
+  const identity =
+    resolution.kind === "unsearchable" && transport.mode === "ssh"
+      ? await options.identity?.()
+      : undefined;
+  if (identity !== undefined && transport.mode === "ssh") {
+    askedAs.push("the site's identity");
+    const next = readPathResolution(
+      await execAsSite(transport, identity, "sh", args),
+    );
+    if (next.kind !== "unknown") resolution = next;
   }
-  return undefined;
+  if (
+    resolution.kind === "unsearchable" &&
+    (await elevationSupport(transport)) === "available"
+  ) {
+    askedAs.push("root");
+    const next = readPathResolution(await execElevated(transport, "sh", args));
+    if (next.kind !== "unknown") resolution = next;
+  }
+  return { resolution, askedAs };
+}
+
+/**
+ * Why a target was refused, for a verdict other than `resolved`.
+ *
+ * @param target - the target as the caller named it.
+ * @param resolution - the verdict.
+ * @param askedAs - who ran the check, in order.
+ */
+function unresolvedReason(
+  target: string,
+  resolution: Exclude<PathResolution, { kind: "resolved" }>,
+  askedAs: readonly string[],
+): string {
+  const unknown = "so where a privileged command would land is unknown";
+  switch (resolution.kind) {
+    case "unsearchable":
+      return (
+        `a folder on the way to "${target}" (or to the folder holding it) cannot be searched by ` +
+        `${askedAs.join(", nor by ")}, ${unknown}. The host must let the transport's user search ` +
+        "(`x`) every folder down to it" +
+        (askedAs.includes("root")
+          ? ""
+          : ", or give it passwordless `sudo` (without `transport.elevate: false`) so the check " +
+            "runs as root")
+      );
+    case "unfollowable":
+      return (
+        `"${target}", or a folder on the way, exists but cannot be followed (a link loop, more ` +
+        `than ${String(DANGLING_HOPS)} links, a file where a folder should be), ${unknown}`
+      );
+    case "unknown":
+      return `"${target}" could not be resolved on this site (the check exited ${String(resolution.exitCode)}), ${unknown}`;
+    default: {
+      const exhaustive: never = resolution;
+      throw new Error(
+        `[wp/exec] unexpected resolution: ${JSON.stringify(exhaustive)}`,
+      );
+    }
+  }
 }
 
 /** Closes all cached SSH connections. Call from a worker-teardown fixture. */

@@ -328,11 +328,10 @@ export async function putBackHeld(
 
 /**
  * Whether the file, as the site resolves it, is exactly at its declared place in the root: no link
- * at the path or in any parent, even one staying inside the root. Stricter than
- * `assertResolvedInsideRoot`, which walks up to an ancestor when a path does not resolve — measured:
- * a parent linked into a folder the transport's user cannot enter (`/root/…`) does not resolve, and
- * the walk then passes it. The file was just judged, so it exists: one that does not resolve is
- * refused.
+ * at the path or in any parent, even one staying inside the root — stricter than
+ * `assertResolvedInsideRoot`, which passes a link that stays inside the root and a path not created
+ * yet. The file was just judged, so it exists: one that does not resolve (a parent linked into a
+ * folder the transport's user cannot enter, `/root/…`) is refused.
  *
  * @param realRoot - the root, resolved (`undefined`: it did not resolve).
  * @param realTarget - the file, resolved (`undefined`: it did not resolve).
