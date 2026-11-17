@@ -1,3 +1,4 @@
+import { suiteVersionText } from "../../src/common/config/suite-version";
 import type {
   FinishedScenario,
   RunFinishedEvent,
@@ -10,8 +11,9 @@ import { DEFAULT_POST_TIMEOUT_MS, postJson, type Delivery } from "./post";
 
 /**
  * Slack: one message per run, whatever its status, to an incoming webhook — the plugin and commit
- * tested, the sites with their real versions, the counts, the scenarios that failed or were flaky
- * with their first error, and where the report is. A run that could not test says why instead.
+ * tested, the sites with their real versions, the suite's version, the counts, the scenarios that
+ * failed or were flaky with their first error, and where the report is. A run that could not test
+ * says why instead.
  *
  * The event's text is already masked and one line per field (`run-finished.ts`); this escapes it as
  * Slack requires (`&`, `<`, `>` — else `<!channel>` in a scenario's name would ping a channel), breaks
@@ -246,6 +248,7 @@ export function slackMessage(
       : [`Reason: ${escapeCut(event.reason, MAX_SHOWN)}`]),
     pluginLine(event),
     ...siteLines(event.sites),
+    suiteLine(event.suite.version),
     ...(tested ? scenarioLists(event.scenarios) : []),
     ...(tested ? [] : [`Took: ${formatDuration(event.durationMs)}`]),
     // A run refused before it had a folder wrote neither: no path to point at.
@@ -349,6 +352,17 @@ function siteLine(site: RunFinishedEvent["sites"][number]): string {
     ...(site.php === null ? [] : [`PHP ${site.php}`]),
   ];
   return `Site: ${escapeCut(parts.join(" · "), MAX_SHOWN)}`;
+}
+
+/**
+ * `Suite: 1.1.0` — the suite that ran the run, so a message says which suite produced it; `unknown`
+ * when neither the run nor the orchestrator knew, worded as the suite's own lines word it.
+ *
+ * @param version - the event's `suite.version`.
+ * @returns the line, escaped for Slack.
+ */
+function suiteLine(version: string | null): string {
+  return `Suite: ${escapeCut(suiteVersionText(version ?? undefined), MAX_SHOWN)}`;
 }
 
 /**

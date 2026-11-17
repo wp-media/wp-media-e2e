@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { isSuiteVersion } from "../../src/common/config/suite-version";
+
 /**
  * What a run tested, read back from the suite's `run-facts.json`: the edition, the plugin built, each
  * site's versions, and the setups that failed. Only the fields the orchestrator reports are read, and
@@ -40,6 +42,8 @@ export interface SetupFailureFact {
 /** What the orchestrator reads of a run's facts. */
 export interface RunFactsRead {
   readonly edition?: string;
+  /** The suite's version the run used (`1.1.0`); absent when the run did not record a valid one. */
+  readonly suiteVersion?: string;
   /** The plugin under test (role `plugin`), when it was resolved. */
   readonly plugin?: PluginFacts;
   /** The pool's sites, in pool order. */
@@ -49,6 +53,14 @@ export interface RunFactsRead {
 
 /** One field, any value: kept when it is a string, else read as unknown. */
 const optionalText = z.string().optional().catch(undefined);
+
+/**
+ * The suite's version: kept only when it is one the suite would show (SemVer 2.0, at most 64
+ * characters), so a hand-edited or foreign file's text never reaches a message as a version.
+ */
+const suiteVersion = optionalText.transform((value) =>
+  isSuiteVersion(value) ? value : undefined,
+);
 
 /**
  * A list whose malformed items are dropped, and which reads as empty when it is not a list.
@@ -71,6 +83,7 @@ function lenientList<T extends z.ZodType>(item: T) {
 const factsSchema = z.object({
   v: z.literal(RUN_FACTS_VERSION),
   edition: optionalText,
+  suiteVersion,
   setupFailures: lenientList(
     z.object({ setup: z.string(), message: z.string() }),
   ),
@@ -123,7 +136,7 @@ export function readRunFacts(
   const record = facts.cells.find((entry) => entry.cell === cell);
   const plugin = record?.plugins.find((entry) => entry.role === "plugin");
   return {
-    ...defined({ edition: facts.edition }),
+    ...defined({ edition: facts.edition, suiteVersion: facts.suiteVersion }),
     ...(plugin === undefined
       ? {}
       : {

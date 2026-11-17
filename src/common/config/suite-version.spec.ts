@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { removeTempDir } from "../__fixtures__/temp-dir";
 import {
+  isSuiteVersion,
   parseSuiteVersion,
   readSuiteVersion,
   suiteVersionText,
@@ -113,6 +114,36 @@ test.describe("parseSuiteVersion", () => {
     ]) {
       expect(parseSuiteVersion(text), text).toBeUndefined();
     }
+  });
+});
+
+test.describe("isSuiteVersion", () => {
+  test("is the rule parseSuiteVersion applies to a declared version", () => {
+    for (const value of [
+      "1.1.0",
+      "1.1.0-rc.1+b5",
+      `1.1.0-${"a".repeat(58)}`,
+      `1.1.0-${"a".repeat(59)}`,
+      "v1.1.0",
+      "1.1",
+      "1.1.0\n",
+      "",
+      110,
+      null,
+      undefined,
+      ["1.1.0"],
+    ]) {
+      const expected = parseSuiteVersion(withVersion(value)) !== undefined;
+      expect(isSuiteVersion(value), JSON.stringify(value)).toBe(expected);
+    }
+  });
+
+  test("accepts valid SemVer 2.0 of at most 64 characters, nothing else", () => {
+    expect(isSuiteVersion("1.1.0")).toBe(true);
+    expect(isSuiteVersion(`1.1.0-${"a".repeat(58)}`)).toBe(true);
+    expect(isSuiteVersion(`1.1.0-${"a".repeat(59)}`)).toBe(false);
+    expect(isSuiteVersion("v1.1.0")).toBe(false);
+    expect(isSuiteVersion(110)).toBe(false);
   });
 });
 

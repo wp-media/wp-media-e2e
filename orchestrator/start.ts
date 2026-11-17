@@ -837,9 +837,9 @@ class Orchestrator {
   }
 
   /**
-   * What every loop is given: the checkout, the config, each task's commands and ref, the log and the
-   * bus, with the seams a spec injects; `onActivity` last, so this start always knows its own runs
-   * and its status table hears every task.
+   * What every loop is given: the checkout and its suite version, the config, each task's commands
+   * and ref, the log and the bus, with the seams a spec injects; `onActivity` last, so this start
+   * always knows its own runs and its status table hears every task.
    *
    * @param prepared - the config and the product list.
    * @param checkout - the checkout the runs start in.
@@ -862,6 +862,9 @@ class Orchestrator {
     return {
       stateDir: loaded.stateDir,
       checkout,
+      ...(prepared.suiteVersion === undefined
+        ? {}
+        : { suiteVersion: prepared.suiteVersion }),
       config: loaded.config,
       secrets: this.secrets,
       inherited: this.process.env,

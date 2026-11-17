@@ -9,6 +9,7 @@ import {
 import { readRunResults } from "../runs/results";
 import {
   buildRunFinished,
+  MAX_FACT,
   MAX_SCENARIO_ERROR,
   type RunFinishedInput,
 } from "./run-finished";
@@ -54,6 +55,7 @@ const INPUT: RunFinishedInput = {
   ),
   facts: {
     edition: "pro",
+    suiteVersion: "1.1.0",
     plugin: {
       name: "BackWPup Pro",
       version: "9.99.99",
@@ -97,6 +99,7 @@ test.describe("buildRunFinished", () => {
         { baseURL: "https://a.test", wordpress: "7.1.2", php: "8.5.10" },
         { baseURL: "https://b.test", wordpress: null, php: null },
       ],
+      suite: { version: "1.1.0" },
       status: "failed",
       reason: null,
       startedAt: "2026-10-13T10:15:31.042Z",
@@ -152,6 +155,7 @@ test.describe("buildRunFinished", () => {
       name: null,
     });
     expect(event.sites).toEqual([]);
+    expect(event.suite).toEqual({ version: null });
     expect(event.reason).toBe("bddgen exited with code 1");
     expect(event.counts).toEqual({
       total: 0,
@@ -200,6 +204,51 @@ test.describe("buildRunFinished", () => {
     expect(
       buildRunFinished({ ...INPUT, bundle: null }).report.bundle,
     ).toBeNull();
+  });
+
+  test("names the suite's version the run's facts record, over the orchestrator's", () => {
+    expect(buildRunFinished({ ...INPUT, suiteVersion: "1.0.0" }).suite).toEqual(
+      { version: "1.1.0" },
+    );
+  });
+
+  test("falls back to the orchestrator's suite version when the run's facts name none", () => {
+    const { suiteVersion: _recorded, ...withoutVersion } = INPUT.facts ?? {
+      sites: [],
+      setupFailures: [],
+    };
+    for (const facts of [undefined, withoutVersion]) {
+      expect(
+        buildRunFinished({ ...INPUT, facts, suiteVersion: "1.0.0" }).suite,
+        JSON.stringify(facts),
+      ).toEqual({ version: "1.0.0" });
+      expect(buildRunFinished({ ...INPUT, facts }).suite).toEqual({
+        version: null,
+      });
+    }
+  });
+
+  test("makes the suite's version safe and cuts it to MAX_FACT, whichever source gave it", () => {
+    const secret = "Tr0ub4dor&3xyz";
+    const unsafe = `1.1.0\u001b[2J\n${secret}\u202e`;
+    const long = `1.1.0-${"a".repeat(MAX_FACT * 2)}`;
+    const facts = INPUT.facts ?? { sites: [], setupFailures: [] };
+    for (const input of [
+      { ...INPUT, facts: { ...facts, suiteVersion: unsafe } },
+      { ...INPUT, facts: undefined, suiteVersion: unsafe },
+    ]) {
+      expect(buildRunFinished({ ...input, secrets: [secret] }).suite).toEqual({
+        version: "1.1.0 ***",
+      });
+    }
+    for (const input of [
+      { ...INPUT, facts: { ...facts, suiteVersion: long } },
+      { ...INPUT, facts: undefined, suiteVersion: long },
+    ]) {
+      const version = buildRunFinished(input).suite.version ?? "";
+      expect(Array.from(version)).toHaveLength(MAX_FACT);
+      expect(version.endsWith("…")).toBe(true);
+    }
   });
 
   test("takes the edition from the stream when the facts are missing", () => {

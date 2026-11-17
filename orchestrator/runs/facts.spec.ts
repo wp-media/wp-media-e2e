@@ -133,6 +133,51 @@ test.describe("readRunFacts", () => {
     });
   });
 
+  test("reads the suite's version the run recorded", () => {
+    for (const version of ["1.1.0", "2.0.0-rc.1+b5"]) {
+      const read = readRunFacts(
+        text((facts) => ({ ...facts, suiteVersion: version })),
+        "pro@nginx",
+      );
+      expect(read?.suiteVersion, version).toBe(version);
+      // The rest of the facts are read as without it.
+      expect({ ...read, suiteVersion: undefined }).toEqual(
+        readRunFacts(text(), "pro@nginx"),
+      );
+    }
+  });
+
+  test("knows no suite version when the run recorded none, keeping the key absent", () => {
+    const read = readRunFacts(text(), "pro@nginx");
+    expect(read).toBeDefined();
+    expect(read).not.toHaveProperty("suiteVersion");
+  });
+
+  test("reads a suite version of another type or not valid SemVer as unknown, never refusing the facts", () => {
+    for (const version of [
+      110,
+      null,
+      ["1.1.0"],
+      { v: "1.1.0" },
+      "",
+      "v1.1.0",
+      "1.1",
+      "1.1.0\n",
+      "1.1.0\u001b[31m",
+      `1.1.0-${"a".repeat(59)}`,
+      "<!channel>",
+    ]) {
+      const read = readRunFacts(
+        text((facts) => ({ ...facts, suiteVersion: version })),
+        "pro@nginx",
+      );
+      expect(read, JSON.stringify(version)).toEqual(
+        readRunFacts(text(), "pro@nginx"),
+      );
+      expect(read, JSON.stringify(version)).not.toHaveProperty("suiteVersion");
+    }
+  });
+
   test("reads text that is not facts of version 1 as no facts", () => {
     for (const bad of [
       "",
