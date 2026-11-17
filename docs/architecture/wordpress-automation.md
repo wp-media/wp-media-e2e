@@ -859,9 +859,37 @@ patterns, copied verbatim (`support/config-edits.ts`).
   no WordPress boot, no byte of a tracked file leaves the host or reaches a message. The record step
   sweeps this identity's other private records untouched for 30 days (a record must outlive a killed
   run until its site's next scenario), best-effort: one that will not go is warned, never a failure; a
-  reboot clears `/tmp`. Each adds one round-trip to its hook.
-- Not handled (warned, left): a file the run's identity cannot write — no root fallback yet — and a
-  `wp-config.php` above the root.
+  reboot clears `/tmp`. Each adds one round-trip to its hook; a held file (below) adds the sudo probe
+  (once per process), two `readlink`s and root's put-back (≤ 20 s, a FIFO's worst) per file and a
+  second engine run.
+- **Root fallback** ([`config-edits-root.ts`](../../src/common/wp/config-edits-root.ts)): a file judged
+  restorable (a candidate, or `resumed`) that the identity cannot write, or whose mode it cannot set
+  back, is **held**: the engine keeps the record (reconciling, records nothing yet) and answers what
+  it vouches for — the judged file's dev/inode (decimal strings) and the SHA-256 of its bytes as
+  judged, the copy, its SHA-256, the mode. Root then runs a fixed script (`PUT_BACK_SCRIPT`,
+  `sudo -n -- timeout --preserve-status 20 sh -c …`, every value an argument): GNU `stat`/`sha256sum`
+  there; the folder the identity's `0700`, the copy **opened once** and the opened file the
+  identity's, single link (a link swapped in after the check reaches nothing); the path a regular
+  file, opened read-only, the **opened** file the judged one with one link, the path still leading to
+  it and its bytes still the judged ones (a rewrite in place since is never overwritten); the copy
+  read from its fd into a root-private `mktemp` file that must hold the SHA-256; written through
+  `/dev/fd/3` (truncate, then write: same inode and owner), the SHA-256 re-checked, the path still
+  that file (else `moved`: written, then moved away), the mode set back through the fd. Before it,
+  the path must resolve to exactly `<root>/<declared path>` (no link at it or in any parent; one that
+  does not resolve is refused). The engine then runs again (not holding): it finds the file back and
+  removes the record (or records). Notes `put back as root` / `mode set back … as root`; warnings
+  `replaced`, `moved`, `link`, a refused copy, or root failing to run. Only outside `site` (there the
+  record is the web server's, and a file it cannot write is not the plugin's doing), never with
+  `transport.elevate: false` or without passwordless sudo — then the engine's second run answers
+  `unwritable`, as before. **Only a write that began fails the hook** (bytes not verified, a `TERM`
+  mid-write, an exit not known to precede the write): the record kept, the next run resumes it. A
+  failure known to come before any write — sudo refusing `timeout`, no GNU tools, `mktemp` or a full
+  `/tmp`, a time-out before writing, an implausible root — is warned (`could not be finished as
+  root`) and the second run's answer stands, so a host that always fails it never sticks the site. No
+  free-space pre-check: staging the copy in `/tmp` first fails early on a full disk sharing it, and a
+  write cut short is a strict prefix the next run resumes. `wp`/PHP never run as root.
+- Not handled (warned, left): a created file or folder whose parent the identity cannot write (never
+  held: removals stay the identity's), and a `wp-config.php` above the root.
 
 ## Site identity ([`wp/site-identity.ts`](../../src/common/wp/site-identity.ts))
 

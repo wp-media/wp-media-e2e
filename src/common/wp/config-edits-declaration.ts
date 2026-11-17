@@ -254,6 +254,46 @@ export interface ConfigEditOutcome {
   };
   /** An owner that differs from the record (`uid:gid`), which is never changed here. */
   readonly owner?: { readonly found: string; readonly recorded: string };
+  /**
+   * Engine answers only, asked to hold: what root may finish for an edited file the run's identity
+   * judged but could not write, or whose mode it could not set back — the record is then kept for it.
+   */
+  readonly held?: HeldPutBack;
+  /**
+   * What the root fallback did (`./config-edits-root.ts`): `wrote` the recorded bytes (and the mode),
+   * set only the `mode` back, `refused` the record's copy, or `failed` to run (`rootError` says why).
+   */
+  readonly asRoot?: "wrote" | "mode" | "refused" | "failed";
+  /** Why root could not run, with `asRoot: "failed"`. */
+  readonly rootError?: string;
+}
+
+/**
+ * What the engine vouches for when it holds a file for root: the judged file (device and inode, as
+ * decimal strings — 64-bit, past what a JSON number keeps), and the record copy whose bytes go back.
+ */
+export interface HeldPutBack {
+  /** The record folder, `<stem>-<uid>`, this identity's private one. */
+  readonly dir: string;
+  /** The copy's name in it, `file-<n>`. */
+  readonly copy: string;
+  /** The identity's effective uid: the folder's and the copy's owner. */
+  readonly uid: number;
+  readonly dev: string;
+  readonly ino: string;
+  /** The recorded bytes' SHA-256: the copy's, and the file's once put back. */
+  readonly sha256: string;
+  /**
+   * The file's bytes as judged: root writes only while it still holds them, so a rewrite in place
+   * since (same inode) is never overwritten. `sha256` when only the mode is left.
+   */
+  readonly judged: string;
+  /** The recorded mode. */
+  readonly mode: number;
+  /** True: write the recorded bytes, then the mode. False: the bytes are back, only the mode is not. */
+  readonly write: boolean;
+  /** The file was a strict prefix of its record (a write cut short): `resumed`, not `restored`. */
+  readonly resumed: boolean;
 }
 
 /** What the record step answered. */
@@ -273,6 +313,11 @@ export interface RecordAnswer {
   readonly swept: number;
   /** Stale records of this identity's that would not go (left for a later sweep). */
   readonly unswept: number;
+  /**
+   * Asked to hold: a reconciled path needs root, so the record was kept and nothing recorded yet
+   * (`reconciled` holds the {@link HeldPutBack}s).
+   */
+  readonly held: boolean;
 }
 
 /**
@@ -296,6 +341,8 @@ export type RestoreAnswer =
   | {
       readonly kind: "restored";
       readonly outcomes: readonly ConfigEditOutcome[];
+      /** Asked to hold: an outcome needs root, so the record was kept. */
+      readonly held: boolean;
     };
 
 /**
@@ -374,14 +421,23 @@ export function parseRecordAnswer(
       discarded: false,
       swept: 0,
       unswept: 0,
+      held: false,
     };
   }
-  // `unswept` absent reads as none: only a sweep that left something says so.
-  const { reconciled, unusable, discarded, swept, unswept = 0 } = value;
+  // `unswept` and `held` absent read as none: only a run that has one says so.
+  const {
+    reconciled,
+    unusable,
+    discarded,
+    swept,
+    unswept = 0,
+    held = false,
+  } = value;
   if (
     typeof discarded !== "boolean" ||
     !Number.isInteger(swept) ||
-    !Number.isInteger(unswept)
+    !Number.isInteger(unswept) ||
+    typeof held !== "boolean"
   )
     throw unreadable(stdout);
   return {
@@ -394,6 +450,7 @@ export function parseRecordAnswer(
     discarded,
     swept: swept as number,
     unswept: unswept as number,
+    held,
   };
 }
 
@@ -414,9 +471,12 @@ export function parseRestoreAnswer(
   if (blocked !== undefined) return { kind: "blocked", dir: blocked };
   const reason = parseUnusable(value.unusable, stdout);
   if (reason !== undefined) return { kind: "unusable", reason };
+  const { held = false } = value;
+  if (typeof held !== "boolean") throw unreadable(stdout);
   return {
     kind: "restored",
     outcomes: parseOutcomes(value.outcomes, edits, stdout),
+    held,
   };
 }
 
@@ -453,7 +513,7 @@ function parseOutcomes(
   if (!Array.isArray(value)) throw unreadable(stdout);
   return value.map((entry: unknown): ConfigEditOutcome => {
     if (!isObject(entry)) throw unreadable(stdout);
-    const { kind, index, result, mode, owner } = entry;
+    const { kind, index, result, mode, owner, held } = entry;
     if (
       (kind !== "file" && kind !== "created-file" && kind !== "dir") ||
       typeof index !== "number" ||
@@ -471,8 +531,60 @@ function parseOutcomes(
       result,
       ...(mode === undefined ? {} : { mode: parseMode(mode, stdout) }),
       ...(owner === undefined ? {} : { owner: parseOwner(owner, stdout) }),
+      ...(held === undefined
+        ? {}
+        : { held: parseHeld(held, kind, result, stdout) }),
     };
   });
+}
+
+/** A held put-back's copy name. */
+const COPY_NAME = /^file-\d+$/;
+
+/** A decimal device or inode number, as the engine prints it. */
+const DECIMAL = /^\d+$/;
+
+/**
+ * Reads an outcome's `held`: only an edited file's, `unwritable` when its bytes go back, else a file
+ * whose bytes are as recorded (only its mode is left), in this identity's record folder.
+ */
+function parseHeld(
+  value: unknown,
+  kind: OutcomeKind,
+  result: string,
+  stdout: string,
+): HeldPutBack {
+  if (!isObject(value) || kind !== "file") throw unreadable(stdout);
+  const { dir, copy, uid, dev, ino, sha256, judged, mode, write, resumed } =
+    value;
+  if (
+    typeof dir !== "string" ||
+    !RECORD_DIR.test(dir) ||
+    typeof uid !== "number" ||
+    !Number.isInteger(uid) ||
+    uid < 0 ||
+    !dir.endsWith(`-${String(uid)}`) ||
+    typeof copy !== "string" ||
+    !COPY_NAME.test(copy) ||
+    typeof dev !== "string" ||
+    !DECIMAL.test(dev) ||
+    typeof ino !== "string" ||
+    !DECIMAL.test(ino) ||
+    typeof sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(sha256) ||
+    typeof judged !== "string" ||
+    !/^[0-9a-f]{64}$/.test(judged) ||
+    (!write && judged !== sha256) ||
+    !isMode(mode) ||
+    typeof write !== "boolean" ||
+    typeof resumed !== "boolean" ||
+    write !== (result === "unwritable") ||
+    (resumed && !write) ||
+    (!write && !["unchanged", "restored", "resumed"].includes(result))
+  ) {
+    throw unreadable(stdout);
+  }
+  return { dir, copy, uid, dev, ino, sha256, judged, mode, write, resumed };
 }
 
 /** Reads an outcome's `mode`. */
@@ -559,13 +671,26 @@ export function configEditsReport(
   const notes: string[] = [];
   for (const outcome of outcomes) {
     const path = pathOf(outcome, edits);
-    const said = outcomeMessage(outcome.result, path);
+    const said = outcomeMessage(outcome.result, path, outcome.asRoot);
     if (said !== undefined) warnings.push(said);
+    if (outcome.asRoot === "failed") {
+      warnings.push(
+        `"${path}" could not be finished as root (${outcome.rootError ?? "no reason given"}): left as ` +
+          "this run's commands could leave it.",
+      );
+    }
+    // A resumed put-back is a warning already, which says root wrote it.
+    if (outcome.asRoot === "wrote" && outcome.result === "restored") {
+      notes.push(
+        `"${path}" put back as root: this run's commands cannot write it.`,
+      );
+    }
+    const byRoot = outcome.asRoot === "wrote" || outcome.asRoot === "mode";
     if (outcome.mode !== undefined) {
       const { found, recorded, restored } = outcome.mode;
       if (restored) {
         notes.push(
-          `"${path}"'s mode set back to ${octal(recorded)} (the scenario left ${octal(found)}).`,
+          `"${path}"'s mode set back to ${octal(recorded)}${byRoot ? " as root" : ""} (the scenario left ${octal(found)}).`,
         );
       } else {
         warnings.push(
@@ -595,20 +720,29 @@ function pathOf(outcome: ConfigEditOutcome, edits: ConfigEdits): string {
  *
  * @param result - the outcome's result.
  * @param path - the declared path.
+ * @param asRoot - what the root fallback did, if anything: it changes the words for `unwritable` and
+ * `resumed`.
  */
 export function outcomeMessage(
   result: string,
   path: string,
+  asRoot?: ConfigEditOutcome["asRoot"],
 ): string | undefined {
   switch (result) {
     case "unrecognized":
       return `"${path}" changed in a way the plugin's own edits do not explain: left untouched.`;
     case "unwritable":
-      return `"${path}" holds only the plugin's edits, but this run's commands cannot write it: left as it is.`;
+      return asRoot === "refused"
+        ? `"${path}" holds only the plugin's edits, but this run's commands cannot write it, and root would ` +
+            "not use its record copy (no longer this run's private, single-link file holding the recorded " +
+            "bytes): left as it is."
+        : `"${path}" holds only the plugin's edits, but this run's commands cannot write it: left as it is.`;
     case "resumed":
-      return `"${path}" was found cut short (a write interrupted part-way): put back in full from the record.`;
+      return `"${path}" was found cut short (a write interrupted part-way): put back in full from the record${asRoot === "wrote" ? ", as root" : ""}.`;
     case "replaced":
       return `"${path}" was replaced while it was being put back (a link or another file): left untouched.`;
+    case "moved":
+      return `"${path}" was put back as root, but moved or replaced at its path right after: what is there now is left untouched.`;
     case "missing":
       return `"${path}" was there before the scenario and is gone: not recreated.`;
     case "link":

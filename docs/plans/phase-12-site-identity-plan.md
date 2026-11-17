@@ -1,6 +1,6 @@
 # Phase 12 — Run as the site: the web server's identity for every site command
 
-Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8, 12.9 and 12.10 done 2026-11-12; 12.11 (live rollout, default `"auto"`), 12.11b, 12.12 and 12.13 done 2026-11-13; 12.14 and 12.15a done 2026-11-16; 12.15b next. Parent:
+Status: planned 2026-11-10, audited the same day (§7); next, before Phase 11. 12.0a, 12.0b, 12.1, 12.2 and 12.3 done 2026-11-10; 12.4, 12.5, 12.6 and 12.7 done 2026-11-11; 12.8, 12.9 and 12.10 done 2026-11-12; 12.11 (live rollout, default `"auto"`), 12.11b, 12.12 and 12.13 done 2026-11-13; 12.14, 12.15a and 12.15b done 2026-11-16; 12.16 next. Parent:
 [e2e-modernization-plan.md](e2e-modernization-plan.md) (§3 phase table). Reverses that plan's §8.2
 rejection of "running WP-CLI as the docroot owner". Part B is a prerequisite of WP Rocket's port
 ([phase-6 plan §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket)).
@@ -287,6 +287,7 @@ Code never cites this plan; docs may.
 | `owner-mismatch` | `sftp_twin:www-data` 775/664 | in group | `(ALL)` | `fallback/owner-not-web`, plus a `!log_allowed` warning | as today; warns |
 | `no-wp` | as `site`, `wp` only in `~ubuntu/bin` | outside group | `(ALL)` + `!log_allowed` | `fallback/no-wp` | as `legacy` requirements; warns |
 | `wpconfig-root` | as `site`, `wp-config.php` `root:www-data 644` | outside group | `(ALL)` + `!log_allowed` | `site` | WP Rocket scenario green via 12.14 |
+| `web-config` | `sftp_twin:www-data` 775/644; `wp-config.php`, `.htaccess` `www-data:www-data 644` | in group | `(ALL)` + `!log_allowed` | `fallback/owner-not-web` | WP Rocket's edits put back by root (12.15b) |
 
 `legacy-777` and `owner-mismatch` (docroot not the web server's) define `FS_METHOD` `direct`; every
 other variant leaves it undefined. `check.sh` proves both, and that a web request's
@@ -1499,7 +1500,7 @@ link) — not used: it skips every cause, not only WP Rocket's own.
   empties every cause, no filter, no diff, no transient delete, unanchored transient name, no key
   sweep (harness); stop without the force (twin nginx: the removal's report appears instead).
 
-### 12.15 — In-place cleanup (12.15a done 2026-11-16; 12.15b next)
+### 12.15 — In-place cleanup (12.15a and 12.15b done 2026-11-16)
 
 Read at 3.24.1 (APVM), quoted with file:line in `support/config-edits.ts`. S3–S5 hold; new:
 `set_wp_cache_constant` returns early when `WP_CACHE` already has the value (`WPCache.php:149-155`)
@@ -1509,11 +1510,56 @@ may change, F15); `find_wpconfig_path` also edits a `wp-config.php` one level up
 (`htaccess.php:111-121`; never under WP-CLI); it leaves the file untouched (CRLF too) when the rules
 already match (`:105-110`).
 
-- **Split.** 12.15a (done): everything as the run's identity. **12.15b**: the root fallback for a
-  file the identity cannot write (in place, `assertResolvedInsideRoot`, refusing links) — today warned
-  (`unwritable`) and left. No twin variant needs it (`legacy-777`/`no-sudo` are 777; under
-  `wpconfig-root` WP Rocket cannot edit `wp-config.php` at all): 12.15b adds one (`site` docroot with
-  `runAs: false`) and proves it.
+- **Split.** 12.15a: everything as the run's identity. 12.15b: the root fallback (below).
+- **12.15b — root fallback** (`wp/config-edits-root.ts`):
+  - Engine `$e2e_hold`: a file judged restorable (candidate or prefix) the identity cannot write →
+    `unwritable` + `held` (dir, copy, uid, dev/ino as strings — 64-bit —, SHA-256, mode, `write`,
+    `resumed`, `judged`: the SHA-256 of the bytes as judged); one put back whose `chmod` failed →
+    `held` with `write: false` (`judged` = the record's). Any held → the record
+    kept; reconciling, nothing recorded (`held: true`). TS: root per held file, then the engine again
+    without hold (finds them back, drops the record / records); `mergeRootPutBack` keeps the first
+    verdicts, root's for held ones, the second's when the file changed again. +1 `wp eval` + 1 sudo
+    call per held file, only then.
+  - Root = fixed `PUT_BACK_SCRIPT` (`sudo -n -- timeout --preserve-status 20 sh -c`, values as
+    arguments): GNU tools (96); folder the uid's `0700`, the copy **opened once** (fd 4), the opened
+    file the uid's, single link (91); target regular, opened `O_RDONLY` (no create), the **opened**
+    file = judged dev/ino, `nlink 1`, path still it, bytes still `judged` (93); copy fd → root-private
+    `mktemp` (95), its SHA-256 (91); write through `/dev/fd/3` (truncate then write: a cut leaves a
+    prefix the next run resumes; `TERM` from here exits 94), SHA-256 re-read (94), path still that
+    inode (92 `moved`), `chmod` via the fd. `timeout`: a FIFO swapped in between the type check and the
+    open would block it (measured); 20 s keeps WP Rocket's 3 files inside a hook's margin.
+  - Audit fixes (2026-11-16, each verified first — ubuntu:24.04 for 1–3): (1) a same-inode rewrite by
+    the web server between verdict and write was overwritten → `judged`; (2) the copy checked by path
+    then re-read by path: the identity (docker's www-data) could swap in a link and root copied
+    `/etc/shadow` into the target → one fd, staged and hashed; (3) `stat %a` prints `40`, `4` → modes
+    `[0-7]{1,4}`; (4) any root failure threw and kept the record: a host always failing it (no sudo
+    rule for `timeout`, no GNU tools) stuck the site → only 94 / an exit not known to precede the
+    write throws; 1, 95, 96, 125–127, 143, an odd exit-0 answer and an implausible root are
+    `failed`: the second run's answer, warned `could not be finished as root (<reason>)`; (5) a path
+    changed after the write was told `replaced` "left untouched" → checked before the write too,
+    `moved` after; (6) no free-space pre-check (staging in `/tmp` fails first on a shared full disk; a
+    cut is a resumable prefix); (7) call-site gates now tested; (8) budget documented.
+  - Before it, the target must resolve (`readlink -f`, as the transport's user) to exactly `<real
+    root>/<path>` (`resolvesInPlace`): no link at it or in any parent. Not `assertResolvedInsideRoot`
+    — measured on a twin: a parent linked into a folder the SSH user cannot enter (`/root/x`) does not
+    resolve, its walk up then reaches the root and passes; this spec's twin test caught it. **Open**
+    (its own fix, not 12.15b): every other elevated target (residue's `rm -rf`, ownership) still
+    relies on that check.
+  - Gates: never in `site` (the record is the web server's, and a file it cannot write is not the
+    plugin's doing), never with `elevate: false` (unprobed), never without passwordless sudo (asked
+    only once something is held): then the second run answers `unwritable`, as before.
+  - Removals (absent before, created files/dirs) are never held: a docroot the identity cannot write
+    cannot take the plugin's install either; `wp-content/cache`'s subfolders are already root-swept
+    residue. Left warned.
+  - Wording: notes `"<path>" put back as root: this run's commands cannot write it.`, `…'s mode set
+    back to 0644 as root (…)`; `resumed` adds `, as root`; a refused copy says why.
+  - Twin `web-config` (the plan's `site` + `runAs: false` cannot stage the zip: a 755 docroot of
+    www-data): sftp-owned 775/644, ubuntu in group (state `fallback/owner-not-web`), `wp-config.php`/
+    `.htaccess` the web server's 644. Measured: WP-CLI (ubuntu) cannot set `WP_CACHE`; the settling
+    request (`admin_init` → `maybe_set_wp_cache`) does. With files 664 (FS_CHMOD_FILE from
+    `index.php`) WP Rocket's write makes `wp-config.php` 664: the bytes go back as ubuntu, only the
+    mode needs root — the twin test does that on Apache (`index.php` 664), bytes via root on nginx
+    (`wp-config.php`) and Apache (`.htaccess`).
 - **Engine** (`wp/config-edits.ts`; pure half `config-edits-declaration.ts`): `ProductConfig.configEdits`
   (`registerConfigEdits`, validated at config build, carried by `declaredResidue`) = `files` (operations
   of `preg_replace` steps: PCRE `/…/flags`, **literal** replacement — back-references refused —,
@@ -1598,6 +1644,38 @@ already match (`:105-110`).
   blocked thrown, unswept silent, After budget, `skipWordPress` via `wpCli` or combinations allowed,
   WP_ROCKET_DEBUG undeclared (10 pinned cases fail). Equivalent: "remove adds no empty block" (the add with the captured
   empty block makes the same text). Not killable locally: sweeping another uid's record (needs root).
+- **12.15b specs:** `config-edits.php.spec.ts` +5 (unwritable edit held, cut-short file held to resume,
+  no hold asked → as before, a removal never held, reconcile held records nothing; the harness's
+  `runEngine` gained `hold`); `config-edits-declaration.spec.ts` (held parsing table, wording, snippet
+  hold, `judged` parsing; changed: three `toEqual` gain `held: false`, mode-only fixtures carry
+  `judged` = `sha256`); `config-edits-root.spec.ts` (new, 41: gates, `heldFiles`, argv, exits incl.
+  `failed`/`moved`/short modes, `resolvesInPlace`, merge; the script itself on Linux or inside the
+  nginx twin, with PATH shims for the races: copy swapped after its open, moved after the write or
+  before it, no GNU stat, no `mktemp`, `TERM` before/while writing); `config-edits.site.ssh.spec.ts`
+  (new, 3: over the fake SSH server, `site` never holds or runs root, otherwise hold → root → no
+  hold, `elevate: false` never holds); `config-edits-root.ssh-twins.spec.ts` (new: put-back over SSH + sudo in place, a parent linked
+  out of the root, a copy another user owns in the identity's folder); `preflight`/`exec` twin specs gain
+  the `web-config` row; WP Rocket twin "web-config: … put back by root" (killed run + full run, both
+  stacks): ~1.6 min apache, ~55 s nginx per run. Measured locally 2026-11-16: WP Rocket's file 16.0 min
+  alone (1 worker, 16 tests), the other twin specs 8.7 min on 2 workers (73): ~25 min of the CI step's
+  35 (`web-config` adds ~2.5 min to WP Rocket's file, ~40 s to preflight/exec). After the audit fixes
+  (2026-11-16): WP Rocket's file 16.2 min (1 worker, 16 passed), root specs 44 passed in the twin.
+- **12.15b mutants killed (30/31):** engine: never held, record dropped although held, reconcile held
+  still records, a removal held, `resumed` lost, inode as number, snippet hold never passed; script:
+  opened file not compared, second link allowed, copy checksum / folder mode / copy link / copy owner
+  unchecked, mode-only bytes unchecked, FIFO opened, mode not set; TS: root in `site`, `elevate: false`
+  ignored, in-place = inside root, held stem unchecked, cut taken as replaced, replaced keeps the second
+  verdict, changed-again ignored, resumed reported restored; parse: folder, uid suffix, copy name,
+  write/result coupling unchecked; words: refused said as unwritable, put-back not noted. Equivalent:
+  "folder link allowed" (`stat -c %a` of a link is 777: the folder-mode check refuses it).
+- **12.15b audit-fix mutants killed (23/23):** judged bytes unchecked (script), judged = record's
+  (engine), judged unparsed / mode-only coupling unchecked; copy re-read by path, staged copy
+  unhashed, opened copy owner unchecked (twin spec); modes need 3 digits; every failure thrown, odd
+  exit-0 thrown, implausible root thrown, no `TERM` → 94, no `--preserve-status`, no tools gate,
+  `failed` mark lost, failure not warned; no pre-write path check, moved said replaced (script and
+  merge); restore always holds, record never holds, record's second run holds, restore skips root.
+  PHP's failed-`chmod` hold: not unit-testable (needs a file the runner owns but cannot `chmod`),
+  covered by the WP Rocket twin's apache mode-only path.
 
 ### 12.16 — WP Rocket lifecycle scenario
 

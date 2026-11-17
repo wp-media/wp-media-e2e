@@ -36,8 +36,10 @@ readonly TWIN_LOCK=/run/twin/site.lock
 # The variant the site was last made as, written only once check.sh proved it: a reset cut short
 # leaves none, and the next boot makes the site again.
 readonly TWIN_VERIFIED=/opt/twin/verified
-readonly TWIN_VARIANTS="legacy-777 site site-775 no-sudo owner-mismatch no-wp wpconfig-root"
+readonly TWIN_VARIANTS="legacy-777 site site-775 no-sudo owner-mismatch no-wp wpconfig-root web-config"
 readonly TWIN_DB_NAME=wp TWIN_DB_USER=wp TWIN_DB_PASSWORD=wp
+# The files web-config gives the web server alone (relative to the root; .htaccess only on Apache).
+readonly TWIN_WEB_CONFIG_FILES=(wp-config.php .htaccess)
 # Databases a reset keeps; every other one is a run's leftover.
 readonly TWIN_SYSTEM_DBS="information_schema mysql performance_schema sys"
 TWIN_HTTP_PORT="${TWIN_HTTP_PORT:-80}"
@@ -86,6 +88,10 @@ wp_web() {
 #                    owner-mismatch: every other variant isolates one condition.
 #   V_WP_HOME        1 when `wp` is only in ~ubuntu/bin (off sudo's secure_path)
 #   V_WPCONFIG_ROOT  1 when wp-config.php is root:www-data 644
+#   V_WEB_CONFIG     1 when wp-config.php (and Apache's .htaccess) are www-data:www-data 644 in a
+#                    docroot ubuntu writes through the group: the web server edits them, ubuntu
+#                    (whom site commands run as, the docroot not being the web server's) cannot.
+#                    Files 644, so WordPress's FS_CHMOD_FILE (index.php's mode | 0644) keeps them so.
 #   V_FS_DIRECT      1 when wp-config.php defines FS_METHOD 'direct': derived, set whenever the
 #                    docroot is not the web server's. WordPress's own check then answers `ftpext`
 #                    (the ftp extension is loaded), and every web-side write through WP_Filesystem
@@ -94,7 +100,7 @@ wp_web() {
 # Usage: variant_spec <name>
 variant_spec() {
   V_OWNER=www-data:www-data V_DIR_MODE=755 V_FILE_MODE=644 V_IN_GROUP=0 V_SUDO=1 V_LOG_ALLOWED=0
-  V_WP_HOME=0 V_WPCONFIG_ROOT=0
+  V_WP_HOME=0 V_WPCONFIG_ROOT=0 V_WEB_CONFIG=0
   case "${1:-}" in
     legacy-777) V_OWNER=sftp_twin:www-data V_DIR_MODE=777 V_FILE_MODE=777 V_IN_GROUP=1 ;;
     site) ;;
@@ -103,6 +109,7 @@ variant_spec() {
     owner-mismatch) V_OWNER=sftp_twin:www-data V_DIR_MODE=775 V_FILE_MODE=664 V_IN_GROUP=1 V_LOG_ALLOWED=1 ;;
     no-wp) V_WP_HOME=1 ;;
     wpconfig-root) V_WPCONFIG_ROOT=1 ;;
+    web-config) V_OWNER=sftp_twin:www-data V_DIR_MODE=775 V_FILE_MODE=644 V_IN_GROUP=1 V_WEB_CONFIG=1 ;;
     *) die "Unknown variant '${1:-}'. One of: ${TWIN_VARIANTS}" ;;
   esac
   V_FS_DIRECT=0

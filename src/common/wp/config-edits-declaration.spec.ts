@@ -10,6 +10,7 @@ import {
   unusableMessage,
 } from "./config-edits-declaration";
 import { recordStemFor, configEditsPhp } from "./config-edits";
+import { phpLiteral } from "./php";
 import type {
   ConfigEditStep,
   ConfigEdits,
@@ -42,6 +43,23 @@ const EDITS: ConfigEdits = {
   createdFiles: [{ path: "wp-content/advanced-cache.php", marks: ["MARK"] }],
   createdDirs: ["wp-content/cache"],
 };
+
+/** A file held for root to write back, as the engine answers it. */
+const HELD = {
+  dir: "/tmp/e2e-record-0123456789abcdef-33",
+  copy: "file-0",
+  uid: 33,
+  dev: "64768",
+  ino: "18446744073709551615",
+  sha256: "a".repeat(64),
+  judged: "c".repeat(64),
+  mode: 0o644,
+  write: true,
+  resumed: false,
+};
+
+/** Only the mode held: the file holds the recorded bytes, so they are what was judged. */
+const MODE_ONLY = { ...HELD, write: false, judged: HELD.sha256 };
 
 test.describe("normaliseConfigEdits", () => {
   test("normalises every path and keeps the rest as declared", () => {
@@ -233,6 +251,7 @@ test.describe("the engine's answers", () => {
       discarded: true,
       swept: 3,
       unswept: 0,
+      held: false,
     });
     expect(
       parseRecordAnswer(
@@ -262,6 +281,7 @@ test.describe("the engine's answers", () => {
       discarded: false,
       swept: 0,
       unswept: 0,
+      held: false,
     });
     expect(
       parseRecordAnswer(
@@ -308,6 +328,7 @@ test.describe("the engine's answers", () => {
     ).toEqual({
       kind: "restored",
       outcomes: [{ kind: "dir", index: 0, result: "not-empty" }],
+      held: false,
     });
   });
 
@@ -344,6 +365,100 @@ test.describe("the engine's answers", () => {
       expect(() => parseRestoreAnswer(answer, EDITS)).toThrow(
         /\[wp\/config-edits\] the engine answered something unreadable/,
       );
+    });
+  }
+
+  test("a held outcome is read whole, and either answer says it held", () => {
+    const outcome = {
+      kind: "file",
+      index: 0,
+      result: "unwritable",
+      held: HELD,
+    };
+    expect(
+      parseRestoreAnswer(
+        JSON.stringify({ outcomes: [outcome], held: true }),
+        EDITS,
+      ),
+    ).toEqual({ kind: "restored", outcomes: [outcome], held: true });
+    expect(
+      parseRecordAnswer(
+        JSON.stringify({
+          reconciled: [outcome],
+          unusable: null,
+          discarded: false,
+          swept: 0,
+          unswept: 0,
+          held: true,
+        }),
+        EDITS,
+      ),
+    ).toMatchObject({ reconciled: [outcome], held: true });
+    // Only the mode left: a file whose bytes are as recorded.
+    const modeOnly = {
+      kind: "file",
+      index: 0,
+      result: "restored",
+      held: MODE_ONLY,
+    };
+    expect(
+      parseRestoreAnswer(JSON.stringify({ outcomes: [modeOnly] }), EDITS),
+    ).toEqual({ kind: "restored", outcomes: [modeOnly], held: false });
+    expect(() =>
+      parseRestoreAnswer('{"outcomes":[],"held":"yes"}', EDITS),
+    ).toThrow(/unreadable/);
+    expect(() =>
+      parseRecordAnswer(
+        '{"reconciled":null,"discarded":false,"swept":0,"held":1}',
+        EDITS,
+      ),
+    ).toThrow(/unreadable/);
+  });
+
+  for (const [what, outcome] of [
+    ["held on a created file", { kind: "created-file", result: "unwritable" }],
+    ["held bytes on a file not unwritable", { result: "unrecognized" }],
+    ["a held mode on an unwritable file", { held: MODE_ONLY }],
+    [
+      "a held mode on a file left untouched",
+      { result: "replaced", held: MODE_ONLY },
+    ],
+    [
+      "a resumed mode alone",
+      { result: "restored", held: { ...MODE_ONLY, resumed: true } },
+    ],
+    ["a folder of no record", { held: { ...HELD, dir: "/tmp/x-33" } }],
+    [
+      "a folder of another uid",
+      { held: { ...HELD, dir: "/tmp/e2e-record-0123456789abcdef-34" } },
+    ],
+    ["a negative uid", { held: { ...HELD, uid: -1 } }],
+    ["a copy outside the folder", { held: { ...HELD, copy: "../file-0" } }],
+    ["a numeric inode", { held: { ...HELD, ino: 12 } }],
+    ["a signed device", { held: { ...HELD, dev: "-1" } }],
+    ["a short checksum", { held: { ...HELD, sha256: "ab" } }],
+    ["no judged checksum", { held: { ...HELD, judged: undefined } }],
+    ["a short judged checksum", { held: { ...HELD, judged: "cd" } }],
+    [
+      "a mode alone judged on other bytes than the record's",
+      { result: "restored", held: { ...MODE_ONLY, judged: HELD.judged } },
+    ],
+    ["no mode", { held: { ...HELD, mode: 0o10000 } }],
+    ["no write flag", { held: { ...HELD, write: "yes" } }],
+    ["no resumed flag", { held: { ...HELD, resumed: null } }],
+    ["not an object", { held: "file-0" }],
+  ] as const) {
+    test(`refuses a held outcome with ${what}`, () => {
+      const entry = {
+        kind: "file",
+        index: 0,
+        result: "unwritable",
+        held: HELD,
+        ...outcome,
+      };
+      expect(() =>
+        parseRestoreAnswer(JSON.stringify({ outcomes: [entry] }), EDITS),
+      ).toThrow(/unreadable/);
     });
   }
 
@@ -392,6 +507,83 @@ test.describe("configEditsReport", () => {
       '"wp-config.php" is owned by 0:0 (uid:gid), 33:33 before the scenario: ownership is never changed here.',
       '"wp-content/advanced-cache.php" did not exist before the scenario and is not the plugin\'s (neither empty nor marked): left.',
     ]);
+  });
+
+  test("what root finished is noted, and said once; what it refused is a warning naming why", () => {
+    const said = configEditsReport(
+      [
+        { kind: "file", index: 0, result: "restored", asRoot: "wrote" },
+        {
+          kind: "file",
+          index: 0,
+          result: "restored",
+          asRoot: "wrote",
+          mode: { found: 0o664, recorded: 0o644, restored: true },
+        },
+        {
+          kind: "file",
+          index: 0,
+          result: "restored",
+          asRoot: "mode",
+          mode: { found: 0o664, recorded: 0o644, restored: true },
+        },
+        {
+          kind: "file",
+          index: 0,
+          result: "unchanged",
+          asRoot: "mode",
+          mode: { found: 0o664, recorded: 0o644, restored: false },
+        },
+        { kind: "file", index: 0, result: "resumed", asRoot: "wrote" },
+        { kind: "file", index: 0, result: "unwritable", asRoot: "refused" },
+      ],
+      EDITS,
+    );
+    expect(said.notes).toEqual([
+      '"wp-config.php" put back as root: this run\'s commands cannot write it.',
+      '"wp-config.php" put back as root: this run\'s commands cannot write it.',
+      '"wp-config.php"\'s mode set back to 0644 as root (the scenario left 0664).',
+      '"wp-config.php"\'s mode set back to 0644 as root (the scenario left 0664).',
+    ]);
+    expect(said.warnings).toEqual([
+      '"wp-config.php"\'s mode is 0664, 0644 before the scenario: it could not be set back.',
+      '"wp-config.php" was found cut short (a write interrupted part-way): put back in full from the record, as root.',
+      "\"wp-config.php\" holds only the plugin's edits, but this run's commands cannot write it, and root would " +
+        "not use its record copy (no longer this run's private, single-link file holding the recorded bytes): " +
+        "left as it is.",
+    ]);
+    // A root that could not run, or wrote a file then moved away, is a warning of its own.
+    expect(
+      configEditsReport(
+        [
+          {
+            kind: "file",
+            index: 0,
+            result: "unwritable",
+            asRoot: "failed",
+            rootError: "exit 1: sudo: a password is required",
+          },
+          { kind: "file", index: 0, result: "moved", asRoot: "wrote" },
+        ],
+        EDITS,
+      ),
+    ).toEqual({
+      notes: [],
+      warnings: [
+        "\"wp-config.php\" holds only the plugin's edits, but this run's commands cannot write it: left as it is.",
+        '"wp-config.php" could not be finished as root (exit 1: sudo: a password is required): left as ' +
+          "this run's commands could leave it.",
+        '"wp-config.php" was put back as root, but moved or replaced at its path right after: what is ' +
+          "there now is left untouched.",
+      ],
+    });
+    // Without the fallback, the words are as they always were.
+    expect(outcomeMessage("unwritable", "p")).toBe(
+      "\"p\" holds only the plugin's edits, but this run's commands cannot write it: left as it is.",
+    );
+    expect(outcomeMessage("resumed", "p", "mode")).toBe(
+      '"p" was found cut short (a write interrupted part-way): put back in full from the record.',
+    );
   });
 
   test("a record folder never used names itself, what that costs, and how to resume", () => {
@@ -461,6 +653,15 @@ test.describe("the record folder and the snippet", () => {
     expect(
       recordStemFor({ ...ssh, rootDir: "/var/www/b" }, "wp-rocket"),
     ).not.toBe(one);
+  });
+
+  test("holds for root only when asked", () => {
+    expect(configEditsPhp("restore", "/tmp/s", EDITS)).toContain(
+      `$e2e_hold = ${phpLiteral(false)};`,
+    );
+    expect(configEditsPhp("record", "/tmp/s", EDITS, true)).toContain(
+      `$e2e_hold = ${phpLiteral(true)};`,
+    );
   });
 
   test("embeds every input as a literal: no declared text reaches the snippet raw", () => {

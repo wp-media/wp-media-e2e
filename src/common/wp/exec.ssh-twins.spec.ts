@@ -101,6 +101,13 @@ const EXPECTED: Readonly<Record<TwinVariant, Expected>> = {
     written: "www-data:www-data 644",
     elevation: "available",
   },
+  // As `owner-mismatch` without sudo's logging; only wp-config.php (and .htaccess) are the web server's.
+  "web-config": {
+    state: "fallback/owner-not-web",
+    runsAs: "ubuntu",
+    written: "ubuntu:ubuntu 664",
+    elevation: "available",
+  },
 };
 
 /**

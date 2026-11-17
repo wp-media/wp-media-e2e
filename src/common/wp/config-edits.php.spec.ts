@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -100,9 +101,17 @@ function at(name: string): string {
   return join(sandbox.root, name);
 }
 
-/** Runs the engine and returns its parsed answer, failing on a non-zero exit. */
-function engine(mode: "record" | "restore"): Record<string, unknown> {
-  const run = runEngine(sandbox, mode, EDITS);
+/**
+ * Runs the engine and returns its parsed answer, failing on a non-zero exit.
+ *
+ * @param mode - record or restore.
+ * @param hold - hold for root what this user cannot finish.
+ */
+function engine(
+  mode: "record" | "restore",
+  hold = false,
+): Record<string, unknown> {
+  const run = runEngine(sandbox, mode, EDITS, undefined, hold);
   expect(run.status, run.stdout).toBe(0);
   return JSON.parse(run.stdout.trim().split("\n").at(-1) ?? "") as Record<
     string,
@@ -116,6 +125,22 @@ function answerOf(stdout: string): Record<string, unknown> {
     string,
     unknown
   >;
+}
+
+/** One outcome of an answer's list, whole. */
+function outcomeOf(
+  outcomes: unknown,
+  kind: string,
+  index = 0,
+): Record<string, unknown> | undefined {
+  return (outcomes as Record<string, unknown>[]).find(
+    (o) => o.kind === kind && o.index === index,
+  );
+}
+
+/** A text's SHA-256, hex. */
+function sha256(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
 }
 
 /** The result for one outcome of an answer's list. */
@@ -271,6 +296,131 @@ test.describe("the in-place cleanup engine", () => {
     expect(resultOf(engine("restore").outcomes, "file", 0)).toBe("unwritable");
     expect(readFileSync(at("conf.txt"), "utf8")).toBe(
       "a\nadded by the plugin\n",
+    );
+  });
+
+  test("asked to hold, an edit the identity cannot write is vouched for root and the record kept", () => {
+    test.skip(process.getuid?.() === 0, "root writes anything");
+    writeFileSync(at("conf.txt"), "a\n");
+    chmodSync(at("conf.txt"), 0o640);
+    engine("record");
+    writeFileSync(at("conf.txt"), "a\nadded by the plugin\n");
+    chmodSync(at("conf.txt"), 0o444);
+    const judged = statSync(at("conf.txt"), { bigint: true });
+    const answer = engine("restore", true);
+    expect(answer.held).toBe(true);
+    expect(outcomeOf(answer.outcomes, "file", 0)).toEqual({
+      kind: "file",
+      index: 0,
+      result: "unwritable",
+      held: {
+        dir: sandbox.recordDir,
+        copy: "file-0",
+        uid: process.geteuid?.(),
+        dev: String(judged.dev),
+        ino: String(judged.ino),
+        sha256: sha256("a\n"),
+        judged: sha256("a\nadded by the plugin\n"),
+        mode: 0o640,
+        write: true,
+        resumed: false,
+      },
+    });
+    // Untouched, and the record (its copy holding those bytes) kept for root.
+    expect(readFileSync(at("conf.txt"), "utf8")).toBe(
+      "a\nadded by the plugin\n",
+    );
+    expect(readFileSync(join(sandbox.recordDir, "file-0"), "utf8")).toBe("a\n");
+    expect(existsSync(join(sandbox.recordDir, "meta.json"))).toBe(true);
+
+    // Root's part, as the fallback does it: the bytes in place, then the mode.
+    chmodSync(at("conf.txt"), 0o640);
+    writeFileSync(at("conf.txt"), "a\n");
+    const again = engine("restore");
+    expect(again.held).toBeUndefined();
+    expect(resultOf(again.outcomes, "file", 0)).toBe("unchanged");
+    expect(existsSync(sandbox.recordDir)).toBe(false);
+  });
+
+  test("asked to hold, a file cut short that the identity cannot write is held to be resumed", () => {
+    test.skip(process.getuid?.() === 0, "root writes anything");
+    writeFileSync(at("conf.txt"), "abc\n");
+    engine("record");
+    writeFileSync(at("conf.txt"), "ab");
+    chmodSync(at("conf.txt"), 0o444);
+    const held = outcomeOf(engine("restore", true).outcomes, "file", 0)?.held;
+    expect(held).toMatchObject({
+      write: true,
+      resumed: true,
+      judged: sha256("ab"),
+    });
+  });
+
+  test("not asked to hold, an unwritable edit holds nothing and the record goes, as before", () => {
+    test.skip(process.getuid?.() === 0, "root writes anything");
+    writeFileSync(at("conf.txt"), "a\n");
+    engine("record");
+    writeFileSync(at("conf.txt"), "a\nadded by the plugin\n");
+    chmodSync(at("conf.txt"), 0o444);
+    const answer = engine("restore");
+    expect(answer.held).toBeUndefined();
+    expect(outcomeOf(answer.outcomes, "file", 0)).toEqual({
+      kind: "file",
+      index: 0,
+      result: "unwritable",
+    });
+    expect(existsSync(sandbox.recordDir)).toBe(false);
+  });
+
+  test("asked to hold, a file to remove is never held: its folder unwritable, it is left and the record goes", () => {
+    test.skip(process.getuid?.() === 0, "root writes anything");
+    engine("record");
+    writeFileSync(at("rules.txt"), "<rules>x</rules>\n");
+    chmodSync(sandbox.root, 0o555);
+    const answer = engine("restore", true);
+    chmodSync(sandbox.root, 0o755);
+    expect(answer.held).toBeUndefined();
+    expect(outcomeOf(answer.outcomes, "file", 1)).toEqual({
+      kind: "file",
+      index: 1,
+      result: "unwritable",
+    });
+    expect(existsSync(at("rules.txt"))).toBe(true);
+    expect(existsSync(sandbox.recordDir)).toBe(false);
+  });
+
+  test("asked to hold while reconciling, the killed run's record is kept and nothing recorded until root is done", () => {
+    test.skip(process.getuid?.() === 0, "root writes anything");
+    writeFileSync(at("conf.txt"), "a\n");
+    engine("record");
+    const meta = readFileSync(join(sandbox.recordDir, "meta.json"), "utf8");
+    // Killed mid-scenario: the plugin's edit stays, and the file is not this user's to write.
+    writeFileSync(at("conf.txt"), "a\nadded by the plugin\n");
+    chmodSync(at("conf.txt"), 0o444);
+    const held = engine("record", true);
+    expect(held).toMatchObject({
+      held: true,
+      unusable: null,
+      discarded: false,
+      swept: 0,
+      unswept: 0,
+    });
+    expect(outcomeOf(held.reconciled, "file", 0)?.held).toMatchObject({
+      write: true,
+    });
+    expect(readFileSync(join(sandbox.recordDir, "meta.json"), "utf8")).toBe(
+      meta,
+    );
+
+    // Root's part; then the record step again reconciles (nothing left) and records.
+    chmodSync(at("conf.txt"), 0o644);
+    writeFileSync(at("conf.txt"), "a\n");
+    writeFileSync(at("rules.txt"), "now\n");
+    const second = engine("record");
+    expect(second.held).toBeUndefined();
+    expect(resultOf(second.reconciled, "file", 0)).toBe("unchanged");
+    expect(readFileSync(join(sandbox.recordDir, "meta.json"), "utf8")).not.toBe(
+      meta,
     );
   });
 

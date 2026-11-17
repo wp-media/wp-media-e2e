@@ -654,6 +654,99 @@ test.describe("SSH twins: WP Rocket's licence, outputs and leftovers", () => {
       }
     });
 
+    // The web server edits `wp-config.php` (and Apache's `.htaccess`) through its settling request,
+    // while site commands run as ubuntu, who cannot write either: the teardown's put-back goes
+    // through root, in place, and leaves both as first found. On Apache `index.php` is made 664 first,
+    // so WordPress's FS_CHMOD_FILE is 664 and WP Rocket's write opens `wp-config.php` to the group:
+    // ubuntu then writes its bytes back itself, and only its mode needs root. The first run is killed
+    // mid-scenario: the next run's Before reconciles through root, its teardown again.
+    test(`${twin.stack} web-config: files only the web server can write are put back by root, byte for byte and in place`, async ({
+      playwright,
+    }) => {
+      const zip = await wpRocketZip();
+      const warnings = captureWarnings();
+      const notes = captureLogs();
+      try {
+        await onVariant(
+          twin,
+          "web-config",
+          playwright.request,
+          async (transport, root) => {
+            const tracked = trackedFiles(twin.stack, root);
+            const edited =
+              twin.stack === "apache"
+                ? ["wp-config.php", ".htaccess"]
+                : ["wp-config.php"];
+            for (const name of edited) {
+              expect(tracked[name], name).toMatch(
+                /^regular file www-data:www-data 644 /,
+              );
+            }
+            if (twin.stack === "apache") {
+              twinExec(twin.stack, ["chmod", "664", `${root}/index.php`]);
+            }
+            const openSettleClient = await settleOpener(
+              playwright.request,
+              twin,
+            );
+            await installPluginUnderTest(
+              transport,
+              zip,
+              RESIDUE,
+              LEFT_WORK,
+              REPORT,
+              openSettleClient,
+            );
+            // The premise: the web server's settling request wrote what WP-CLI could not.
+            expect(wpCacheLine(twin.stack, root)).toMatch(/'WP_CACHE', true/);
+            expectSettled(twin.stack, root, warnings.said());
+            // Killed here: no teardown. The next run's Before puts the files back from the record.
+            await installPluginUnderTest(
+              transport,
+              zip,
+              RESIDUE,
+              LEFT_WORK,
+              REPORT,
+              await settleOpener(playwright.request, twin),
+            );
+            expect(wpCacheLine(twin.stack, root)).toMatch(/'WP_CACHE', true/);
+
+            await teardownPluginUnderTest(
+              transport,
+              zip.slug,
+              WP_ROCKET_LOG_OPTIONS,
+              RESIDUE,
+              REPORT,
+              STOP,
+            );
+            expect(warnings.said()).not.toMatch(/cannot write it|mode is/);
+            const rootNotes =
+              twin.stack === "apache"
+                ? [
+                    `"wp-config.php"'s mode set back to 0644 as root (the scenario left 0664).`,
+                    `".htaccess" put back as root: this run's commands cannot write it.`,
+                  ]
+                : [
+                    `"wp-config.php" put back as root: this run's commands cannot write it.`,
+                  ];
+            for (const moment of ["before", "after"]) {
+              for (const note of rootNotes) {
+                expect(notes.said()).toContain(
+                  `[hooks] ${moment} "${REPORT.title}", ${note}`,
+                );
+              }
+            }
+            await expectNothingRecreated(transport, twin.stack, root);
+            expectPutBack(twin.stack, root, transport, zip.slug, tracked);
+            expect(debugLogFatals(twin.stack, root)).toEqual([]);
+          },
+        );
+      } finally {
+        warnings.restore();
+        notes.restore();
+      }
+    });
+
     test(`${twin.stack} no-sudo: licensed, the handover attempted and refused for want of sudo`, async ({
       playwright,
     }) => {
@@ -1064,6 +1157,22 @@ function captureWarnings(): { said: () => string; restore: () => void } {
     said: () => lines.join("\n"),
     restore: () => {
       console.warn = realWarn;
+    },
+  };
+}
+
+/** Collects `console.log` lines while still printing them. */
+function captureLogs(): { said: () => string; restore: () => void } {
+  const lines: string[] = [];
+  const realLog = console.log;
+  console.log = (...args: unknown[]): void => {
+    lines.push(args.map(String).join(" "));
+    realLog(...args);
+  };
+  return {
+    said: () => lines.join("\n"),
+    restore: () => {
+      console.log = realLog;
     },
   };
 }
