@@ -252,6 +252,19 @@ test.describe("beginFacts", () => {
     const blank = beginFacts({ ...RUN, runName: " \n " }, PLAN, STARTED);
     expect(blank).not.toHaveProperty("runName");
   });
+
+  test("keeps the suite's version as plain text; absent or blank, the facts hold none", () => {
+    expect(
+      beginFacts({ ...RUN, suiteVersion: "1.1.0" }, PLAN, STARTED),
+    ).toMatchObject({ suiteVersion: "1.1.0" });
+    expect(
+      beginFacts({ ...RUN, suiteVersion: "1.1.0\n\u001b[1m" }, PLAN, STARTED),
+    ).toMatchObject({ suiteVersion: "1.1.0" });
+    expect(beginFacts(RUN, PLAN, STARTED)).not.toHaveProperty("suiteVersion");
+    expect(
+      beginFacts({ ...RUN, suiteVersion: " \n " }, PLAN, STARTED),
+    ).not.toHaveProperty("suiteVersion");
+  });
 });
 
 test.describe("withSetupAttachment", () => {
@@ -637,7 +650,55 @@ test.describe("factEntries", () => {
       ["Run ID", RUN.runId],
       ["Started", "2026-10-12T10:00:00.000Z"],
       ["Ended", "2026-10-12T10:03:20.000Z"],
+      ["Suite", "unknown"],
     ]);
+  });
+
+  test("the suite's version is the last entry; every other entry stays where it was", () => {
+    for (const run of [
+      RUN,
+      { ...RUN, requestedRef: "develop", runName: "n" },
+    ]) {
+      const without = factEntries(passedFacts(run));
+      const entries = factEntries(
+        passedFacts({ ...run, suiteVersion: "1.1.0" }),
+      );
+      expect(entries.at(-1)).toEqual(["Suite", "1.1.0"]);
+      expect(entries.slice(0, -1)).toEqual(without.slice(0, -1));
+      expect(without.at(-1)).toEqual(["Suite", "unknown"]);
+    }
+  });
+
+  test("with no plugin or site recorded, the version still pushes no fact off Allure's first eight", () => {
+    // Setups that failed or were skipped record nothing: few entries precede the run's id and times.
+    const short = (run: RunDescription, ended: boolean): RunFacts => {
+      const begun = beginFacts(run, PLAN, STARTED);
+      return ended
+        ? endFacts(
+            begun,
+            { status: "passed", durationMs: 1, scenarios: counts(0) },
+            ENDED,
+          )
+        : begun;
+    };
+    for (const run of [RUN, { ...RUN, requestedRef: "develop" }]) {
+      for (const ended of [false, true]) {
+        const without = factEntries(short(run, ended));
+        const entries = factEntries(
+          short({ ...run, suiteVersion: "1.1.0" }, ended),
+        );
+        // The shortest facts have eight entries, the version among them: it displaces nothing.
+        const others = (list: [string, string][]): [string, string][] =>
+          list.slice(0, 8).filter(([label]) => label !== "Suite");
+        expect(others(entries)).toEqual(others(without));
+        expect(entries.at(-1)).toEqual(["Suite", "1.1.0"]);
+        expect(entries.slice(0, -1)).toEqual(without.slice(0, -1));
+        // The times are the facts Suite would have pushed off the front page.
+        expect(entries.slice(-3, -1).map(([label]) => label)).toEqual(
+          ended ? ["Started", "Ended"] : ["Run ID", "Started"],
+        );
+      }
+    }
   });
 
   test("a missing fact is said: no plugin, no site, a digest not recorded", () => {
@@ -857,6 +918,18 @@ test.describe("metadataOf and runFactsJson", () => {
     const json = JSON.parse(runFactsJson(facts)) as Record<string, unknown>;
     expect(json).toEqual({ v: 1, title: titleLine(facts), ...facts });
     expect(runFactsJson(facts).endsWith("}\n")).toBe(true);
+  });
+
+  test("run-facts.json holds the suite's version when known; no key when not", () => {
+    const known = JSON.parse(
+      runFactsJson(passedFacts({ ...RUN, suiteVersion: "1.1.0-rc.1+b.7" })),
+    ) as Record<string, unknown>;
+    expect(known).toMatchObject({ v: 1, suiteVersion: "1.1.0-rc.1+b.7" });
+    const unknown = JSON.parse(runFactsJson(passedFacts())) as Record<
+      string,
+      unknown
+    >;
+    expect(unknown).not.toHaveProperty("suiteVersion");
   });
 });
 
