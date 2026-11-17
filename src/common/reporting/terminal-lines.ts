@@ -8,6 +8,7 @@ import {
   type SymbolName,
   type Token,
 } from "../terminal/palette";
+import { suiteVersionText } from "../config/suite-version";
 import { cleanMessage, type TestStatus } from "./results";
 import { displayText, formatDuration } from "./run-summary";
 
@@ -374,11 +375,14 @@ export interface RunHeader {
   readonly requestedRef?: string;
   /** The scenarios the run plans; setups are not counted. */
   readonly scenarios: number;
+  /** The suite's own version; absent when it could not be read, shown as `unknown`. */
+  readonly suiteVersion?: string;
 }
 
 /**
- * The run's header: `[run] backwpup · pro@nginx (pro) · <run id> · ref develop · 12 scenarios`, or,
- * on a terminal with Unicode, the same words in a heavy rule as wide as the screen. Never cut.
+ * The run's header: `[run] backwpup · pro@nginx (pro) · <run id> · ref develop · 12 scenarios ·
+ * suite 1.1.0`, or, on a terminal with Unicode, the same words in a heavy rule as wide as the screen.
+ * The suite's version comes last, so the words a person scans first keep their place. Never cut.
  *
  * @param style - the stream's style.
  * @param header - what the run is.
@@ -402,8 +406,9 @@ export function runHeaderLine(
       ? []
       : [`ref ${displayText(header.requestedRef)}`];
   const count = `${String(header.scenarios)} scenario${header.scenarios === 1 ? "" : "s"}`;
+  const suite = `suite ${displayText(suiteVersionText(header.suiteVersion))}`;
   const words = capLine(
-    [subject, displayText(header.runId), ...ref, count].join(
+    [subject, displayText(header.runId), ...ref, count, suite].join(
       ` ${palette.symbol("separator")} `,
     ),
     ellipsis,

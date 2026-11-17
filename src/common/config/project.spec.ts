@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -362,6 +362,14 @@ test.describe("createProductConfig — what the reports say about the run", () =
     });
     expect(blank.notice).not.toHaveProperty("runName");
     expect(blank.notice).not.toHaveProperty("requestedRef");
+  });
+
+  test("the suite's own version, read from the repository's package.json, reaches the reporters", async () => {
+    const { version } = JSON.parse(
+      readFileSync(join(REPO_ROOT, "package.json"), "utf8"),
+    ) as { version: string };
+    // Built from another working directory: the version is the checkout's, not the cwd's.
+    expect((await build([])).notice).toMatchObject({ suiteVersion: version });
   });
 
   // Unset is not off: Playwright captures both under CI (`captureGitInfo?.commit === undefined && ci`).

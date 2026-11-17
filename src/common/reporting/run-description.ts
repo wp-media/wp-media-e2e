@@ -36,6 +36,8 @@ export interface RunDescription extends CellNoticeOptions {
   readonly pluginZip?: string;
   /** The plugin version the operator set (`E2E_PLUGIN_VERSION`, trimmed), for the rerun command. */
   readonly pluginVersion?: string;
+  /** The suite's own version (`package.json`), for display only; absent when it could not be read. */
+  readonly suiteVersion?: string;
 }
 
 /**
@@ -45,7 +47,8 @@ export interface RunDescription extends CellNoticeOptions {
  * @param options - what the reporter's constructor received.
  * @returns the description, or the name of the first field missing from it or of the wrong type —
  *   the config factory's own mistake, which a reporter reports rather than throws (a throwing reporter
- *   fails the run).
+ *   fails the run). A `suiteVersion` that is not a string is dropped, not reported: it is display only,
+ *   and the header then says `unknown`.
  */
 export function readRunDescription(
   options: unknown,
@@ -81,6 +84,14 @@ export function readRunDescription(
     !(Number.isInteger(value.reportsKeep) && (value.reportsKeep as number) >= 0)
   ) {
     return { missing: "reportsKeep" };
+  }
+  if (
+    value.suiteVersion !== undefined &&
+    typeof value.suiteVersion !== "string"
+  ) {
+    // A copy without it: the caller's options are left as they were.
+    const { suiteVersion: _dropped, ...rest } = value;
+    return rest as RunDescription;
   }
   return value as RunDescription;
 }

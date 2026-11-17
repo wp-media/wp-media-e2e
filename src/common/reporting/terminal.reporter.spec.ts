@@ -231,7 +231,7 @@ test.describe("TerminalReporter — the run's lines in a pipe", () => {
 
     expect(h.lines()).toEqual([
       "[cell] demo/x, pinned by E2E_CELL",
-      "[run] demo · x (pro) · run-1 · 3 scenarios",
+      "[run] demo · x (pro) · run-1 · 3 scenarios · suite unknown",
       "✔ passed 18.4s  Backups › Create a backup",
       "↻ retry 2.0s  Backups › Restore a backup · attempt 1/2 · failed",
       "  Error: first try",
@@ -356,7 +356,7 @@ test.describe("TerminalReporter — the run's lines in a pipe", () => {
     h.reporter.onError({ value: "thrown 42" });
     h.reporter.onError({});
     expect(h.lines()).toEqual([
-      "[run] demo · x (pro) · run-1 · 0 scenarios",
+      "[run] demo · x (pro) · run-1 · 0 scenarios · suite unknown",
       "✘ error Error: a spec file does not load",
       "      at x.js:1:1",
       "⚠ warning No tests found",
@@ -370,7 +370,15 @@ test.describe("TerminalReporter — the run's lines in a pipe", () => {
     const h = harness({ ...rest, requestedRef: "develop" });
     begin(h, [scenario("a", "One")]);
     expect(h.lines()).toEqual([
-      "[run] demo · every cell · run-1 · ref develop · 1 scenario",
+      "[run] demo · every cell · run-1 · ref develop · 1 scenario · suite unknown",
+    ]);
+  });
+
+  test("the suite's version from the description ends the header", () => {
+    const h = harness({ ...RUN, suiteVersion: "1.1.0" });
+    begin(h, [scenario("a", "One")]);
+    expect(h.lines()).toEqual([
+      "[run] demo · x (pro) · run-1 · 1 scenario · suite 1.1.0",
     ]);
   });
 });
@@ -993,7 +1001,7 @@ test.describe("TerminalReporter — styling per stream", () => {
     const [header = "", line = ""] = h.lines();
     const bare = (text: string): string => stripVTControlCharacters(text);
     expect(bare(header)).toMatch(
-      /^━━ demo · x \(pro\) · run-1 · 1 scenario ━+$/,
+      /^━━ demo · x \(pro\) · run-1 · 1 scenario · suite unknown ━+$/,
     );
     expect(Array.from(bare(header))).toHaveLength(100);
     expect(bare(line)).toBe("✔ 1.0s  Backups › Create a backup");
@@ -1024,7 +1032,7 @@ test.describe("TerminalReporter — styling per stream", () => {
     end(h, a, { status: "passed", duration: 1_000 });
     expect(h.lines()).toEqual([
       "[cell] x › y",
-      "[run] demo . x (pro) . run-1 . 1 scenario",
+      "[run] demo . x (pro) . run-1 . 1 scenario . suite unknown",
       "OK passed 1.0s  Backups > Create",
     ]);
   });

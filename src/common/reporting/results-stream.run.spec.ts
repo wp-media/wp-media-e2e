@@ -39,6 +39,12 @@ import {
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const FIXTURE_DIR = join(REPO_ROOT, "src/common/__fixtures__/results");
+/** The checkout's own version: the header names it, read from the repository, not the run's folder. */
+const SUITE_VERSION = (
+  JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
+    version: string;
+  }
+).version;
 const PRODUCT = "resultsprobe";
 
 /** How long one child may take: `bddgen`, or a run of a few short scenarios with retries. */
@@ -563,7 +569,7 @@ test.describe("the results stream and the summary, through the real runner", () 
     const scenarios = "The results stream, end to end ›";
     expect(runLines(outcome.stdout).filter((l) => /^[^\s▸]/.test(l))).toEqual([
       expect.stringMatching(/^\[cell\] resultsprobe\/x, pinned by E2E_CELL/),
-      "[run] resultsprobe · x · full · 6 scenarios",
+      `[run] resultsprobe · x · full · 6 scenarios · suite ${SUITE_VERSION}`,
       "— skipped 0.0s  src/common/auth/auth.setup.ts › authenticate site pool",
       "— skipped 0.0s  src/common/artifacts/artifacts.setup.ts › resolve & verify plugin artifacts",
       expect.stringMatching(
