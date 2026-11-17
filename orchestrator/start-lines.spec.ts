@@ -47,12 +47,20 @@ test.describe("selectTasks", () => {
 });
 
 test.describe("lines", () => {
-  test("started: the tasks, --once, the state directory and the pid", () => {
-    expect(startedLine(["bpng", "bfap"], false, ".orchestrator", 42)).toBe(
-      "started · 2 tasks (bpng, bfap) · .orchestrator/ · pid 42",
+  test("started: the suite's version, the tasks, --once, the state directory and the pid", () => {
+    expect(
+      startedLine("1.1.0", ["bpng", "bfap"], false, ".orchestrator", 42),
+    ).toBe(
+      "started · suite 1.1.0 · 2 tasks (bpng, bfap) · .orchestrator/ · pid 42",
     );
-    expect(startedLine(["bpng"], true, "/srv/state", 7)).toBe(
-      "started · 1 task (bpng) · once · /srv/state/ · pid 7",
+    expect(startedLine("2.0.0-rc.1+b7", ["bpng"], true, "/srv/state", 7)).toBe(
+      "started · suite 2.0.0-rc.1+b7 · 1 task (bpng) · once · /srv/state/ · pid 7",
+    );
+  });
+
+  test("started: a suite version that could not be read is unknown", () => {
+    expect(startedLine(undefined, ["bpng"], true, ".orchestrator", 7)).toBe(
+      "started · suite unknown · 1 task (bpng) · once · .orchestrator/ · pid 7",
     );
   });
 

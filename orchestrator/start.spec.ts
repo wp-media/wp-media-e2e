@@ -503,7 +503,7 @@ test.describe("start — --once", () => {
         .filter((line) => / b[pf]ng-1 started /.test(line)),
     ).toHaveLength(2);
     expect(log).toContain(
-      "orchestrator  started · 2 tasks (bpng, bfng) · once · .orchestrator/ · pid 4242",
+      "orchestrator  started · suite unknown · 2 tasks (bpng, bfng) · once · .orchestrator/ · pid 4242",
     );
     expect(log).toContain("orchestrator  exiting 0");
     expect(r.proc.stdout.text).toContain("exiting 0");
@@ -572,7 +572,9 @@ test.describe("start — --once", () => {
     ).toBe(0);
     expect(existsSync(join(stateDir, "runs", "bfng-1"))).toBe(true);
     expect(existsSync(join(stateDir, "runs", "bpng-1"))).toBe(false);
-    expect(await logText()).toContain("started · 1 task (bfng) · once");
+    expect(await logText()).toContain(
+      "started · suite unknown · 1 task (bfng) · once",
+    );
     await expectCleanEnd(r.proc);
   });
 
@@ -1281,7 +1283,7 @@ test.describe("start — stopping", () => {
       },
     });
     const started = start({ config }, r.deps);
-    await expect.poll(logText).toContain("started · 1 task");
+    await expect.poll(logText).toContain("started · suite unknown · 1 task");
     for (const _ of [1, 2, 3]) {
       r.proc.emit("SIGINT");
       r.clock.ms += 2_000;
@@ -1374,7 +1376,9 @@ test.describe("start — what it hands on and leaves", () => {
       0,
     );
     const log = await logText();
-    expect(log).toContain("started · 1 task (bpng) · once · state-***/");
+    expect(log).toContain(
+      "started · suite unknown · 1 task (bpng) · once · state-***/",
+    );
     for (const text of [log, r.proc.stdout.text, r.proc.stderrText])
       expect(text).not.toContain(password);
   });
@@ -1396,7 +1400,9 @@ test.describe("start — what it hands on and leaves", () => {
       0,
     );
     const log = await logText();
-    expect(log).toContain("started · 1 task (bpng) · once · state-***/");
+    expect(log).toContain(
+      "started · suite unknown · 1 task (bpng) · once · state-***/",
+    );
     for (const text of [log, r.proc.stdout.text, r.proc.stderrText])
       expect(text).not.toContain(password);
   });
@@ -1792,11 +1798,125 @@ test.describe("start — what it says about itself", () => {
     expect(await logText()).not.toContain("carries");
   });
 
+  test("the suite's version, read once from the checkout's package.json, is said in the started line to the terminal and the log", async () => {
+    await writeFile(
+      join(checkout, "package.json"),
+      JSON.stringify({ name: "e2e", version: "1.1.0" }),
+    );
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const r = rig((id) => runner(id, 1, "passed"));
+    expect(await start({ config, once: true }, r.deps)).toBe(0);
+    const line =
+      "started · suite 1.1.0 · 1 task (bpng) · once · .orchestrator/";
+    const log = await logText();
+    expect(log.split("\n").filter((l) => l.includes(line))).toHaveLength(1);
+    expect(
+      r.proc.stdout.text.split("\n").filter((l) => l.includes(line)),
+    ).toHaveLength(1);
+  });
+
+  test("an injected version reader is asked once, for the injected checkout, and its version reaches the line", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const asked: string[] = [];
+    const r = rig((id) => runner(id, 1, "passed"), {
+      readSuiteVersion: (root) => {
+        asked.push(root);
+        return "9.8.7-beta.1";
+      },
+    });
+    expect(await start({ config, once: true }, r.deps)).toBe(0);
+    expect(asked).toEqual([checkout]);
+    expect(await logText()).toContain(
+      "orchestrator  started · suite 9.8.7-beta.1 · 1 task (bpng) · once · .orchestrator/ · pid 4242",
+    );
+  });
+
+  test("a version reader that throws says suite unknown and still runs", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const r = rig((id) => runner(id, 1, "passed"), {
+      readSuiteVersion: () => {
+        throw new Error("unreadable");
+      },
+    });
+    expect(await start({ config, once: true }, r.deps)).toBe(0);
+    expect(await record("bpng-1")).toMatchObject({
+      state: "ended",
+      status: "passed",
+    });
+    const log = await logText();
+    expect(log).toContain(
+      "orchestrator  started · suite unknown · 1 task (bpng) · once · .orchestrator/ · pid 4242",
+    );
+    expect(log).not.toContain("unreadable");
+    await expectCleanEnd(r.proc);
+  });
+
+  test("a checkout without a package.json says suite unknown and still runs", async () => {
+    expect(existsSync(join(checkout, "package.json"))).toBe(false);
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const r = rig((id) => runner(id, 1, "passed"));
+    expect(await start({ config, once: true }, r.deps)).toBe(0);
+    expect(await record("bpng-1")).toMatchObject({
+      state: "ended",
+      status: "passed",
+    });
+    const log = await logText();
+    expect(log).toContain(
+      "orchestrator  started · suite unknown · 1 task (bpng) · once · .orchestrator/ · pid 4242",
+    );
+    expect(log).toContain("orchestrator  exiting 0");
+    await expectCleanEnd(r.proc);
+  });
+
   test("the checkout is this module's folder's parent, and the waits are 60 s after a kill, 5 s for the exit", () => {
     expect(CHECKOUT).toBe(resolve(import.meta.dirname, ".."));
     expect(existsSync(join(CHECKOUT, "orchestrator", "start.ts"))).toBe(true);
     expect(KILL_SETTLE_MS).toBe(60_000);
     expect(EXIT_WAIT_MS).toBe(5_000);
+  });
+});
+
+test.describe("prepareStart — the suite's version", () => {
+  test("is read from the injected checkout's package.json, once, with the config", async () => {
+    await writeFile(
+      join(checkout, "package.json"),
+      JSON.stringify({ version: "3.4.5" }),
+    );
+    const config = await writeConfig();
+    const prepared = await prepareStart(
+      { config },
+      { checkout, loadProductList: () => Promise.resolve(PRODUCT_LIST) },
+    );
+    expect(prepared.suiteVersion).toBe("3.4.5");
+    expect(prepared.selected.map(({ task }) => task.id)).toEqual([
+      "bpng",
+      "bfng",
+    ]);
+  });
+
+  test("is undefined, never a refusal, when the checkout's package.json is missing or invalid", async () => {
+    const config = await writeConfig();
+    const deps = {
+      checkout,
+      loadProductList: () => Promise.resolve(PRODUCT_LIST),
+    };
+    expect((await prepareStart({ config }, deps)).suiteVersion).toBeUndefined();
+    await writeFile(join(checkout, "package.json"), "{ not json");
+    expect((await prepareStart({ config }, deps)).suiteVersion).toBeUndefined();
+  });
+
+  test("defaults to this checkout's own package.json", async () => {
+    const config = await writeConfig();
+    const own = (
+      JSON.parse(readFileSync(join(CHECKOUT, "package.json"), "utf8")) as {
+        version: string;
+      }
+    ).version;
+    const prepared = await prepareStart(
+      { config },
+      { loadProductList: () => Promise.resolve(PRODUCT_LIST) },
+    );
+    expect(prepared.suiteVersion).toBe(own);
   });
 });
 
@@ -2237,7 +2357,7 @@ test.describe("start — the runs it names when it gives up", () => {
       },
     });
     const started = start({ config }, r.deps);
-    await expect.poll(logText).toContain("started · 1 task");
+    await expect.poll(logText).toContain("started · suite unknown · 1 task");
     // Records still saying running, written after the orphan check: an early run's and the latest's.
     for (const n of [1, 10_000]) {
       const identity = runIdentity({

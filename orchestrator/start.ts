@@ -1,6 +1,7 @@
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { readSuiteVersion } from "../src/common/config/suite-version";
 import { buildReportBundle } from "../src/common/reporting/report-bundle";
 import type { CheckedTask } from "./config/check";
 import {
@@ -225,6 +226,11 @@ export interface StartDeps {
   readonly checkout?: string;
   /** `loadProductList()` by default. */
   readonly loadProductList?: () => Promise<ProductList>;
+  /**
+   * Reads the suite's version from the checkout's `package.json`; `readSuiteVersion` by default.
+   * Never throws: `undefined` when it cannot be read.
+   */
+  readonly readSuiteVersion?: (checkout: string) => string | undefined;
   /** The lock's stand-ins — the state directory's, and the cells'. */
   readonly lock?: LockDeps;
   /** Takes the state directory's lock; `acquireLock` by default. */
@@ -289,21 +295,30 @@ export interface PreparedStart {
   readonly loaded: LoadedConfig;
   /** The tasks `--task` selects, in the config's order; every task by default. */
   readonly selected: readonly CheckedTask[];
+  /**
+   * The suite's version, read once at boot from the checkout's `package.json`: what the start line
+   * names. `undefined` when it cannot be read — shown as `unknown`, never a refusal.
+   */
+  readonly suiteVersion: string | undefined;
 }
 
 /**
- * Loads the product list and the config, and selects the tasks — everything `start` does before it
- * takes the lock, and all `--dry-run` needs.
+ * Loads the product list and the config, selects the tasks and reads the suite's version — everything
+ * `start` does before it takes the lock, and all `--dry-run` needs.
  *
  * @param options - the config file and `--task`.
- * @param deps - the product list's loader.
- * @returns the list, the config loaded and checked, and the tasks selected.
+ * @param deps - the product list's loader, the checkout ({@link CHECKOUT} by default) and its
+ *   version's reader.
+ * @returns the list, the config loaded and checked, the tasks selected and the suite's version.
  * @throws `ConfigError` (`./config/errors`) when the product list or the config cannot be loaded, or
  *   `--task` names no task of the config.
  */
 export async function prepareStart(
   options: Pick<StartOptions, "config" | "tasks">,
-  deps: Pick<StartDeps, "loadProductList"> = {},
+  deps: Pick<
+    StartDeps,
+    "loadProductList" | "checkout" | "readSuiteVersion"
+  > = {},
 ): Promise<PreparedStart> {
   const list = await (deps.loadProductList ?? (() => loadProductList()))();
   const loaded = await loadConfig(
@@ -315,7 +330,27 @@ export async function prepareStart(
     list,
     loaded,
     selected: selectTasks(loaded.tasks, options.tasks, loaded.file),
+    suiteVersion: suiteVersionOf(deps),
   };
+}
+
+/**
+ * The suite's version, display only: a reader that throws — an injected one; the default never
+ * does — reads as unknown rather than refuse the start.
+ *
+ * @param deps - the checkout ({@link CHECKOUT} by default) and the version's reader.
+ * @returns the version; `undefined` when it cannot be read.
+ */
+function suiteVersionOf(
+  deps: Pick<StartDeps, "checkout" | "readSuiteVersion">,
+): string | undefined {
+  try {
+    return (deps.readSuiteVersion ?? readSuiteVersion)(
+      deps.checkout ?? CHECKOUT,
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -765,6 +800,7 @@ class Orchestrator {
     const ids = selected.map(({ task }) => task.id);
     this.say(
       startedLine(
+        prepared.suiteVersion,
         ids,
         once,
         showPath(loaded.stateDir, checkout),
