@@ -188,12 +188,12 @@ test.describe("checkoutVersion", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  test("is the checkout's package.json version", async () => {
+  test("is the checkout's package.json version", () => {
     const checkout = join(import.meta.dirname, "..");
     const { version } = JSON.parse(
       readFileSync(join(checkout, "package.json"), "utf8"),
     ) as { version: string };
-    expect(await checkoutVersion(checkout)).toBe(version);
+    expect(checkoutVersion(checkout)).toBe(version);
   });
 
   for (const [name, text] of [
@@ -202,11 +202,23 @@ test.describe("checkoutVersion", () => {
     ["a package.json that is not an object", "null"],
     ["a version that is not a string", '{"version":1}'],
     ["an empty version", '{"version":""}'],
+    ["a version that is not SemVer: a leading v", '{"version":"v1.1.0"}'],
+    ["a version that is not SemVer: two numbers", '{"version":"1.1"}'],
+    ["a version over 64 characters", `{"version":"1.1.0-${"a".repeat(60)}"}`],
   ] as const)
     test(`is "unknown" for ${name}`, async () => {
       if (text !== undefined)
         await writeFile(join(dir, "package.json"), text, "utf8");
-      expect(await checkoutVersion(dir)).toBe("unknown");
+      expect(checkoutVersion(dir)).toBe("unknown");
+    });
+
+  for (const [name, text, version] of [
+    ["a prerelease and build", '{"version":"2.0.0-rc.1+b7"}', "2.0.0-rc.1+b7"],
+    ["a file with a byte order mark", '\uFEFF{"version":"1.1.0"}', "1.1.0"],
+  ] as const)
+    test(`is a valid SemVer version as written: ${name}`, async () => {
+      await writeFile(join(dir, "package.json"), text, "utf8");
+      expect(checkoutVersion(dir)).toBe(version);
     });
 });
 
@@ -439,6 +451,19 @@ test.describe("runCommand — the dry run", () => {
     expect(r.stdout.text).toContain("report\n");
   });
 
+  test("the dry run's preparation reads the suite's version from the checkout its paths are shown from", async () => {
+    const checkouts: (string | undefined)[] = [];
+    const r = rig({
+      prepareStart: (_options, deps) => {
+        checkouts.push(deps?.checkout);
+        return Promise.resolve(PREPARED);
+      },
+    });
+    expect(await runCommand(["start", "--dry-run"], r.deps)).toBe(0);
+    expect(checkouts).toEqual(["/checkout"]);
+    expect(r.stdout.text).toContain("checkout /checkout\n");
+  });
+
   test("a config error goes to stderr alone, masked, and exits 1", async () => {
     const r = rig({
       prepareStart: () =>
@@ -559,6 +584,19 @@ test.describe("runCommand — help, version and usage errors", () => {
       expect(await runCommand([flag], r.deps)).toBe(0);
       expect(r.stdout.text).toBe("1.2.3\n");
     });
+
+  test("--version prints unknown for a version the started line would not name", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "e2e-command-"));
+    try {
+      await writeFile(join(dir, "package.json"), '{"version":"v1.1.0"}');
+      const r = rig({ checkout: dir });
+      const { version: _omitted, ...deps } = r.deps;
+      expect(await runCommand(["--version"], deps)).toBe(0);
+      expect(r.stdout.text).toBe("unknown\n");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 
   test("the version is the given checkout's when not given", async () => {
     const dir = await mkdtemp(join(tmpdir(), "e2e-command-"));

@@ -1,11 +1,14 @@
 // First, so it is evaluated before any other module of the graph: it reads the parent's PID at boot.
 import "./parent";
 
-import { readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 
 import { Command, CommanderError, InvalidArgumentError } from "commander";
 
+import {
+  readSuiteVersion,
+  suiteVersionText,
+} from "../src/common/config/suite-version";
 import { dryRunReport } from "./dry-run";
 import { SHUTDOWN_SIGNALS, type ShutdownSignal } from "./runs/shutdown";
 import { CHECKOUT, prepareStart, start, type StartOptions } from "./start";
@@ -161,7 +164,10 @@ export interface CommandDeps {
   ) => Promise<string[]>;
   /** The dry run's report: `dryRunReport`. */
   readonly report?: typeof dryRunReport;
-  /** The checkout the dry run shows paths from; {@link CHECKOUT} by default. */
+  /**
+   * The checkout the dry run shows paths from and reads the suite's version from; {@link CHECKOUT}
+   * by default.
+   */
   readonly checkout?: string;
   /** What `--version` prints; the checkout's `package.json` version by default. */
   readonly version?: string;
@@ -254,24 +260,14 @@ export function toStartOptions(
 }
 
 /**
- * Reads the checkout's version for `--version`.
+ * Reads the checkout's version for `--version`, by the suite's own reader, so it always agrees with
+ * the version the started line and the dry run name.
  *
  * @param checkout - the checkout.
- * @returns its `package.json`'s `version`, or `unknown` when it cannot be read.
+ * @returns its `package.json`'s `version` when valid SemVer, else `unknown`; never throws.
  */
-export async function checkoutVersion(checkout: string): Promise<string> {
-  try {
-    const parsed: unknown = JSON.parse(
-      await readFile(join(checkout, "package.json"), "utf8"),
-    );
-    const version: unknown =
-      typeof parsed === "object" && parsed !== null
-        ? Reflect.get(parsed, "version")
-        : undefined;
-    return typeof version === "string" && version !== "" ? version : "unknown";
-  } catch {
-    return "unknown";
-  }
+export function checkoutVersion(checkout: string): string {
+  return suiteVersionText(readSuiteVersion(checkout));
 }
 
 /**
@@ -304,13 +300,17 @@ export async function dryRun(
   const stdout = deps.stdout ?? process.stdout;
   const stderr = deps.stderr ?? process.stderr;
   try {
-    const prepared = await (deps.prepareStart ?? prepareStart)(options);
+    const checkout = deps.checkout ?? CHECKOUT;
+    // The version is read from the checkout the report shows paths from, as a start would.
+    const prepared = await (deps.prepareStart ?? prepareStart)(options, {
+      checkout,
+    });
     const stateWarnings = await (deps.inspectState ?? inspectState)(
       prepared.loaded.stateDir,
       { units: prepared.selected.map(unitOf) },
     );
     const lines = (deps.report ?? dryRunReport)(prepared, {
-      checkout: deps.checkout ?? CHECKOUT,
+      checkout,
       stateWarnings,
     });
     stdout.write(`${lines.join("\n")}\n`);
@@ -423,8 +423,7 @@ export async function runCommand(
     return 1;
   }
   try {
-    const version =
-      deps.version ?? (await checkoutVersion(deps.checkout ?? CHECKOUT));
+    const version = deps.version ?? checkoutVersion(deps.checkout ?? CHECKOUT);
     await program(deps, version, outcome).parseAsync([...argv], {
       from: "user",
     });

@@ -21,6 +21,10 @@ import { basename, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { removeTempDir } from "../src/common/__fixtures__/temp-dir";
+import {
+  readSuiteVersion,
+  suiteVersionText,
+} from "../src/common/config/suite-version";
 import { escapeRegExp } from "../src/common/text";
 import { FAKE_LINES, waitForText } from "./__fixtures__/fake-suite";
 
@@ -44,6 +48,12 @@ const TSX = import.meta.resolve("tsx");
 
 /** The checkout: `cli.ts`'s, and the real `orchestrator` script's. */
 const CHECKOUT = join(import.meta.dirname, "..");
+
+/**
+ * The suite's version as the dry run names it: the checkout's own, which the copy's `package.json`
+ * holds — read here, so a version bump never breaks these specs.
+ */
+const SUITE = suiteVersionText(readSuiteVersion(CHECKOUT));
 
 /** The preload that swaps the real `start.ts` for the fake suite's, under the real script. */
 const SWAP_START = join(import.meta.dirname, "__fixtures__", "swap-start.mjs");
@@ -373,7 +383,7 @@ test.describe("the command, in a child process", () => {
     const out = await cli("start", "--dry-run", "--once", "--config", config);
     expect(out.code).toBe(0);
     expect(out.stdout.split("\n")).toEqual([
-      `dry run · nothing is run · config ${config} · state ${stateDir}/`,
+      `dry run · nothing is run · suite ${SUITE} · config ${config} · state ${stateDir}/`,
       "2 tasks (bpng, bfap)",
       "bpng · BackWPup Pro on nginx",
       "  backwpup pro@nginx · develop · version 9.99.99 · every scenario · cooldown 5m",
@@ -598,7 +608,7 @@ test.describe("the command under npm, in a child process", () => {
       expect(out.code).toBe(0);
       // Shown from the checkout: the file under sub/, never the package's own .orchestrator/.
       expect(out.stdout.split("\n")[0]).toBe(
-        "dry run · nothing is run · config sub/.orchestrator/config.json · state sub/.orchestrator/",
+        `dry run · nothing is run · suite ${SUITE} · config sub/.orchestrator/config.json · state sub/.orchestrator/`,
       );
     } finally {
       await rm(sub, { recursive: true, force: true });

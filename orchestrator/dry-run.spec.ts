@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { loadSites } from "../src/common/config/sites";
+import { readSuiteVersion } from "../src/common/config/suite-version";
 import { NOT_A_SITE_URL } from "../src/common/text";
 import type { ProductArtifacts } from "../src/common/artifacts/types";
 import type { ProductConfig, SiteInput } from "../src/common/config/types";
@@ -190,8 +191,9 @@ function tasksOf(config: Record<string, unknown>): Record<string, unknown>[] {
  * command does.
  *
  * @param config - the config.
- * @param options - `--task`, the product list, the file's mode and folder, the state's warnings, and
- *   whether paths are shown from the checkout.
+ * @param options - `--task`, the product list, the file's mode and folder, the state's warnings,
+ *   whether paths are shown from the checkout, and the suite version's reader (`1.1.0` by default,
+ *   never this checkout's own `package.json`, whose version moves).
  * @returns the report's lines.
  */
 async function report(
@@ -207,6 +209,8 @@ async function report(
     shownFrom?: string;
     /** Sites put in a selected cell's place after the check, which would refuse them. */
     pastCheck?: Readonly<Record<string, CheckedTask["cell"]["sites"]>>;
+    /** Reads the suite's version from the spec's checkout. */
+    readSuiteVersion?: (root: string) => string | undefined;
   } = {},
 ): Promise<string[]> {
   const dir = join(checkout, options.folder ?? ".orchestrator");
@@ -220,7 +224,11 @@ async function report(
       config: file,
       ...(options.tasks === undefined ? {} : { tasks: options.tasks }),
     },
-    { loadProductList: () => Promise.resolve(list) },
+    {
+      loadProductList: () => Promise.resolve(list),
+      checkout,
+      readSuiteVersion: options.readSuiteVersion ?? (() => "1.1.0"),
+    },
   );
   const pastCheck = options.pastCheck ?? {};
   const shown: PreparedStart = {
@@ -246,7 +254,7 @@ async function report(
 test.describe("dryRunReport", () => {
   test("over the example: each task, the plugin it builds, its sites and servers, the runs, the notifications by name", async () => {
     expect(await report(example())).toEqual([
-      "dry run · nothing is run · config .orchestrator/config.json · state .orchestrator/",
+      "dry run · nothing is run · suite 1.1.0 · config .orchestrator/config.json · state .orchestrator/",
       "2 tasks (bpng, bfap)",
       "bpng · BackWPup Pro on nginx",
       "  backwpup pro@nginx · develop · version 9.99.99 · every scenario · cooldown 5m",
@@ -267,8 +275,27 @@ test.describe("dryRunReport", () => {
   test("without a checkout, the paths are absolute", async () => {
     const dir = join(checkout, ".orchestrator");
     expect((await report(example(), { absolute: true }))[0]).toBe(
-      `dry run · nothing is run · config ${join(dir, "config.json")} · state ${dir}/`,
+      `dry run · nothing is run · suite 1.1.0 · config ${join(dir, "config.json")} · state ${dir}/`,
     );
+  });
+
+  test("the suite's version is read from the checkout's package.json; one that cannot be read is unknown, never a refusal", async () => {
+    await writeFile(
+      join(checkout, "package.json"),
+      JSON.stringify({ name: "e2e", version: "2.0.0-rc.1" }),
+    );
+    expect((await report(example(), { readSuiteVersion }))[0]).toBe(
+      "dry run · nothing is run · suite 2.0.0-rc.1 · config .orchestrator/config.json · state .orchestrator/",
+    );
+    await rm(join(checkout, "package.json"));
+    const lines = await report(example(), {
+      readSuiteVersion,
+    });
+    expect(lines[0]).toBe(
+      "dry run · nothing is run · suite unknown · config .orchestrator/config.json · state .orchestrator/",
+    );
+    // The rest of the report is unchanged by it.
+    expect(lines.at(-1)).toBe("no warnings");
   });
 
   test("--task: only the tasks selected, and only their servers", async () => {

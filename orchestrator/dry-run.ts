@@ -1,4 +1,5 @@
 import { buildArtifactPlan } from "../src/common/artifacts/request";
+import { suiteVersionText } from "../src/common/config/suite-version";
 import { serverOf, tasksByServer, type CheckedTask } from "./config/check";
 import type { OrchestratorConfig } from "./config/schema";
 import { allSecretValues } from "./config/secrets";
@@ -25,7 +26,10 @@ const MAX_LINE = 2_000;
 type Site = CheckedTask["cell"]["sites"][number];
 
 /** What the report reads: what `prepareStart` returns. */
-export type DryRunInput = Pick<PreparedStart, "list" | "loaded" | "selected">;
+export type DryRunInput = Pick<
+  PreparedStart,
+  "list" | "loaded" | "selected" | "suiteVersion"
+>;
 
 /** What the report is told besides the start's preparation. */
 export interface DryRunOptions {
@@ -39,7 +43,7 @@ export interface DryRunOptions {
  * Every line of the dry run's report, safe to print as they are, one per line.
  *
  * @param prepared - what `prepareStart` returns: the product list, the config loaded and checked, the
- *   tasks selected.
+ *   tasks selected, the suite's version.
  * @param options - the checkout paths are shown from, and the state directory's warnings.
  * @returns the lines, masked and each one line.
  *
@@ -68,7 +72,7 @@ export function dryRunReport(
     ...checkoutWarnings(checkout, config.reports?.sshHost),
   ];
   const lines = [
-    `dry run · nothing is run · config ${show(loaded.file)} · state ${show(loaded.stateDir)}/`,
+    `dry run · nothing is run · suite ${suiteVersionText(prepared.suiteVersion)} · config ${show(loaded.file)} · state ${show(loaded.stateDir)}/`,
     tasksText(selected.map(({ task }) => task.id)),
     ...selected.flatMap((checked) =>
       taskLines(
