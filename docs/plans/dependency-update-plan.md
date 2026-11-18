@@ -78,7 +78,7 @@ Sources: nodejs.org/dist/index.json, the v25.0.0/v26.0.0 release notes, `depreca
   - CI (`npm ci --ignore-scripts`) and the local `node_modules` don't build it today.
 - **Playwright 1.65** supports Node 22/24/26.
 - **Measured:** `tsc` 6.0.3 passes against `@types/node` 26.6.6.
-- **Measured: the unit suite passes on 26.13.1 with today's tree** (6510 passed).
+- **Measured: the unit suite passes on 24.22.3 and 26.13.1 with today's tree** (6511 passed, 130 skipped; P0).
   - One spec failed once under full-suite load and then passed 15/15 alone: `report-bundle.spec.ts`, "…killed through the bundle's own grace". That's a timing flake.
 - **The default `node` is Homebrew's 26.13.1** (OpenSSL 4.1, ICU 79.1), not the official build.
   - The official builds are fnm's: `~/.local/share/fnm/node-versions/v{24.22.3,26.13.1}/installation/bin`.
@@ -173,12 +173,14 @@ Node 26.13.1 LTS, npm 12.2.3, TypeScript 6.0.3, Playwright 1.65.1 (Chromium 159)
 
 ### P0 — Baseline · xs/easy · deps: — · independent of: —
 
-- Branch from `develop` and run the gates on the official 24.22.3 and 26.13.1.
-- Record:
-  - `npm audit` (23 findings);
-  - known flakes;
-  - `npm install-scripts prune --dry-run`.
-- **Done:** both runtimes are green on the untouched tree, so any later failure belongs to its phase.
+Baseline on the untouched tree (6ec1573), official 24.22.3/npm 11.19.1 and 26.13.1/npm 11.20.0; later phases compare against it:
+
+- **Gates:** green on both; unit 6511 passed, 130 skipped, 0 flaky (`report-bundle.spec.ts`'s known flake did not recur).
+- **`npm audit`:** 18 (1 critical, 2 high, 14 moderate, 1 low), the same on both npm versions.
+  - critical dompurify; high follow-redirects, markdown-it; low fast-xml-parser;
+  - moderate: glob, minimatch and the packages pulling them (allure, `@allurereport/{ci,core,plugin-testops}`, eslint, `@eslint/config-array`, typescript-eslint and its 5 `@typescript-eslint/*`).
+  - The picomatch advisory (GHSA-fc5q-39xc-vjpf) was withdrawn on 2026-11-18, so picomatch is no longer listed (the plan had counted 23).
+- **`npm install-scripts prune --dry-run`:** the 2 dead entries, `fsevents@2.3.2` and the APVM key.
 
 ### P1 — Node 26 · s/medium · deps: P0 · independent of: —
 
@@ -391,7 +393,7 @@ Later phases are verified on Node 26.
   - `npm run orchestrator:soak`;
   - one real Slack/Datator post (Undici 8, HTTP/2).
 - **Close-out:**
-  - Record the final `npm audit` (17 before P7's overrides).
+  - Record the final `npm audit` against P0's 18.
   - Trim this plan to its decisions and open obligations.
 - **Done:** all green, the docs match the code, and the work is ready for review and commit.
 
@@ -416,7 +418,6 @@ Later phases are verified on Node 26.
 - **TypeScript 7:** wait for 7.1 stable plus typescript-eslint support (#10940). The three TS-API spec helpers then move to the 7.1 API.
 - **Docker local env images (D5).**
 - **ssh2 native crypto on Node 26** (mscdex/ssh2#1531).
-- **picomatch ReDoS (GHSA-fc5q-39xc-vjpf):** no fixed release. It reaches us through lint-staged, playwright-bdd and typescript-eslint (`typescript-estree` → tinyglobby), with globs we control.
 - **Allure's glob/minimatch advisories,** if P7's overrides fail.
 - **pixelmatch threshold re-tune** with the first `@visual` scenario.
 
@@ -424,7 +425,7 @@ Later phases are verified on Node 26.
 
 | Phase | State   | Date | Outcome |
 | ----- | ------- | ---- | ------- |
-| P0    | pending |      |         |
+| P0    | done | 2026-11-18 | 24.22.3 and 26.13.1 green: 6511 passed, 130 skipped, no flake; audit 18 (1 critical, 2 high, 14 moderate, 1 low; picomatch advisory withdrawn); 2 dead allowScripts entries |
 | P1    | pending |      |         |
 | P2    | pending |      |         |
 | P3    | pending |      |         |
