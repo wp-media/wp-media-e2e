@@ -29,6 +29,11 @@ import type { Transport } from "../config/types";
  * the capabilities planted in it, not the ones the artifact defines — the scenario would test a role
  * the product never defines.
  *
+ * WP-Cron events count for the same reason: a plugin that clears only some of its events on
+ * deactivation (BackWPup keeps a job's `backwpup_cron {arg: <jobid>}` unless the job runs on WP-Cron)
+ * leaves one in core's `cron` option, and the next install's job of that id "has" a schedule it was
+ * never given.
+ *
  * **It only makes sense with the plugin absent, and the hooks guarantee that by ordering.** Measured
  * on a cell: sweeping while the plugin is active does work, and the very next WordPress request puts
  * all 26 options and the table straight back — the plugin re-creates its own footprint on `init`.
@@ -41,8 +46,9 @@ import type { Transport } from "../config/types";
  * What a product leaves in a site's database, as the product declares it.
  *
  * The kinds that make an install land on old state: the options a plugin reads to decide it has been
- * installed before, the table its installer tries to create again, and the roles and capabilities
- * activation does not overwrite (`add_role()` keeps an existing role as it is). User meta is left
+ * installed before, the table its installer tries to create again, the roles and capabilities
+ * activation does not overwrite (`add_role()` keeps an existing role as it is), and the WP-Cron events
+ * a new install's objects inherit by id. User meta is left
  * out: a plugin's notices re-create it, nothing reads it to decide what to install, and the next real
  * uninstall removes it.
  */
@@ -85,6 +91,15 @@ export interface SiteDbResidue {
    * of WordPress's own ({@link PROTECTED_CAPABILITIES}).
    */
   readonly capabilities?: readonly string[];
+  /**
+   * WP-Cron hooks the product schedules, by exact name: **every** event of each is removed, whatever
+   * its arguments (`wp_unschedule_hook`) — a per-object event (`backwpup_cron {arg: 4}`) is keyed by
+   * arguments no declaration can list.
+   *
+   * Each must carry one of {@link SiteDbResidue.optionsContaining}'s fragments and may never be one
+   * of WordPress's own ({@link PROTECTED_CRON_HOOKS}).
+   */
+  readonly cronHooks?: readonly string[];
 }
 
 /** One capability a role carries in the site's roles option, granted or denied. */
@@ -93,6 +108,16 @@ export interface CapabilityGrant {
   readonly role: string;
   /** The capability. */
   readonly capability: string;
+}
+
+/** One scheduled WP-Cron event of a declared hook. */
+export interface CronEvent {
+  /** The hook it runs. */
+  readonly hook: string;
+  /** When it is due, as a Unix timestamp. */
+  readonly time: number;
+  /** Its arguments as JSON (`{"arg":4}`, `[]`), or `(not encodable)` when PHP could not encode them. */
+  readonly args: string;
 }
 
 /** What a sweep found — or removed — on a site, with tables at their full prefixed names. */
@@ -105,6 +130,8 @@ export interface FoundDbResidue {
   readonly roles: readonly string[];
   /** Declared capabilities held by roles that are not declared, in role then capability order. */
   readonly capabilities: readonly CapabilityGrant[];
+  /** Events of declared WP-Cron hooks, in hook, time then arguments order. */
+  readonly cronEvents: readonly CronEvent[];
 }
 
 /** A sweep that found nothing — what declaring nothing, or a clean site, returns. */
@@ -113,6 +140,7 @@ const NOTHING_FOUND: FoundDbResidue = {
   tables: [],
   roles: [],
   capabilities: [],
+  cronEvents: [],
 };
 
 /** True when a sweep found nothing at all, so callers can skip the work and the logging. */
@@ -121,7 +149,8 @@ export function isEmptyDbResidue(found: FoundDbResidue): boolean {
     found.options.length === 0 &&
     found.tables.length === 0 &&
     found.roles.length === 0 &&
-    found.capabilities.length === 0
+    found.capabilities.length === 0 &&
+    found.cronEvents.length === 0
   );
 }
 
@@ -295,6 +324,69 @@ export const PROTECTED_CAPABILITIES: readonly string[] = [
 ];
 
 /**
+ * WordPress's own WP-Cron hooks, which no product may declare: unscheduling one stops core's update
+ * checks, trash and transient clean-up, scheduled posts or pings until something schedules it again.
+ *
+ * Every hook WordPress 7.1.3 schedules (`wp_schedule_event`/`wp_schedule_single_event` in
+ * `wp-includes` and `wp-admin`), plus `wp_https_detection`, an older release's (gone by 6.7.1). Exact
+ * names guarded here; the fragment rule keeps out another plugin's hooks.
+ */
+export const PROTECTED_CRON_HOOKS: readonly string[] = [
+  "delete_expired_transients",
+  "do_pings",
+  "importer_scheduled_cleanup",
+  "publish_future_post",
+  "recovery_mode_clean_expired_keys",
+  "update_network_counts",
+  "upgrader_scheduled_cleanup",
+  "wp_delete_temp_updater_backups",
+  "wp_https_detection",
+  "wp_maybe_auto_update",
+  "wp_privacy_delete_old_export_files",
+  "wp_privacy_personal_data_cleanup_requests",
+  "wp_scheduled_auto_draft_delete",
+  "wp_scheduled_delete",
+  "wp_site_health_scheduled_check",
+  "wp_split_shared_term_batch",
+  "wp_update_comment_type_batch",
+  "wp_update_plugins",
+  "wp_update_themes",
+  "wp_update_user_counts",
+  "wp_version_check",
+];
+
+/** A kind of exact name a product declares as its own, with the words its refusals use. */
+interface OwnedNameKind {
+  /** The kind, singular (`"role"`). */
+  readonly one: string;
+  /** The kind, plural (`"roles"`). */
+  readonly many: string;
+  /** WordPress's own names of this kind. */
+  readonly protectedNames: readonly string[];
+}
+
+/** Roles, for {@link normaliseOwnedName}. */
+const ROLE: OwnedNameKind = {
+  one: "role",
+  many: "roles",
+  protectedNames: PROTECTED_ROLES,
+};
+
+/** Capabilities, for {@link normaliseOwnedName}. */
+const CAPABILITY: OwnedNameKind = {
+  one: "capability",
+  many: "capabilities",
+  protectedNames: PROTECTED_CAPABILITIES,
+};
+
+/** WP-Cron hooks, for {@link normaliseOwnedName}. */
+const CRON_HOOK: OwnedNameKind = {
+  one: "WP-Cron hook",
+  many: "WP-Cron hooks",
+  protectedNames: PROTECTED_CRON_HOOKS,
+};
+
+/**
  * Validates one declared option fragment and returns it trimmed.
  *
  * @param declared - the fragment as the product declared it.
@@ -352,44 +444,41 @@ export function normaliseResidueTable(declared: string): string {
 }
 
 /**
- * Validates one declared role or capability name and returns it trimmed — the rules both share.
+ * Validates one declared role, capability or WP-Cron hook name and returns it trimmed — the rules
+ * all three share.
  *
- * @param kind - `"role"` or `"capability"`, for the message.
+ * @param kind - which kind of name, for the protected list and the message.
  * @param declared - the name as the product declared it.
  * @param fragments - the declaration's validated option fragments: the product's own names.
- * @param protectedNames - WordPress's own names of this kind.
  * @returns the name, trimmed.
  * @throws {@link Error} naming the entry and the rule it broke.
  */
 function normaliseOwnedName(
-  kind: "role" | "capability",
+  kind: OwnedNameKind,
   declared: string,
   fragments: readonly string[],
-  protectedNames: readonly string[],
 ): string {
   const name = declared.trim();
   const refuse = (reason: string): never => {
     throw new Error(
-      `[wp/db-residue] "${declared}" cannot be removed as a leftover ${kind}: ${reason}. ` +
-        `Declare the exact name of a ${kind} the product itself creates, e.g. "myplugin_manage".`,
+      `[wp/db-residue] "${declared}" cannot be removed as a leftover ${kind.one}: ${reason}. ` +
+        `Declare the exact name of a ${kind.one} the product itself creates, e.g. "myplugin_manage".`,
     );
   };
   if (!/^[a-z0-9_-]+$/.test(name)) {
     return refuse(
       "a name may hold only lowercase letters, digits, underscore and hyphen — the shape of every " +
-        `${kind} WordPress and its plugins create, so anything else is a typo`,
+        `${kind.one} WordPress and its plugins create, so anything else is a typo`,
     );
   }
-  if (protectedNames.includes(name)) {
-    return refuse(
-      `it is one of WordPress's own ${kind === "role" ? "roles" : "capabilities"}`,
-    );
+  if (kind.protectedNames.includes(name)) {
+    return refuse(`it is one of WordPress's own ${kind.many}`);
   }
   if (!fragments.some((fragment) => name.includes(fragment))) {
     return refuse(
       fragments.length === 0
-        ? "the declaration names no `optionsContaining` fragment, and a role or capability must " +
-            "carry one of the product's own names"
+        ? "the declaration names no `optionsContaining` fragment, and a role, capability or " +
+            "WP-Cron hook must carry one of the product's own names"
         : `it carries none of the product's names (${fragments.join(", ")}), so it may belong to ` +
             "the site or to another plugin",
     );
@@ -409,7 +498,7 @@ export function normaliseResidueRole(
   declared: string,
   fragments: readonly string[],
 ): string {
-  return normaliseOwnedName("role", declared, fragments, PROTECTED_ROLES);
+  return normaliseOwnedName(ROLE, declared, fragments);
 }
 
 /**
@@ -424,12 +513,22 @@ export function normaliseResidueCapability(
   declared: string,
   fragments: readonly string[],
 ): string {
-  return normaliseOwnedName(
-    "capability",
-    declared,
-    fragments,
-    PROTECTED_CAPABILITIES,
-  );
+  return normaliseOwnedName(CAPABILITY, declared, fragments);
+}
+
+/**
+ * Validates one declared WP-Cron hook and returns it trimmed.
+ *
+ * @param declared - the hook as the product declared it.
+ * @param fragments - the declaration's validated option fragments, one of which it must carry.
+ * @returns the hook, trimmed.
+ * @throws {@link Error} naming the hook and the rule it broke.
+ */
+export function normaliseResidueCronHook(
+  declared: string,
+  fragments: readonly string[],
+): string {
+  return normaliseOwnedName(CRON_HOOK, declared, fragments);
 }
 
 /** A declaration with every entry validated, and the empty case already collapsed. */
@@ -438,13 +537,14 @@ interface CheckedDbResidue {
   readonly tables: readonly string[];
   readonly roles: readonly string[];
   readonly capabilities: readonly string[];
+  readonly cronHooks: readonly string[];
 }
 
 /**
  * Validates a whole declaration up front, so a typo in one entry cannot leave a site half-swept.
  *
  * @param residue - the product's declaration.
- * @returns the validated fragments, tables, roles and capabilities.
+ * @returns the validated fragments, tables, roles, capabilities and WP-Cron hooks.
  * @throws {@link Error} for the first entry that is not usable.
  */
 function check(residue: SiteDbResidue): CheckedDbResidue {
@@ -460,19 +560,23 @@ function check(residue: SiteDbResidue): CheckedDbResidue {
     capabilities: (residue.capabilities ?? []).map((capability) =>
       normaliseResidueCapability(capability, fragments),
     ),
+    cronHooks: (residue.cronHooks ?? []).map((hook) =>
+      normaliseResidueCronHook(hook, fragments),
+    ),
   };
 }
 
 /**
  * True when a validated declaration names nothing, so the site need not be asked. Every kind counts,
- * though roles and capabilities cannot be declared without a fragment today.
+ * though roles, capabilities and WP-Cron hooks cannot be declared without a fragment today.
  */
 function declaresNothing(checked: CheckedDbResidue): boolean {
   return (
     checked.fragments.length === 0 &&
     checked.tables.length === 0 &&
     checked.roles.length === 0 &&
-    checked.capabilities.length === 0
+    checked.capabilities.length === 0 &&
+    checked.cronHooks.length === 0
   );
 }
 
@@ -501,7 +605,78 @@ export function assertNoProtectedOptions(
 }
 
 /**
- * The PHP that finds the footprint, leaving it in `$options`, `$tables`, `$roles` and `$grants`.
+ * The PHP that finds every event of the hooks in `$declared_hooks`, whatever their arguments, leaving
+ * them in `$cron_events` sorted by hook, time, then arguments.
+ *
+ * Read through `_get_cron_array()`, the reader WordPress's own cron runner and `wp_unschedule_hook`
+ * use, so the sweep sees the events the site would run — through the option API, so an object cache
+ * or a filter on the `cron` option answers as it would for the runner. Before WordPress 6.1 it
+ * answers `false` for a missing option, hence the cast. An event whose arguments PHP cannot encode as
+ * JSON is still reported, so it cannot read as clean.
+ *
+ * A malformed array is refused here, before anything is removed (the removal runs this first, in the
+ * same process): `wp_unschedule_hook` walks **every** timestamp and crashes part-way on one that holds
+ * no list of hooks, or on a declared hook whose entry holds no list of events — after the options,
+ * tables and roles were already gone. A malformed timestamp counts only when there is an event to
+ * remove; a declared hook's malformed entry always does, since it is the product's own leftover. The
+ * message names counts and declared hooks, never a value. Exported for the spec that runs it on PHP.
+ */
+export const CRON_FIND_PHP = `
+$cron_events    = [];
+$cron_bad_times = 0;
+$cron_bad_hooks = [];
+if ( $declared_hooks ) {
+  foreach ( (array) _get_cron_array() as $time => $hooks ) {
+    if ( ! is_array( $hooks ) ) {
+      ++$cron_bad_times;
+      continue;
+    }
+    foreach ( $hooks as $hook => $instances ) {
+      $hook = (string) $hook;
+      if ( ! in_array( $hook, $declared_hooks, true ) ) {
+        continue;
+      }
+      if ( ! is_array( $instances ) ) {
+        $cron_bad_hooks[ $hook ] = true;
+        continue;
+      }
+      foreach ( $instances as $instance ) {
+        $args          = ( is_array( $instance ) && isset( $instance['args'] ) ) ? $instance['args'] : [];
+        $json          = wp_json_encode( $args );
+        $cron_events[] = [ 'hook' => $hook, 'time' => (int) $time, 'args' => false === $json ? '(not encodable)' : $json ];
+      }
+    }
+  }
+  $cron_problems = [];
+  if ( $cron_bad_times && $cron_events ) {
+    $cron_problems[] = $cron_bad_times . ' timestamp(s) hold no list of hooks';
+  }
+  if ( $cron_bad_hooks ) {
+    $cron_problems[] = 'the entry of ' . implode( ', ', array_keys( $cron_bad_hooks ) ) . ' holds no list of events';
+  }
+  if ( $cron_problems ) {
+    WP_CLI::error( "the site's WP-Cron array (the cron option) is malformed: " . implode( '; ', $cron_problems ) . ". WordPress would crash part-way unscheduling a hook from it, so the leftover-footprint sweep removed nothing; repair the cron option, then run again" );
+  }
+  usort( $cron_events, function ( $a, $b ) {
+    return strcmp( $a['hook'], $b['hook'] ) ?: ( $a['time'] <=> $b['time'] ) ?: strcmp( $a['args'], $b['args'] );
+  } );
+}
+`;
+
+/**
+ * The PHP that removes every event of each hook {@link CRON_FIND_PHP} found: `wp_unschedule_hook`
+ * clears a hook whatever its events' arguments. Its return value is not trusted; the caller re-reads.
+ * Exported for the spec that runs it on real PHP.
+ */
+export const CRON_REMOVE_PHP = `
+foreach ( array_unique( array_column( $cron_events, 'hook' ) ) as $hook ) {
+  wp_unschedule_hook( $hook );
+}
+`;
+
+/**
+ * The PHP that finds the footprint, leaving it in `$options`, `$tables`, `$roles`, `$grants` and
+ * `$cron_events`.
  *
  * Shared by the scan and the removal so there is exactly one definition of what "matching" means —
  * a removal that matched differently from the scan that verified it would be worse than either.
@@ -528,6 +703,7 @@ $fragments      = ${phpLiteral(checked.fragments)};
 $declared       = ${phpLiteral(checked.tables)};
 $declared_roles = ${phpLiteral(checked.roles)};
 $declared_caps  = ${phpLiteral(checked.capabilities)};
+$declared_hooks = ${phpLiteral(checked.cronHooks)};
 $options   = [];
 if ( $fragments ) {
   $where = [];
@@ -572,17 +748,40 @@ if ( $declared_roles || $declared_caps ) {
     return strcmp( $a['role'], $b['role'] ) ?: strcmp( $a['capability'], $b['capability'] );
   } );
 }
-`;
+${CRON_FIND_PHP}`;
 }
 
 /** The PHP that reports what {@link matchPhp} found, as JSON. */
 const REPORT_PHP = `
-echo wp_json_encode( [ 'prefix' => $wpdb->prefix, 'options' => array_values( $options ), 'tables' => $tables, 'roles' => $roles, 'capabilities' => $grants ] );
+echo wp_json_encode( [ 'prefix' => $wpdb->prefix, 'options' => array_values( $options ), 'tables' => $tables, 'roles' => $roles, 'capabilities' => $grants, 'cronEvents' => $cron_events ] );
 `;
 
 /**
+ * The PHP that finds the footprint and reports it, changing nothing: a scan, or a removal's re-read.
+ *
+ * @param checked - the validated declaration.
+ * @returns the snippet.
+ */
+function scanPhp(checked: CheckedDbResidue): string {
+  return matchPhp(checked) + REPORT_PHP;
+}
+
+/**
+ * The scan snippet {@link findSiteDbResidue} sends for a declaration — exported for the spec that
+ * runs it on PHP, so the reply's every field is proved to come from the snippet itself.
+ *
+ * @param residue - the product's declaration.
+ * @returns the snippet.
+ * @throws {@link Error} if a declared entry is unusable.
+ */
+export function footprintScanPhp(residue: SiteDbResidue): string {
+  return scanPhp(check(residue));
+}
+
+/**
  * The PHP that removes what {@link matchPhp} found. Roles and capabilities go through the role API
- * (`remove_role`, `WP_Role::remove_cap`), which rewrites the roles option and its cache.
+ * (`remove_role`, `WP_Role::remove_cap`), which rewrites the roles option and its cache; WP-Cron
+ * events through {@link CRON_REMOVE_PHP}.
  */
 const REMOVE_PHP = `
 foreach ( $options as $name ) {
@@ -600,7 +799,7 @@ foreach ( $grants as $grant ) {
     $holder->remove_cap( $grant['capability'] );
   }
 }
-`;
+${CRON_REMOVE_PHP}`;
 
 /** A scan's parsed reply: what was found, plus the prefix the protected-option check needs. */
 interface ScanResult extends FoundDbResidue {
@@ -630,6 +829,25 @@ function grantArray(value: unknown): CapabilityGrant[] | undefined {
   return grants;
 }
 
+/** Narrows an unknown JSON value to a list of {@link CronEvent}s. */
+function cronEventArray(value: unknown): CronEvent[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const events: CronEvent[] = [];
+  for (const item of value) {
+    if (
+      !isObject(item) ||
+      typeof item.hook !== "string" ||
+      typeof item.time !== "number" ||
+      !Number.isInteger(item.time) ||
+      typeof item.args !== "string"
+    ) {
+      return undefined;
+    }
+    events.push({ hook: item.hook, time: item.time, args: item.args });
+  }
+  return events;
+}
+
 /**
  * Parses a scan's reply.
  *
@@ -656,24 +874,26 @@ function parseScan(raw: string): ScanResult {
   const tables = stringArray(fields.tables);
   const roles = stringArray(fields.roles);
   const capabilities = grantArray(fields.capabilities);
+  const cronEvents = cronEventArray(fields.cronEvents);
   if (
     typeof prefix !== "string" ||
     options === undefined ||
     tables === undefined ||
     roles === undefined ||
-    capabilities === undefined
+    capabilities === undefined ||
+    cronEvents === undefined
   ) {
     throw new Error(
       `[wp/db-residue] the site's reply did not describe a footprint: ${raw || "(no output)"}`,
     );
   }
-  return { prefix, options, tables, roles, capabilities };
+  return { prefix, options, tables, roles, capabilities, cronEvents };
 }
 
 /** A scan result without the prefix, as the public functions report it. */
 function foundOf(scan: ScanResult): FoundDbResidue {
-  const { options, tables, roles, capabilities } = scan;
-  return { options, tables, roles, capabilities };
+  const { options, tables, roles, capabilities, cronEvents } = scan;
+  return { options, tables, roles, capabilities, cronEvents };
 }
 
 /**
@@ -713,7 +933,7 @@ export async function findSiteDbResidue(
   if (declaresNothing(checked)) return NOTHING_FOUND;
   const scan = await runFootprintPhp(
     transport,
-    matchPhp(checked) + REPORT_PHP,
+    scanPhp(checked),
     "looking for a leftover plugin footprint",
   );
   return foundOf(scan);
@@ -725,12 +945,17 @@ export async function findSiteDbResidue(
  * Rows go through `delete_option` rather than a `DELETE`, so WordPress invalidates its own caches as
  * it would for any other deletion — which is why no cache flush follows. Tables are dropped with
  * `IF EXISTS`, so a table that vanished between the scan and the drop is not an error. Roles and
- * capabilities go through the role API, which does the same for the roles option.
+ * capabilities go through the role API, which does the same for the roles option, and WP-Cron events
+ * through `wp_unschedule_hook`, which rewrites the `cron` option.
  *
- * Removal is **verified by re-reading**, in a second process, straight from the database rather than
- * from any cache — the same discipline the rest of this layer applies to WP-CLI's exit codes. A
- * `DROP` reports success for a table it never had to touch, and `delete_option` returns false both
- * for "there was nothing there" and for "a filter refused it".
+ * Removal is **verified by re-reading**, in a second process — the same discipline the rest of this
+ * layer applies to WP-CLI's exit codes. A `DROP` reports success for a table it never had to touch,
+ * and `delete_option` returns false both for "there was nothing there" and for "a filter refused it".
+ * Options, tables and roles are re-read from the database itself; WP-Cron events through the option
+ * API (`_get_cron_array()`), on purpose: what an object cache or a filter answers there is what the
+ * cron runner would run. When only WP-Cron events survive, removal and re-read run once more: a
+ * WP-Cron run in flight reschedules a recurring event before running it, and may have read the array
+ * before the removal wrote it.
  *
  * @param transport - the site to clean.
  * @param residue - the product's declaration. Declaring nothing does nothing at all.
@@ -751,25 +976,51 @@ export async function removeSiteDbResidue(
   // rather than stop it half-way — and so a clean site pays one read and no write.
   const scan = await runFootprintPhp(
     transport,
-    matchPhp(checked) + REPORT_PHP,
+    scanPhp(checked),
     "looking for a leftover plugin footprint",
   );
   if (isEmptyDbResidue(scan)) return NOTHING_FOUND;
   assertNoProtectedOptions(scan.options, scan.prefix);
 
+  let after = await removeAndReread(transport, checked);
+  if (onlyCronEventsLeft(after))
+    after = await removeAndReread(transport, checked);
+  if (!isEmptyDbResidue(after)) {
+    throw new SiteDbResidueRemovalFailedError(foundOf(after));
+  }
+  return foundOf(scan);
+}
+
+/**
+ * Removes what the declaration matches, then re-reads it in a second process.
+ *
+ * @param transport - the site to clean.
+ * @param checked - the validated declaration.
+ * @returns what the re-read still found.
+ */
+async function removeAndReread(
+  transport: Transport,
+  checked: CheckedDbResidue,
+): Promise<ScanResult> {
   await runFootprintPhp(
     transport,
     matchPhp(checked) + REMOVE_PHP + REPORT_PHP,
     "removing a leftover plugin footprint",
   );
-
-  const after = await runFootprintPhp(
+  return runFootprintPhp(
     transport,
-    matchPhp(checked) + REPORT_PHP,
+    scanPhp(checked),
     "confirming the leftover plugin footprint is gone",
   );
-  if (!isEmptyDbResidue(after)) {
-    throw new SiteDbResidueRemovalFailedError(foundOf(after));
-  }
-  return foundOf(scan);
+}
+
+/**
+ * True when a re-read found WP-Cron events and nothing else — the one survivor a concurrent WP-Cron
+ * run can put back, so worth one more removal.
+ */
+function onlyCronEventsLeft(found: FoundDbResidue): boolean {
+  return (
+    found.cronEvents.length > 0 &&
+    isEmptyDbResidue({ ...found, cronEvents: [] })
+  );
 }

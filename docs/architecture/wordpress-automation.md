@@ -626,8 +626,18 @@ takes it for an upgrade and never sets the onboarding flag. So the sweep keys of
 never off `is-installed`.
 
 - Declared as `ProductConfig.siteDbResidue`: `optionsContaining` (option-name fragments), `tables`
-  (unprefixed), `roles` and `capabilities` (exact names); the `@plugin` hooks sweep whatever they find,
-  via the registry.
+  (unprefixed), `roles`, `capabilities` and `cronHooks` (exact names); the `@plugin` hooks sweep
+  whatever they find, via the registry.
+- **WP-Cron hooks, because an uninstall may leave events** in core's `cron` option. BackWPup's
+  deactivation clears only the argument-less `backwpup_cron` and the events of jobs set to run on
+  WP-Cron, its uninstall none; verified live: `backwpup_cron {arg: 4}` survived both, and the next
+  install's job 4 "had" a schedule it was never given. Every event of a declared hook is found
+  (`_get_cron_array()`, what the cron runner reads), whatever its arguments, and removed with
+  `wp_unschedule_hook` (all of a hook's events, any arguments), reported as `cronEvents` (hook, time,
+  arguments as JSON). A malformed array (a timestamp holding no list of hooks while there is an event
+  to remove, or a declared hook's entry holding no list of events) is refused by the find, before
+  anything is removed: `wp_unschedule_hook` would crash on it part-way. The snippets run on PHP
+  against stand-ins with WordPress 7.1.3's semantics in `db-residue.php.spec.ts`.
 - **Roles, because activation cannot replace them**: `add_role()` returns without a change when the
   role exists (`class-wp-roles.php`), so BackWPup's "add/overwrite roles" keeps a leftover role's
   capabilities. Measured on `pro@apache`: a planted `backwpup_check` kept its planted capabilities
@@ -641,17 +651,21 @@ never off `is-installed`.
   sweep the site.
 - **Ordering is the guarantee**: both callers sweep right after `ensurePluginAbsent`, which throws if
   anything survives at the plugin's path. Measured: sweeping with the plugin active deletes the rows, and the next request
-  re-creates all 26 options and the table on `init`.
+  re-creates all 26 options and the table on `init` (a plugin reschedules its events the same way).
 - Rows go through **`delete_option`**, not `DELETE`, so WordPress invalidates its caches (no flush
-  needed); tables are dropped `IF EXISTS`. Removal is **verified by re-reading** from the database in a
-  second process: `DROP` reports success for a table it never touched, and `delete_option` returns
-  false both for "absent" and "a filter refused".
+  needed); tables are dropped `IF EXISTS`. Removal is **verified by re-reading** in a second process:
+  `DROP` reports success for a table it never touched, and `delete_option` returns false both for
+  "absent" and "a filter refused". Options, tables and roles are re-read from the database; WP-Cron
+  events through the option API, on purpose (an object cache or filter answers as it would the cron
+  runner). When only events survive, removal and re-read run once more: a WP-Cron run in flight
+  reschedules a recurring event before running it.
 - WordPress loads **`--skip-plugins`**, so other plugins hooking option writes cannot change the
   outcome; core (`delete_option`) is unaffected.
 - **Guards against a wrong declaration** (not a hostile one): `PROTECTED_TABLES` refuses one of
   WordPress's tables at declaration time; `PROTECTED_ROLES` / `PROTECTED_CAPABILITIES` (core's
-  `populate_roles()` set) refuse a core role or capability, and every role and capability must be
-  lowercase `[a-z0-9_-]` and carry one of the `optionsContaining` fragments (keeps out another plugin's); `PROTECTED_OPTIONS` is checked against what the query
+  `populate_roles()` set) / `PROTECTED_CRON_HOOKS` (every hook WordPress 7.1.3 schedules, plus the
+  older `wp_https_detection`) refuse a core role, capability or hook, and every role, capability and
+  hook must be lowercase `[a-z0-9_-]` and carry one of the `optionsContaining` fragments (keeps out another plugin's); `PROTECTED_OPTIONS` is checked against what the query
   actually **matched** (only the site knows what a fragment reaches) and refuses the **whole** sweep
   before deleting anything if it reached `siteurl`, `active_plugins`, `cron`, the prefixed
   `user_roles` or the rest of that list — the same bet `PROTECTED_SITE_PATHS` makes for a privileged `rm -rf`.
@@ -662,7 +676,8 @@ never off `is-installed`.
   would call a dirty site clean.
 
 **Scope**: what makes an install land on old state — options (read to decide it was installed
-before), tables (its installer creates them again), roles and capabilities (activation keeps them).
+before), tables (its installer creates them again), roles and capabilities (activation keeps them),
+WP-Cron events (a new object of the same id inherits them).
 User meta is left: notices re-create it, no install reads it, the next uninstall removes it.
 
 ## File ownership ([`wp/ownership.ts`](../../src/common/wp/ownership.ts))

@@ -3,10 +3,12 @@ import { test, expect } from "@playwright/test";
 import {
   normaliseOptionFragment,
   normaliseResidueCapability,
+  normaliseResidueCronHook,
   normaliseResidueRole,
 } from "../../../common/wp/db-residue";
 import {
   BACKWPUP_ADMIN_CAPABILITIES,
+  BACKWPUP_CRON_HOOKS,
   BACKWPUP_ROLES,
   BACKWPUP_SITE_DB_RESIDUE,
 } from "./db-residue";
@@ -21,7 +23,7 @@ test.describe("BACKWPUP_SITE_DB_RESIDUE", () => {
     normaliseOptionFragment,
   );
 
-  test("declares roles and capabilities the sweep accepts as the plugin's own", () => {
+  test("declares roles, capabilities and WP-Cron hooks the sweep accepts as the plugin's own", () => {
     for (const role of BACKWPUP_SITE_DB_RESIDUE.roles ?? []) {
       expect(normaliseResidueRole(role, fragments)).toBe(role);
     }
@@ -30,6 +32,20 @@ test.describe("BACKWPUP_SITE_DB_RESIDUE", () => {
         capability,
       );
     }
+    for (const hook of BACKWPUP_SITE_DB_RESIDUE.cronHooks ?? []) {
+      expect(normaliseResidueCronHook(hook, fragments)).toBe(hook);
+    }
+  });
+
+  // A job's event (`backwpup_cron {arg: <jobid>}`) survives deactivation and uninstall, and the next
+  // install's job of that id inherits it.
+  test("declares the plugin's three WP-Cron hooks", () => {
+    expect(BACKWPUP_SITE_DB_RESIDUE.cronHooks).toEqual(BACKWPUP_CRON_HOOKS);
+    expect(BACKWPUP_CRON_HOOKS).toEqual([
+      "backwpup_cron",
+      "backwpup_check_cleanup",
+      "backwpup_rsc_delete_segment_files",
+    ]);
   });
 
   // The names `inc/class-install.php` registers and `uninstall.php` removes: three roles, and eleven

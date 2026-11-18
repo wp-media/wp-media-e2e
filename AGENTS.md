@@ -292,9 +292,9 @@ lives in a sibling module, unit-testable without it.
   plugin edits in place** (`ProductConfig.configEdits`; `/tmp/e2e-record-<hex>-<euid>`, outside the
   docroot, after putting back what a killed run's record says; a failure ends the install, a folder at
   that name not the identity's own is warned and the scenario runs unrecorded; `wp/config-edits.ts`); sweep its leftover **database
-  footprint** (`ProductConfig.siteDbResidue`: options, tables, roles, capabilities — keyed off what is
+  footprint** (`ProductConfig.siteDbResidue`: options, tables, roles, capabilities, WP-Cron hooks — keyed off what is
   on the site, never off whether the plugin is installed; activation's `add_role()` keeps a leftover
-  role as it is); write what the product needs before activation (`ProductConfig.prepareActivation`:
+  role as it is, and a job's leftover event schedules the next install's job of that id); write what the product needs before activation (`ProductConfig.prepareActivation`:
   WP Rocket's dummy-licence must-use plugin, `support/licence.ts`, declared as residue — a `mu-plugins`
   folder it had to create stays, empty, after the teardown; a failure ends the install; `wp-config.php` never edited); note which **install outputs** exist
   (`ProductConfig.installOutputs`: what activation writes outside the plugin's folder; one batched
@@ -587,7 +587,7 @@ automatically, and that verification **must not** be skipped. Mirrored as a comm
   passes) is refused by the grant's own root command (`GRANT_SCRIPT`): `chmod` follows an operand.
 - Leftovers: `ProductConfig.siteResidue` (files, `wp/residue.ts`; as the site's commands run first —
   the identity in `site` —, then only what survived elevated; `transport.elevate: false` refuses elevation) and `ProductConfig.siteDbResidue`
-  (options, tables, roles, capabilities, `wp/db-residue.ts`; never elevated, multisite refused). Both
+  (options, tables, roles, capabilities, WP-Cron hooks, `wp/db-residue.ts`; never elevated, multisite refused). Both
   verified by re-reading.
 - **Site identity** ([`wp/site-identity.ts`](src/common/wp/site-identity.ts), routing `exec`/`wpCli`):
   a probe that throws is rethrown, never answered with a fallback (one call would run as
@@ -762,7 +762,7 @@ this file goes in the right `docs/` file, linked from the [Documentation map](#d
 - Residue (`residue.ts`: `parseResidueDeclaration`, `SiteResidueFamily`, `resolveSiteResidue`,
   `prepareResolvedDataDirs`, `isDeclaredResidue`) and the footprint sweep (`db-residue.ts`:
   `SiteDbResidue`, `findSiteDbResidue`, `removeSiteDbResidue`, `PROTECTED_OPTIONS`, `PROTECTED_TABLES`,
-  `PROTECTED_ROLES`, `PROTECTED_CAPABILITIES`).
+  `PROTECTED_ROLES`, `PROTECTED_CAPABILITIES`, `PROTECTED_CRON_HOOKS`).
 - Cron (`nextScheduled`, `triggerScheduledEvent`), the PHP bridge (`phpLiteral`, `evalPhp`,
   `EvalPhpOptions`), file readers (`fileChecksum`, `listFiles`, `listLocatedFiles`, `FILE_LIST_PHP`,
   `backdateFile`, `pathFromWorkingDir`, `locateFromWorkingDir`), archives (`findArchiveEntries`,

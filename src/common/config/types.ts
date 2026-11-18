@@ -481,8 +481,8 @@ export interface ProductConfig {
   readonly settleAfterInstall?: SettleAfterInstall;
   /**
    * What this product leaves in a site's **database** when its files are removed without its own
-   * uninstall ever running — the option fragments and tables the shared scenario hooks sweep
-   * whenever they find them.
+   * uninstall ever running — the options, tables, roles, capabilities and WP-Cron hooks the shared
+   * scenario hooks sweep whenever they find them.
    *
    * The filesystem counterpart above exists because a plugin's uninstall keeps the files it wrote.
    * This one exists because that uninstall lives in the plugin's own `uninstall.php`, so it only

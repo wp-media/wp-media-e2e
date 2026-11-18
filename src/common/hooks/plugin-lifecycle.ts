@@ -806,9 +806,8 @@ async function sweepDbResidue(
 }
 
 /**
- * The line for a footprint the sweep had to clear, with how it came to be there, which depends on
- * when: before a scenario it is an earlier run's; after one, this teardown's own uninstall failed, or
- * did not take it all. Pure, so its wording is pinned without a site.
+ * The line for a footprint the sweep had to clear, with how it came to be there
+ * ({@link dbResidueCause}). Pure, so its wording is pinned without a site.
  *
  * @param removed - what the sweep removed.
  * @param when - whether the scenario is about to begin or has just ended.
@@ -819,18 +818,53 @@ export function dbResidueMessage(
   when: "before" | "after",
   uninstallFailed: boolean,
 ): string {
+  return (
+    `[hooks] ${when === "before" ? "before installing" : "after the scenario"}, cleared a leftover ` +
+    `plugin footprint from the site: ${String(removed.options.length)} option(s), ` +
+    `${String(removed.tables.length)} table(s)${describeRemovedRoles(removed)}` +
+    `${describeRemovedCronEvents(removed)}. ${dbResidueCause(removed, when, uninstallFailed)}`
+  );
+}
+
+/**
+ * Why a sweep found what it found. WP-Cron events alone are no sign of anything abnormal: a
+ * plugin's own deactivation and uninstall may clear only some of its events, so they are blamed on
+ * that removal. Anything else points at a removal that never ran its uninstall (before a scenario,
+ * an earlier run's) or at this teardown's uninstall (after one: it failed, or did not take it all),
+ * with a note when WP-Cron events came along, since those need no such cause.
+ *
+ * @param removed - what the sweep removed (never empty: the caller is silent then).
+ * @param when - whether the scenario is about to begin or has just ended.
+ * @param uninstallFailed - whether this teardown's own uninstall of the plugin failed just before.
+ */
+function dbResidueCause(
+  removed: FoundDbResidue,
+  when: "before" | "after",
+  uninstallFailed: boolean,
+): string {
+  const hasCron = removed.cronEvents.length > 0;
+  const onlyCron =
+    hasCron &&
+    removed.options.length === 0 &&
+    removed.tables.length === 0 &&
+    removed.roles.length === 0 &&
+    removed.capabilities.length === 0;
+  if (onlyCron) return CRON_ONLY_CAUSE;
   const cause =
     when === "before"
       ? "An earlier run's plugin files were removed without its uninstall ever running."
       : uninstallFailed
         ? "The plugin's own uninstall failed in this scenario's teardown, so it could not remove them."
         : "The plugin's own uninstall did not remove them, or a request that outlived it re-created them.";
-  return (
-    `[hooks] ${when === "before" ? "before installing" : "after the scenario"}, cleared a leftover ` +
-    `plugin footprint from the site: ${String(removed.options.length)} option(s), ` +
-    `${String(removed.tables.length)} table(s)${describeRemovedRoles(removed)}. ${cause}`
-  );
+  return hasCron ? `${cause} ${CRON_NOTE}` : cause;
 }
+
+/** The cause when a sweep found WP-Cron events and nothing else. */
+const CRON_ONLY_CAUSE =
+  "The plugin's own deactivation and uninstall can leave its WP-Cron events behind.";
+
+/** Appended to any other cause when WP-Cron events came along. */
+const CRON_NOTE = "Its WP-Cron events can be left even by its own removal.";
 
 /**
  * The roles part of {@link dbResidueMessage}, empty when the sweep removed none: the roles by name,
@@ -853,6 +887,19 @@ function describeRemovedRoles(removed: FoundDbResidue): string {
     );
   }
   return parts.map((part) => `, ${part}`).join("");
+}
+
+/**
+ * The WP-Cron part of {@link dbResidueMessage}, empty when the sweep removed none: how many events,
+ * and of which hooks — a stale event is what gives a fresh install's object a schedule it was never
+ * given, so its hook is named.
+ *
+ * @param removed - what the sweep removed.
+ */
+function describeRemovedCronEvents(removed: FoundDbResidue): string {
+  if (removed.cronEvents.length === 0) return "";
+  const hooks = [...new Set(removed.cronEvents.map(({ hook }) => hook))];
+  return `, ${String(removed.cronEvents.length)} WP-Cron event(s) (${hooks.join(", ")})`;
 }
 
 /**

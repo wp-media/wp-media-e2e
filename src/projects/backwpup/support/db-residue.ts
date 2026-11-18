@@ -3,9 +3,10 @@ import type { SiteDbResidue } from "../../../common/wp/db-residue";
 /**
  * What BackWPup leaves in a site's **database** when its files go without its uninstall running.
  *
- * Its `uninstall.php` is thorough — verified live: after a proper deactivate-then-uninstall the site
- * is byte-for-byte back to its pre-install state, options, table, roles, capabilities and user meta
- * alike. But that file is part of the plugin, so it only runs while the plugin is still there. Two
+ * Its `uninstall.php` is thorough — verified live: after a proper deactivate-then-uninstall the
+ * site's options, table, roles, capabilities and user meta are byte-for-byte back to their
+ * pre-install state. Not its WP-Cron events: a job not set to run on WP-Cron keeps its event
+ * ({@link BACKWPUP_CRON_HOOKS}). But that file is part of the plugin, so it only runs while the plugin is still there. Two
  * ways it does not: `wp plugin uninstall --deactivate` deletes the files while the plugin's own
  * guard skips the cleanup (measured: **26 options and the table** left behind), and a run killed
  * between the uninstall and the teardown leaves the same shape. Either way the next install reads
@@ -85,13 +86,30 @@ export const BACKWPUP_ADMIN_CAPABILITIES = [
 ];
 
 /**
- * The footprint the shared `@plugin` hooks sweep whenever they find it: options, the table, roles and
- * the administrator's capabilities. Not user meta: the admin notices that write it re-create it, no
- * install reads it, and the next real uninstall removes it.
+ * Every WP-Cron hook the plugin schedules (`wp_schedule_event`/`wp_schedule_single_event` in its
+ * source, outside `vendor/`): a job's run, `backwpup_cron {arg: <jobid>}` or `{arg: "restart"}`; the
+ * twice-daily `backwpup_check_cleanup`; Rackspace's `backwpup_rsc_delete_segment_files`.
+ *
+ * Declared because neither exit clears them all: deactivation (`inc/class-install.php`) clears only
+ * the argument-less `backwpup_cron`, `backwpup_check_cleanup` and the events of jobs set to run on
+ * WP-Cron, and the uninstall clears none. Verified live: `backwpup_cron {arg: 4}` for a job not on
+ * WP-Cron survived deactivate plus uninstall, and the next install's job 4 "had" that schedule.
+ */
+export const BACKWPUP_CRON_HOOKS = [
+  "backwpup_cron",
+  "backwpup_check_cleanup",
+  "backwpup_rsc_delete_segment_files",
+];
+
+/**
+ * The footprint the shared `@plugin` hooks sweep whenever they find it: options, the table, roles,
+ * the administrator's capabilities and WP-Cron events. Not user meta: the admin notices that write it
+ * re-create it, no install reads it, and the next real uninstall removes it.
  */
 export const BACKWPUP_SITE_DB_RESIDUE: SiteDbResidue = {
   optionsContaining: BACKWPUP_OPTION_FRAGMENTS,
   tables: BACKWPUP_TABLES,
   roles: BACKWPUP_ROLES,
   capabilities: BACKWPUP_ADMIN_CAPABILITIES,
+  cronHooks: BACKWPUP_CRON_HOOKS,
 };
