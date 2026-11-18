@@ -1391,6 +1391,15 @@ Prerequisite (met 2026-11-17): the [phase-12 plan](phase-12-site-identity-plan.m
 outputs, licence, settling request, deactivation recovery, in-place `.htaccess`/`wp-config.php`
 cleanup, one lifecycle scenario).
 
+First task, before any WP Rocket scenario is ported: declare its WP-Cron hooks in its leftover
+sweep (`cronHooks` in `src/projects/wp-rocket/support/db-residue.ts`; BackWPup's need was V299).
+Its 3.24.1 source lists 18 (`WPRocketUninstall::$events`). Six of them carry none of its
+`optionsContaining` fragments (e.g. `rocket_cache_dir_size_check`,
+`action_scheduler_run_queue_rucss`), and every declared hook must carry one. So first measure on
+a twin what a wider fragment set would also sweep from the options. Then add the fragments, or
+change the rule if a fragment would reach options that are not WP Rocket's. Prove it live: plant
+an event of each hook, then run a `@plugin` scenario.
+
 WP Rocket reuses 6A unchanged and the same recipe: page objects first, then features. Its baseline
 is much larger (`src/features/`, `src/specs/`, `src/support/steps/`, the 921-line `page-utils.ts`,
 the 486-line `sections.ts`) and brings what BackWPup does not: `@mobile` (6A), settings
