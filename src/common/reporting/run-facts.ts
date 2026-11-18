@@ -5,6 +5,7 @@ import {
   setupKindOf,
   type SetupKind,
 } from "../config/project-names";
+import { suiteVersionText } from "../config/suite-version";
 import { escapeHtml, maskSiteUrl } from "../text";
 import type { Counts, TestStatus } from "./results";
 import type { RunDescription } from "./run-description";
@@ -93,6 +94,8 @@ export interface RunFacts {
   readonly runName?: string;
   /** Display only (`E2E_REQUESTED_REF`): the ref asked for, where the run may be pinned to a commit. */
   readonly requestedRef?: string;
+  /** Display only: the suite's own version (`package.json`); absent when it could not be read. */
+  readonly suiteVersion?: string;
   readonly status: RunState;
   /** When the run began, ISO-8601. */
   readonly startedAt: string;
@@ -195,6 +198,7 @@ export function beginFacts(
   }
   const runName = displayOnly(run.runName);
   const requestedRef = displayOnly(run.requestedRef);
+  const suiteVersion = displayOnly(run.suiteVersion);
   return {
     product: run.product,
     ...(run.cell !== undefined ? { cell: run.cell } : {}),
@@ -202,6 +206,7 @@ export function beginFacts(
     runId: run.runId,
     ...(runName !== undefined ? { runName } : {}),
     ...(requestedRef !== undefined ? { requestedRef } : {}),
+    ...(suiteVersion !== undefined ? { suiteVersion } : {}),
     status: "running",
     startedAt: startedAt.toISOString(),
     setupFailures: [],
@@ -532,8 +537,10 @@ function siteEntries(record: CellRecord, suffix: string): Entries {
 /**
  * Every fact as a label and a value, the most important first — Allure shows its first eight on the
  * front page: the status, the plugin and its SHA-256, the site and its server, the cell, the run and
- * the requested ref; then the plugin's details, the run's id and times. Labels are unique: a run of
- * every cell suffixes each cell's with its name, and a pool's later sites are numbered.
+ * the requested ref; then the plugin's details, the run's id and times. The suite's version (`unknown`
+ * when not read) comes last, so it never pushes a fact off that front page, however few precede it.
+ * Labels are unique: a run of every cell suffixes each cell's with its name, and a pool's later sites
+ * are numbered.
  *
  * @param facts - the facts.
  */
@@ -561,6 +568,7 @@ export function factEntries(facts: RunFacts): Entries {
     ...(facts.endedAt === undefined
       ? []
       : ([["Ended", facts.endedAt]] as Entries)),
+    ["Suite", suiteVersionText(facts.suiteVersion)],
   ];
 }
 

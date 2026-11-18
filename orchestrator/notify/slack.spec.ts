@@ -27,6 +27,7 @@ test.describe("slackMessage", () => {
         "52 scenarios: 49 passed · 1 flaky · 2 failed, in 54m 10s",
         "Plugin: BackWPup Pro 9.99.99 · develop @ f1ebfd0",
         "Site: https://simple.e2e.rocketlabsqa.ovh · WordPress 7.1.2 · PHP 8.5.10",
+        "Suite: 1.1.0",
         "Failed:",
         '• Backups › A backup runs on demand — Expected "Done", received "Error"',
         "• CLI › Logs are listed — Timeout 30000ms exceeded",
@@ -69,11 +70,70 @@ test.describe("slackMessage", () => {
         "Reason: setup:pro@nginx failed: SSH connection refused",
         "Plugin: BackWPup Pro 9.99.99 · develop @ f1ebfd0",
         "Site: https://simple.e2e.rocketlabsqa.ovh · WordPress 7.1.2 · PHP 8.5.10",
+        "Suite: 1.1.0",
         "Took: 1m 15s",
         "Log: `scp auto-e2e:/home/e2e/.orchestrator/runs/bpng-12/run.log .`",
         "Report: `scp -r auto-e2e:/home/e2e/reports/backwpup/pro@nginx/2026-10-13T10-15-31-042Z-bpng-12 .`",
       ].join("\n"),
     );
+  });
+
+  test("names the suite's version right after the site lines, whatever the status", () => {
+    for (const status of [
+      "passed",
+      "flaky",
+      "failed",
+      "error",
+      "stopped",
+      "killed",
+    ] as const) {
+      const lines = slackMessage(
+        finishedEvent({
+          status,
+          reason: status === "error" ? "bddgen exited 1" : null,
+        }),
+      ).split("\n");
+      const site = lines.findIndex((line) => line.startsWith("Site: "));
+      expect(lines[site + 1], status).toBe("Suite: 1.1.0");
+      expect(
+        lines.filter((line) => line.startsWith("Suite: ")),
+        status,
+      ).toHaveLength(1);
+    }
+  });
+
+  test("shows the suite's version as unknown when the event names none", () => {
+    expect(
+      slackMessage(finishedEvent({ suite: { version: null } })).split("\n"),
+    ).toContain("Suite: unknown");
+  });
+
+  test("puts the suite's line after the plugin when no site is listed, and after a cut site list", () => {
+    const none = slackMessage(finishedEvent({ sites: [] })).split("\n");
+    expect(none[none.indexOf("Suite: 1.1.0") - 1]).toMatch(/^Plugin: /);
+    const many = slackMessage(
+      finishedEvent({
+        sites: Array.from({ length: 12 }, (_, i) => ({
+          baseURL: `https://s${String(i)}.test`,
+          wordpress: null,
+          php: null,
+        })),
+      }),
+    ).split("\n");
+    expect(many[many.indexOf("Suite: 1.1.0") - 1]).toBe("…and 2 more sites");
+  });
+
+  test("escapes the suite's version for Slack and bounds it to MAX_SHOWN", () => {
+    const shown = (version: string): string | undefined =>
+      slackMessage(finishedEvent({ suite: { version } }))
+        .split("\n")
+        .find((line) => line.startsWith("Suite: "));
+    expect(shown("<!channel> & ```x```")).toBe(
+      `Suite: &lt;!channel&gt; &amp; ${FENCE_BREAK.repeat(3)}x${FENCE_BREAK.repeat(3)}`,
+    );
+    const long = shown("&".repeat(MAX_SHOWN));
+    expect(long).toBe(`Suite: ${escapeCut("&".repeat(MAX_SHOWN), MAX_SHOWN)}`);
+    expect(long?.length).toBeLessThanOrEqual("Suite: ".length + MAX_SHOWN);
   });
 
   test("points at no log or report for a run that never had a folder of its own", () => {

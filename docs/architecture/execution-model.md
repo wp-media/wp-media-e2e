@@ -132,8 +132,9 @@ Three always-on reporters of the suite's own, given the run's facts (`RunDescrip
 
 - **The terminal reporter** ([`reporting/terminal.reporter.ts`](../../src/common/reporting/terminal.reporter.ts)),
   in Playwright's `list`'s place (after the stream): after the `[cell]` notice, a header —
-  `[run] product · cell (edition) · RUN_ID · ref <E2E_REQUESTED_REF> · N scenarios`, on a terminal with
-  Unicode the same words in a `━━` rule; one line per test at its final attempt
+  `[run] product · cell (edition) · RUN_ID · ref <E2E_REQUESTED_REF> · N scenarios · suite <version>`
+  (`package.json`'s, `config/suite-version.ts`; `unknown` when unreadable or invalid), on a
+  terminal with Unicode the same words in a `━━` rule; one line per test at its final attempt
   (`✔ 18.4s  Feature › Scenario`; the word — `✘ failed`, `⚠ flaky`, `■ stopped` (drained), `— skipped`,
   `■ interrupted` — kept unless a coloured terminal shows a mark no other status shares; `· attempt
   2/3` past the first attempt or on a failure with retries; `· retry not run` for one settled at the end;
@@ -315,8 +316,10 @@ A third reporter, [`reporting/run-facts.reporter.ts`](../../src/common/reporting
 puts what the run tested up front in every report. Facts and formats are pure, in
 [`reporting/run-facts.ts`](../../src/common/reporting/run-facts.ts): product, cell, edition, `RUN_ID`,
 the display-only `E2E_RUN_NAME` and `E2E_REQUESTED_REF`, the plugin zips (ref, full commit, zip,
-SHA-256 — the artifacts setup's attachment) and each site's versions (the auth setup's), read through
-`setup-facts.ts`; the verdict is the summary's (`verdictOf`).
+SHA-256 — the artifacts setup's attachment), each site's versions (the auth setup's), read through
+`setup-facts.ts`, and the suite's version (`Suite`, the last fact so it never pushes one off Allure's
+front page; `unknown` when unreadable or invalid; `run-facts.json`'s optional `suiteVersion`, absent
+then; schema v1); the verdict is the summary's (`verdictOf`).
 
 - **Position**: after the terminal reporter, before the reports (the HTML report reads title and
   metadata in its own later `onEnd`). Not first: the `[cell]` notice must precede the `[run]` header, and

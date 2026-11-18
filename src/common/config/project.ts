@@ -57,6 +57,7 @@ import {
   seedSelectedCells,
   selectedCells,
 } from "./run-context";
+import { readSuiteVersion } from "./suite-version";
 import { siteLabel } from "../text";
 import { VISUAL_EXPECT, snapshotPathTemplateFor } from "./visual";
 import type { Edition, ProductConfig, SiteConfig, SitePool } from "./types";
@@ -110,6 +111,13 @@ const REPORTS_KEEP = intEnv(
   0,
   MAX_REPORTS_KEEP,
 );
+
+/**
+ * The suite's own version, for the reports to name beside what the run tested. Read once as this
+ * module loads: every worker imports the config too, and each then pays one small read, not one per
+ * config built. Absent when `package.json` cannot be read or holds no valid version.
+ */
+const SUITE_VERSION = readSuiteVersion(REPO_ROOT);
 
 /**
  * The auth setup's trace: kept for a failed attempt, like every project's, but without DOM snapshots.
@@ -395,6 +403,7 @@ export function createProductConfig(
         ...displayOnlyFacts(),
         ...pluginOverrides(),
         reportsKeep: REPORTS_KEEP,
+        ...(SUITE_VERSION !== undefined ? { suiteVersion: SUITE_VERSION } : {}),
       },
       (selectedCellConfig?.sites ?? []).map((site) => siteLabel(site.baseURL)),
     ),

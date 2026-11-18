@@ -33,7 +33,7 @@ End-to-end (E2E) tests for WP Media plugins: WP Rocket (performance), BackWPup (
 ```text
 src/
 ├── common/                 # product-agnostic, shared by every product
-│   ├── config/             # env, sites loading (+ run-as.ts: an ssh site's runAs/umask parsing and defaults), run-context, run-id.ts (RUN_ID, a run's report folder), run-env.ts (run-setting variable names), cell pin, drain, metadata, devices, file-owner rule, config factory, output.ts (palettes and printers for setup lines and scripts: `E2E_OUTPUT`-aware; a worker's never coloured)
+│   ├── config/             # env, sites loading (+ run-as.ts: an ssh site's runAs/umask parsing and defaults), run-context, run-id.ts (RUN_ID, a run's report folder), run-env.ts (run-setting variable names), suite-version.ts (package.json's version, read as text, never throws; `unknown` when unreadable or invalid), cell pin, drain, metadata, devices, file-owner rule, config factory, output.ts (palettes and printers for setup lines and scripts: `E2E_OUTPUT`-aware; a worker's never coloured)
 │   ├── reporting/          # the suite's reporters (cell notice, results stream, terminal + its sink/lines/worker-output/mode/live-block/live-session/failure-block, run facts, summary), their pure parts, report retention (retention, report-tree, run-pruning, prune-command), page-loads.ts (a failed scenario's lost requests), one run's Allure report (allure-report: temp output + rename, traces strip/keep, analytics loader removed by allure-analytics, one history line per run by allure-history; allure-results, allure-errors, allure-command for `report:allure`), one run's download bundle (report-bundle: `report/` and/or `report.tar.gz`, one `<name>/` inside; bundle-manifest, bundle-landing, bundle-errors), child-group.ts (Allure and `tar` in a process group of their own: only the caller's abort stops them — SIGTERM, then SIGKILL after 5 s —, never a Ctrl-C or SIGHUP to its group)
 │   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ends a saved login)
 │   ├── setup/              # the auth setup's preflight (+ cell-plugin.ts: a broken copy of the cell's plugin; login-shell.ts: the POSIX login-shell gate; site-identity-report.ts: the "Site identity" check and banner issues, pure; sudo-listing.ts: `sudo -n -l`'s `log_allowed`, pure; sudo-lookup.ts: what the host's unresolvable name costs each sudo call; identity-verdicts.ts: a worker's read of `site-identity.json`), elevation/ownership/identity banners, site info, check-lines.ts (one ✓/✗/→ check list for preflight, artifacts and healthcheck), healthcheck-lines.ts (the healthcheck's output, pure)
@@ -707,8 +707,6 @@ history:
   decisions.
 - [`orchestrator-report-delivery-plan.md`](docs/plans/orchestrator-report-delivery-plan.md) — each
   run's report bundle (Allure, `report.tar.gz`, Slack's fetch command; done): its standing decisions.
-- [`suite-version-plan.md`](docs/plans/suite-version-plan.md) — the suite's `package.json` version in
-  the `[run]` header, run facts, the orchestrator's start line and Slack (planned).
 
 ## When to update these docs
 

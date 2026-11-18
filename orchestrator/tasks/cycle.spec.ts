@@ -2059,3 +2059,43 @@ test.describe("runOnce — the run's download bundle", () => {
     expect(await readdir(older)).toEqual([]);
   });
 });
+
+test.describe("runOnce — the suite's version its run.finished names", () => {
+  test("a run that ended names the orchestrator's version when its facts name none", async () => {
+    const { deps, seen } = harness({ exitCode: 0 }, runnerWith("passed"), {
+      suiteVersion: "1.1.0",
+    });
+    expect(ended(await runOnce(TASK, deps).done).status).toBe("passed");
+    expect(seen.published.map((event) => event.suite)).toEqual([
+      { version: "1.1.0" },
+    ]);
+  });
+
+  test("a run whose end could not be read, or that never started, still names it", async () => {
+    for (const more of [
+      { end: () => Promise.reject(new Error("unread")) },
+      {
+        commandsFor: () => {
+          throw new Error("no such product");
+        },
+      },
+    ] satisfies Partial<CycleDeps>[]) {
+      const { deps, seen } = harness({ exitCode: 0 }, runnerWith("passed"), {
+        suiteVersion: "1.1.0",
+        ...more,
+      });
+      expect(ended(await runOnce(TASK, deps).done).status).toBe("error");
+      expect(seen.published.map((event) => event.suite)).toEqual([
+        { version: "1.1.0" },
+      ]);
+    }
+  });
+
+  test("a run with no version from either side names it null", async () => {
+    const { deps, seen } = harness({ exitCode: 0 }, runnerWith("passed"));
+    ended(await runOnce(TASK, deps).done);
+    expect(seen.published.map((event) => event.suite)).toEqual([
+      { version: null },
+    ]);
+  });
+});

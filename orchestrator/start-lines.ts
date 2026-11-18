@@ -1,3 +1,4 @@
+import { suiteVersionText } from "../src/common/config/suite-version";
 import { ConfigError } from "./config/errors";
 import { describeBudget, type ShutdownBudgets } from "./runs/shutdown";
 import type { StopLevel } from "./runs/stop";
@@ -51,9 +52,11 @@ export function tasksText(ids: readonly string[]): string {
 }
 
 /**
- * The line the orchestrator starts its loops with: `started · 2 tasks (bpng, bpap) · .orchestrator/ ·
- * pid 4242`, `once` after the tasks with `--once`.
+ * The line the orchestrator starts its loops with: `started · suite 1.1.0 · 2 tasks (bpng, bpap) ·
+ * .orchestrator/ · pid 4242`, `once` after the tasks with `--once`. The suite's version is the one read
+ * at boot: a `git pull` while it runs changes what its runs test, not this line.
  *
+ * @param suiteVersion - the suite's version; `undefined` shows as `unknown`.
  * @param ids - the selected tasks' ids.
  * @param once - whether it runs each once.
  * @param stateDir - the state directory, as shown.
@@ -61,6 +64,7 @@ export function tasksText(ids: readonly string[]): string {
  * @returns the line.
  */
 export function startedLine(
+  suiteVersion: string | undefined,
   ids: readonly string[],
   once: boolean,
   stateDir: string,
@@ -68,6 +72,7 @@ export function startedLine(
 ): string {
   return [
     "started",
+    `suite ${suiteVersionText(suiteVersion)}`,
     tasksText(ids),
     ...(once ? ["once"] : []),
     `${stateDir}/`,

@@ -102,6 +102,17 @@ export interface RunFinishedEvent {
     readonly wordpress: string | null;
     readonly php: string | null;
   }[];
+  /**
+   * The suite that ran it. Added within version 1 — a new field misleads no subscriber that ignores
+   * it.
+   */
+  readonly suite: {
+    /**
+     * Its version (`1.1.0`): the run's own, from its facts; else the orchestrator's, read at its
+     * start — the checkout may have changed since —; `null` when neither is known.
+     */
+    readonly version: string | null;
+  };
   readonly status: RunStatus;
   /** Why, for `error`, `stopped` and `killed`; else `null`. */
   readonly reason: string | null;
@@ -161,6 +172,11 @@ export interface RunFinishedInput {
   readonly results?: RunResults;
   /** The run's facts; absent when there are none. */
   readonly facts?: RunFactsRead;
+  /**
+   * The suite's version the orchestrator read at its start: the event's when the run's facts name
+   * none — a run that never wrote them, or an older suite's.
+   */
+  readonly suiteVersion?: string;
   readonly reportDir: string;
   readonly log: string;
   /** `false` for a run that never had a folder: its report, log and bundle are then `null`. */
@@ -212,6 +228,7 @@ export function buildRunFinished(input: RunFinishedInput): RunFinishedEvent {
       wordpress: fact(site.wordpress),
       php: fact(site.php),
     })),
+    suite: { version: fact(facts?.suiteVersion ?? input.suiteVersion) },
     status: input.outcome.status,
     reason: input.outcome.reason ?? null,
     startedAt: input.startedAt.toISOString(),

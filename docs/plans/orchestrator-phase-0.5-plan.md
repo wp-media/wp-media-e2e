@@ -98,7 +98,8 @@ As built. Module names are under `orchestrator/` (§5).
 ### 4.1 M1 — The command
 
 - `npm run orchestrator -- start [--config <file>] [--task <id>…] [--once] [--dry-run]`, plus
-  `--help` and `--version` (the checkout's `package.json` version, `unknown` if unreadable).
+  `--help` and `--version` (the checkout's `package.json` version, `unknown` if unreadable or not
+  SemVer 2.0; the suite's own reader, `src/common/config/suite-version.ts`).
   Commander 15 in `command.ts`; the entry `cli.ts` is one statement,
   `process.exit(await runCommand(…))`.
 - The script is `"orchestrator": "exec node --import tsx orchestrator/cli.ts"`. Never the `tsx` CLI:
@@ -161,15 +162,15 @@ As built. Module names are under `orchestrator/` (§5).
   lines go to `orchestrator.log` (§4.9):
 
   ```text
-  10:15:30 orchestrator  started · 2 tasks (bpng, bfap) · .orchestrator/ · pid 4242
+  10:15:30 orchestrator  started · suite 1.1.0 · 2 tasks (bpng, bfap) · .orchestrator/ · pid 4242
   10:15:31 bpng  bpng-12 started · backwpup pro@nginx · develop · .orchestrator/runs/bpng-12/run.log
   11:09:41 bpng  bpng-12 ⚠ flaky · 52 scenarios: 51 passed, 1 flaky · 54m 10s · reports/backwpup/pro@nginx/<RUN_ID>
   11:09:42 bpng  slack ✓ · datator ✓ 201
   11:09:42 bpng  next run 11:14:41 (cooldown 5m)
   ```
 
-  - `started` names the tasks, then `· once` under `--once`, the state directory and the
-    orchestrator's PID.
+  - `started` names the suite's version (read once from the checkout), the tasks, then `· once`
+    under `--once`, the state directory and the orchestrator's PID.
   - A run's started line, said once `bddgen` is spawned, names the ref the run builds as `--dry-run`
     does (`(default)` when the product's manifest chose it; planned once per task, at its first
     run), then the task's `grep` when set, then its log.
@@ -184,7 +185,7 @@ As built. Module names are under `orchestrator/` (§5).
 - `--dry-run` prints to stdout, over the committed example (hosts from a stand-in sites file):
 
   ```text
-  dry run · nothing is run · config .orchestrator/config.json · state .orchestrator/
+  dry run · nothing is run · suite 1.1.0 · config .orchestrator/config.json · state .orchestrator/
   2 tasks (bpng, bfap)
   bpng · BackWPup Pro on nginx
     backwpup pro@nginx · develop · version 9.99.99 · every scenario · cooldown 5m
@@ -592,6 +593,7 @@ results. `bddgen` exiting changes nothing: its group's kill still keeps the runn
   | `unit` | `product`, `cell`, `edition` |
   | `plugin` | `requestedRef` (`null` for the product's default), `ref` built, `commit` (full; `null` for a release's zip), `version`, `name` (the `Plugin Name:` header) |
   | `sites` | per site of the pool, in pool order: `baseURL` (`safeSiteUrl`), `wordpress`, `php` (the site's own, V28) |
+  | `suite` | `version`: the run's `run-facts.json` `suiteVersion`, else the orchestrator's boot-time one (always for a run whose end was not read), else `null` — added within `v: 1` |
   | `status`, `reason` | the run's status (§4.4); the reason for `error`, `stopped`, `killed`, else `null` |
   | `startedAt`, `endedAt`, `durationMs` | |
   | `counts` | `total`, `passed`, `failed`, `flaky`, `skipped` (drained ones included), `didNotRun` (an interrupted one included) |
@@ -627,6 +629,7 @@ results. `bddgen` exiting changes nothing: its group's kill still keeps the runn
   52 scenarios: 49 passed · 1 flaky · 2 failed, in 54m 10s
   Plugin: BackWPup Pro 9.99.99 · develop @ f1ebfd0
   Site: https://simple.e2e.rocketlabsqa.ovh · WordPress 7.1.2 · PHP 8.5.10
+  Suite: 1.1.0
   Failed:
   • Backups › A backup runs on demand — Expected "Done", received "Error" …
   • CLI › Logs are listed — Timeout 30000ms exceeded …
@@ -868,9 +871,10 @@ real script, `cli.ts` and `command.ts` over it through `swap-start.mjs`.
   started with, while `run-context.ts` — and `resolve.ts`, `consume.ts`, `project.ts`, which import
   it — loads `.env` and stamps `RUN_ID` as it is imported (V84, V130). So it imports from the suite
   only what `suite-imports.json` lists: `src/common/artifacts/request.ts`, `config/run-env.ts`,
-  `config/run-id.ts`, `config/sites.ts`, `reporting/results-reader.ts`,
-  `reporting/results-schema.ts`, `reporting/retention.ts`, `src/common/terminal/capabilities.ts`,
-  `terminal/layout.ts`, `terminal/live.ts`, `terminal/palette.ts`, `terminal/stream.ts`, `src/common/text.ts`, `src/projects/products.ts` — each admitted only once the boundary spec passes with it. Not
+  `config/run-id.ts`, `config/sites.ts`, `config/suite-version.ts`, `reporting/report-bundle.ts`,
+  `reporting/results-reader.ts`, `reporting/results-schema.ts`, `reporting/retention.ts`,
+  `src/common/terminal/capabilities.ts`, `terminal/layout.ts`, `terminal/live.ts`,
+  `terminal/palette.ts`, `terminal/stdio-capture.ts`, `terminal/stream.ts`, `src/common/text.ts`, `src/projects/products.ts` — each admitted only once the boundary spec passes with it. Not
   `reporting/run-facts.ts`, which imports the reporter's whole summary: `runs/facts.ts` reads the
   file itself (a spec checks its name against the suite's). Enforced twice, since a lint rule sees
   only an import's spelling, not where it leads or what that module imports, and misses `import()`

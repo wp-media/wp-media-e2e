@@ -448,29 +448,30 @@ test.describe("runHeaderLine", () => {
     runId: "2026-10-28T10-00-00-000Z-1",
     requestedRef: "develop",
     scenarios: 12,
+    suiteVersion: "1.1.0",
   };
 
   test("a pipe gets the [run] line, every fact in order", () => {
     expect(runHeaderLine(PIPE, header, 80)).toBe(
-      "[run] backwpup · pro@nginx (pro) · 2026-10-28T10-00-00-000Z-1 · ref develop · 12 scenarios",
+      "[run] backwpup · pro@nginx (pro) · 2026-10-28T10-00-00-000Z-1 · ref develop · 12 scenarios · suite 1.1.0",
     );
     expect(
       runHeaderLine(ASCII, { product: "p", runId: "r", scenarios: 1 }, 80),
-    ).toBe("[run] p . every cell . r . 1 scenario");
+    ).toBe("[run] p . every cell . r . 1 scenario . suite unknown");
   });
 
   test("a terminal with Unicode gets the same words in a heavy rule as wide as the screen", () => {
     const line = runHeaderLine(
       TTY_NO_COLOR,
       { ...header, requestedRef: undefined },
-      80,
+      100,
     );
     expect(line).toMatch(
-      /^━━ backwpup · pro@nginx \(pro\) · 2026-10-28T10-00-00-000Z-1 · 12 scenarios ━+$/,
+      /^━━ backwpup · pro@nginx \(pro\) · 2026-10-28T10-00-00-000Z-1 · 12 scenarios · suite 1\.1\.0 ━+$/,
     );
-    expect(Array.from(line)).toHaveLength(80);
+    expect(Array.from(line)).toHaveLength(100);
     // Bold words, plain glyphs.
-    expect(bare(runHeaderLine(TTY, header, 100))).toMatch(
+    expect(bare(runHeaderLine(TTY, header, 120))).toMatch(
       /^━━ backwpup .* ━+$/,
     );
     expect(runHeaderLine(TTY, header, 100)).toContain("\u001b[1mbackwpup");
@@ -496,12 +497,86 @@ test.describe("runHeaderLine", () => {
         },
         80,
       ),
-    ).toBe("[run] p · c · r$& · ref https://***@git.test/x · 0 scenarios");
+    ).toBe(
+      "[run] p · c · r$& · ref https://***@git.test/x · 0 scenarios · suite unknown",
+    );
     expect(
       runHeaderLine(PIPE, { ...header, requestedRef: " \u001b[0m " }, 80),
     ).not.toContain("ref");
-    expect(bare(runHeaderLine(TTY, { ...header, runId: "a$&b" }, 80))).toMatch(
-      /^━━ backwpup · pro@nginx \(pro\) · a\$&b · ref develop · 12 scenarios ━+$/,
+    expect(bare(runHeaderLine(TTY, { ...header, runId: "a$&b" }, 100))).toMatch(
+      /^━━ backwpup · pro@nginx \(pro\) · a\$&b · ref develop · 12 scenarios · suite 1\.1\.0 ━+$/,
     );
+  });
+
+  test("the suite's version is the last word in every style; without one it says unknown", () => {
+    const { suiteVersion: _, ...unversioned } = header;
+    expect(runHeaderLine(PIPE, unversioned, 80)).toBe(
+      "[run] backwpup · pro@nginx (pro) · 2026-10-28T10-00-00-000Z-1 · ref develop · 12 scenarios · suite unknown",
+    );
+    expect(runHeaderLine(TTY_NO_COLOR, unversioned, 120)).toMatch(
+      /^━━ backwpup · .* · 12 scenarios · suite unknown ━+$/,
+    );
+    const ascii = terminalStyle({ tty: true, color: false, unicode: false });
+    expect(runHeaderLine(ascii, header, 80)).toBe(
+      "[run] backwpup . pro@nginx (pro) . 2026-10-28T10-00-00-000Z-1 . ref develop . 12 scenarios . suite 1.1.0",
+    );
+    expect(runHeaderLine(ascii, unversioned, 80)).toMatch(
+      / \. 12 scenarios \. suite unknown$/,
+    );
+    // Bold with the other words, inside the one rule.
+    const painted = runHeaderLine(TTY, header, 120);
+    expect(painted.startsWith("━━ \u001b[1mbackwpup ")).toBe(true);
+    expect(painted).toContain(" · suite 1.1.0\u001b[22m ━");
+  });
+
+  // `rule()` never cuts its title: at 80 columns a common header runs past the screen, unfilled.
+  test("at 80 columns a ruled header too wide for a fill keeps every word and draws none", () => {
+    const words =
+      "wp-rocket · apache · 2026-11-17T17-49-04-299Z-68592 · 3 scenarios · suite 1.1.0";
+    const line = runHeaderLine(
+      TTY_NO_COLOR,
+      {
+        product: "wp-rocket",
+        cell: "apache",
+        runId: "2026-11-17T17-49-04-299Z-68592",
+        scenarios: 3,
+        suiteVersion: "1.1.0",
+      },
+      80,
+    );
+    expect(line).toBe(`━━ ${words}`);
+    expect(Array.from(line).length).toBeGreaterThan(80);
+  });
+
+  test("the suite's version is printed plain and masked, like every other word", () => {
+    expect(
+      runHeaderLine(
+        PIPE,
+        { ...header, suiteVersion: "1.1.0\u001b[31m\nx" },
+        80,
+      ),
+    ).toBe(
+      "[run] backwpup · pro@nginx (pro) · 2026-10-28T10-00-00-000Z-1 · ref develop · 12 scenarios · suite 1.1.0 x",
+    );
+    expect(
+      runHeaderLine(
+        PIPE,
+        { ...header, suiteVersion: "https://u:pw@git.test/x" },
+        80,
+      ),
+    ).toMatch(/ · suite https:\/\/\*\*\*@git\.test\/x$/);
+  });
+
+  test("a long version is cut with the line, never past it", () => {
+    const line = runHeaderLine(
+      PIPE,
+      { ...header, suiteVersion: "1.1.0-" + "a".repeat(1000) },
+      80,
+    );
+    expect(line.startsWith("[run] backwpup · ")).toBe(true);
+    expect(line).toContain(" · suite 1.1.0-aaa");
+    // The words are capped at 500 code points, after the "[run] " prefix.
+    expect(Array.from(line)).toHaveLength(506);
+    expect(line.endsWith("…")).toBe(true);
   });
 });
