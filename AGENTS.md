@@ -707,6 +707,9 @@ history:
   decisions.
 - [`orchestrator-report-delivery-plan.md`](docs/plans/orchestrator-report-delivery-plan.md) — each
   run's report bundle (Allure, `report.tar.gz`, Slack's fetch command; done): its standing decisions.
+- [`dependency-update-plan.md`](docs/plans/dependency-update-plan.md) — Node 26, npm 12 and every
+  dependency to its latest stable (Playwright 1.65, node-ssh 14, string-width 9, …): facts, decisions,
+  phases P0–P11 and their status.
 
 ## When to update these docs
 
