@@ -13,7 +13,49 @@ import { assertSafeElevatedTarget } from "../../../common/wp/paths";
 import { errorMessage } from "../../../common/guards";
 import type { ExecResult } from "../../../common/wp/exec";
 import type { Transport } from "../../../common/config/types";
+import {
+  LEASE_TTL_S,
+  LeaseHeartbeat,
+  NO_HOLDER,
+  RENEW_SCRIPT,
+  renewArgs,
+} from "./content-copy-lease";
+import { fenceArgs, parseDirIdentity } from "./content-copy-fence";
+import {
+  BOOT_ID_PATH,
+  CONTENT_COPY_DB_DEFAULTS,
+  CONTENT_COPY_DIR,
+  CONTENT_COPY_EXTRACTED,
+  CONTENT_COPY_FILE,
+  CONTENT_COPY_PARTIAL,
+  CONTENT_COPY_RESTORED,
+  CONTENT_COPY_SCRATCH,
+  COPY_DIR_GONE,
+  COPY_NOTES,
+  DISCARD_SCRIPT,
+  HOST_CHECK_SCRIPT,
+  IN_COPY_SCRIPT,
+  IN_USE_SCRIPT,
+  LEGACY_COPY_FILE,
+  MARK_FAILED,
+  MOUNT_CHECK_PERL,
+  MOUNT_INSIDE,
+  MOUNTINFO_PATH,
+  NO_TOKEN,
+  NOT_RENAMEABLE,
+  NOT_THE_COPY_DIR,
+  NOT_THIS_RUNS_COPY,
+  PROBE_STRANDED,
+  PUT_BACK_SCRIPT,
+  RECOVERING_PREFIX,
+  RENAME_PROBE,
+  ROOM_CHECK_SCRIPT,
+  STAMP_FAILED,
+  TOKEN_NOT_WRITTEN,
+  putBackDamage,
+} from "./content-copy-scripts";
 import type { DatabaseDefaults } from "./database-defaults";
+import type { Every, RenewOutcome } from "./content-copy-lease";
 
 /**
  * A copy of a site's `wp-content`, taken before a command that rewrites it wholesale and put back
@@ -25,178 +67,44 @@ import type { DatabaseDefaults } from "./database-defaults";
  * copy is refused, and with it the command: a rewrite that could not be undone must not run on a
  * shared cell.
  *
+ * **Put back beside the live site, then swapped in** ({@link PUT_BACK_SCRIPT}): the site keeps serving
+ * (wp-cron, the debug log, caches) while it goes back, and an extraction over `wp-content` fails when
+ * a request writes into a directory tar is emptying (`Cannot unlink: Directory not empty`, measured
+ * live). So the copy is extracted into a root-only scratch directory on the same filesystem, compared
+ * with the archive (`tar -d`), and renamed into place — a writer holding the old tree writes into the
+ * discarded one — and what is then at `wp-content` is proved to be the tree extracted. Pausing the
+ * site (`.maintenance`) was rejected: it stops new requests only, not those in flight, and a pause a
+ * crash left would take the site down.
+ *
  * **The copy outlives a failure on purpose.** It is kept in a root-only directory at the WordPress
  * root ({@link CONTENT_COPY_DIR}) — not the scenario's staging area, which every worker's teardown
  * wipes — and removed only once it is back. A put-back that failed, or a run killed between the
  * command and the put-back, leaves it there with `wp-content` possibly as the command left it, and
- * BackWPup runs then refuse that site until someone settles it, or until a later boot of the host
- * proves no run still uses it (`./content-copy-leftover.ts`).
+ * BackWPup runs then refuse that site until it is provably orphaned (`./content-copy-leftover.ts`):
+ * its lease lapsed (`./content-copy-lease.ts`), or a later boot of the host stamped none of its uses.
  *
  * **What a leftover holds says how far its run got**: tar writes {@link CONTENT_COPY_PARTIAL}, named
  * {@link CONTENT_COPY_FILE} only once it reads back and is on disk — the command runs only after;
  * {@link CONTENT_COPY_RESTORED} once put back. And **every use is stamped** with the host's boot id
- * ({@link CONTENT_COPY_STAMP}) just before it — the directory made, the command run, the put-back —
- * so a stamp from another boot proves no run still uses it. A restore reaching the database too
- * leaves the database's defaults beside the copy ({@link CONTENT_COPY_DB_DEFAULTS}), for a recovery
- * to set back.
+ * ({@link CONTENT_COPY_STAMP}) and renews the lease just before it — the directory made, the command
+ * run, the put-back — so a stamp from another boot proves no run still uses it. A restore reaching
+ * the database too leaves the database's defaults beside the copy ({@link CONTENT_COPY_DB_DEFAULTS}),
+ * for a recovery to set back.
  *
  * **Root acts only inside the directory it proved is the copy's** ({@link IN_COPY_SCRIPT}): whoever
  * may write the WordPress root could otherwise swap the directory for a link between a check and
  * root's command. The WordPress root itself and `wp-content` are guarded as before, by path. And the
  * run that made a copy acts on it only while it holds the run's random token
- * ({@link CONTENT_COPY_TOKEN}): a run outliving a reboot whose copy another run settled must not stamp,
- * put back or remove the next run's copy at the same path.
+ * ({@link CONTENT_COPY_TOKEN}), its restore only while the directory is the one it made
+ * (`./content-copy-fence.ts`): a run that slept, or outlived a reboot, whose copy another run settled
+ * must not stamp, put back, remove or restore over the next run's copy at the same path.
  *
- * Modes, owners and hard links are kept; ACLs and extended attributes are not (none on the cells,
- * measured with `getfacl`).
+ * Modes, owners and hard links are kept; ACLs, extended attributes and SELinux labels are not (none
+ * on the cells, measured with `getfacl`; Ubuntu runs AppArmor). The names and root scripts are in
+ * `./content-copy-scripts.ts`, re-exported here.
  */
 
-/** Where a copy is kept, relative to the WordPress root: root-only (`0700`), so never served. */
-export const CONTENT_COPY_DIR = ".e2e_content_copy";
-
-/**
- * The copy's file name in {@link CONTENT_COPY_DIR}, given only once it read back whole and is on disk.
- * A `tar -cf` cut short at a record boundary leaves an archive `tar -tf` lists without complaint (exit
- * 0, measured with GNU tar 1.35), so only this name tells a finished copy from one a reboot cut short.
- */
-export const CONTENT_COPY_FILE = "wp-content.verified.tar";
-
-/** The name tar writes the copy under, until it reads back whole. */
-export const CONTENT_COPY_PARTIAL = "wp-content.partial.tar";
-
-/** The whole copy's name once it is back — in the same root command — so it never goes back twice. */
-export const CONTENT_COPY_RESTORED = "wp-content.restored.tar";
-
-/**
- * Written beside a whole copy that went back when it could not be renamed {@link CONTENT_COPY_RESTORED}:
- * it then counts as back just the same.
- */
-export const CONTENT_COPY_EXTRACTED = "put-back.done";
-
-/**
- * The name copies were once kept under, before the names above: such a leftover is never taken for a
- * whole copy, only named in the way back it is refused with.
- */
-export const LEGACY_COPY_FILE = "wp-content.tar";
-
-/** The file holding the boot id of the host's last boot that used the copy. */
-export const CONTENT_COPY_STAMP = "boot-id";
-
-/** The file holding the random token of the run that made the copy. */
-export const CONTENT_COPY_TOKEN = "token";
-
-/** The file holding the database's defaults, as JSON, when the restore reaches the database too. */
-export const CONTENT_COPY_DB_DEFAULTS = "database-defaults.json";
-
-/** The files beside a copy that say about it, never part of it. */
-const COPY_NOTES: readonly string[] = [
-  CONTENT_COPY_STAMP,
-  CONTENT_COPY_TOKEN,
-  CONTENT_COPY_DB_DEFAULTS,
-];
-
-/** Where Linux keeps the current boot's id: a random UUID, new at every boot. */
-export const BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id";
-
-/**
- * What a copy's directory is renamed to, plus a unique suffix, when a later run claims it to settle it
- * (`./content-copy-leftover.ts`). Such a directory is a leftover too.
- */
-export const RECOVERING_PREFIX = `${CONTENT_COPY_DIR}.recovering-`;
-
-/**
- * {@link IN_COPY_SCRIPT}'s token when none is asked. Never empty: a transport dropping an empty
- * argument (node-ssh's own escaping did, measured live) would shift every one after it.
- */
-export const NO_TOKEN = "-";
-
-/**
- * `sh` program run as root around every command on a copy's contents: positional `make|use`, the
- * directory, the run's token ({@link NO_TOKEN}: none asked), then the command's argv, run there by `exec` —
- * values only ever as arguments. `make` creates the directory first (`0700`, so never a moment open)
- * and writes the token into it. It then refuses unless the directory is there
- * ({@link COPY_DIR_GONE}), is the one named, not a link to another one, and root's alone
- * ({@link NOT_THE_COPY_DIR}) — so once it is the working directory nothing renamed under the
- * WordPress root can redirect the command — and, a token given, holds it ({@link NOT_THIS_RUNS_COPY}).
- */
-export const IN_COPY_SCRIPT = [
-  "m=$1 d=$2 t=$3; shift 3",
-  'if [ "$m" = make ]; then mkdir -m 0700 -- "$d" || exit 93; fi',
-  '[ -e "$d" ] || [ -L "$d" ] || exit 97',
-  'p=$(cd -P -- "$(dirname -- "$d")" && pwd -P) || exit 90',
-  'cd -P -- "$d" 2>/dev/null || exit 90',
-  '[ "$(pwd -P)" = "${p%/}/$(basename -- "$d")" ] || exit 90',
-  '[ "$(stat -c %u:%a .)" = 0:700 ] || exit 90',
-  `if [ "$m" = make ]; then printf '%s\\n' "$t" > ${CONTENT_COPY_TOKEN} || exit 98; fi`,
-  `if [ "$t" != ${NO_TOKEN} ] && [ "$(cat ${CONTENT_COPY_TOKEN} 2>/dev/null)" != "$t" ]; then exit 96; fi`,
-  'exec "$@"',
-].join("\n");
-
-/** {@link IN_COPY_SCRIPT}'s exit when the directory is a link, or not root's alone. */
-export const NOT_THE_COPY_DIR = 90;
-
-/** {@link IN_COPY_SCRIPT}'s exit when `make` could not create the directory — not this run's then. */
-export const COPY_DIR_NOT_MADE = 93;
-
-/** {@link IN_COPY_SCRIPT}'s exit when the directory holds another run's token. */
-export const NOT_THIS_RUNS_COPY = 96;
-
-/** {@link IN_COPY_SCRIPT}'s exit when nothing is at the directory's path. */
-export const COPY_DIR_GONE = 97;
-
-/**
- * `sh` program run as root listing the processes that may still use a site's copies — the pid and
- * program name of each: those whose argv names one (`$1`, the copies' path prefix), those working in
- * one (a command run through {@link IN_COPY_SCRIPT}, whose paths are relative, or under
- * `docker exec`, where no `sudo` parent names it), and `backwpup … restore` ones working in the
- * WordPress root (`$2`) — never another site's. `$3` is the proc filesystem's root. Skips itself and
- * its callers by the marker below, which their argv carry; exits non-zero only when it cannot run.
- */
-export const IN_USE_SCRIPT = [
-  "# e2e-content-copy-in-use-probe",
-  "prefix=$1 proc=$3",
-  'root=$(cd -P -- "$2" && pwd -P) || exit 2',
-  `real=$root/${CONTENT_COPY_DIR}`,
-  'for p in "$proc"/[0-9]*; do',
-  '  [ -d "$p" ] || continue',
-  `  cmd=$( { tr '\\000' ' ' < "$p/cmdline"; } 2>/dev/null ) || continue`,
-  '  case $cmd in ""|*e2e-content-copy-in-use-probe*) continue ;; esac',
-  '  cwd=$(readlink -- "$p/cwd" 2>/dev/null) || cwd=',
-  "  case $cwd in",
-  '    "$real"|"$real"/*|"$real".recovering-*) ;;',
-  "    *)",
-  "      case $cmd in",
-  '        *"$prefix"*) ;;',
-  '        *backwpup*restore*) case $cwd in "$root"|"$root"/*) ;; *) continue ;; esac ;;',
-  "        *) continue ;;",
-  "      esac ;;",
-  "  esac",
-  `  printf '%s %s\\n' "\${p##*/}" "\${cmd%% *}"`,
-  "done",
-  "exit 0",
-].join("\n");
-
-/**
- * `sh` program putting a copy back, run inside its directory: stamps the boot (exit
- * {@link STAMP_FAILED}), runs tar with the positional arguments ({@link putBackArgv}), then — only
- * when tar succeeded — marks it back: renames the copy {@link CONTENT_COPY_RESTORED}, or, should that
- * fail, writes {@link CONTENT_COPY_EXTRACTED} beside it (exit {@link MARK_FAILED} only when both
- * fail; `printf`, not `:` — a special built-in, whose failed redirection ends dash at once, exit
- * 2), and syncs the directory so the mark outlives a crash. One root command, so no reboot falls
- * between the stamp and the extraction, nor between the extraction and its mark.
- */
-export const PUT_BACK_SCRIPT = [
-  `cp -- ${BOOT_ID_PATH} ${CONTENT_COPY_STAMP} || exit 94`,
-  'tar "$@" || exit $?',
-  `mv -T -- ${CONTENT_COPY_FILE} ${CONTENT_COPY_RESTORED} || printf '' > ${CONTENT_COPY_EXTRACTED} || exit 95`,
-  "sync -- . || true",
-].join("\n");
-
-/** {@link PUT_BACK_SCRIPT}'s exit when the boot stamp could not be written: nothing was put back. */
-export const STAMP_FAILED = 94;
-
-/** {@link PUT_BACK_SCRIPT}'s exit when the copy went back but could be marked so neither way. */
-export const MARK_FAILED = 95;
+export * from "./content-copy-scripts";
 
 /**
  * A boot id as Linux prints it: a lowercase UUID.
@@ -269,28 +177,45 @@ export async function copyUsers(
 }
 
 /**
- * {@link STAMP_ARGV} for `make`: a failed stamp exits {@link STAMP_FAILED}, told apart from a `sudo`
- * that refused before anything was made (exit 1).
- */
-const MAKE_STAMP_ARGV: readonly string[] = [
-  "sh",
-  "-c",
-  `cp -- ${BOOT_ID_PATH} ${CONTENT_COPY_STAMP} || exit 94`,
-];
-
-/**
  * The `make` exits after which its `mkdir` provably succeeded, so the directory is this run's even
  * with no token in it: refused by a check after it, gone since, no token written, stamp failed.
  */
-const MADE_BUT_FAILED: readonly number[] = [90, 94, 97, 98];
-
-/** Writes the current boot's id into the copy's stamp; run inside its directory. */
-const STAMP_ARGV: readonly string[] = [
-  "cp",
-  "--",
-  BOOT_ID_PATH,
-  CONTENT_COPY_STAMP,
+const MADE_BUT_FAILED: readonly number[] = [
+  NOT_THE_COPY_DIR,
+  COPY_DIR_GONE,
+  TOKEN_NOT_WRITTEN,
+  STAMP_FAILED,
 ];
+
+/** Who renews a lease, and for how long. */
+export interface LeaseTerms {
+  /** Seconds each renewal grants; `0` expires it. */
+  readonly ttlS: number;
+  /** `./content-copy-lease.ts`'s `holderFor`, or `NO_HOLDER`. */
+  readonly holder: string;
+}
+
+/** The terms a run without a worker slot renews on. */
+export const DEFAULT_LEASE: LeaseTerms = {
+  ttlS: LEASE_TTL_S,
+  holder: NO_HOLDER,
+};
+
+/**
+ * The argv stamping a copy with the current boot and renewing its lease, run inside its directory:
+ * exit {@link STAMP_FAILED} when it could not, told apart from a `sudo` that refused (exit 1).
+ *
+ * @param terms - the lease's ttl and holder.
+ */
+export function renewArgv(terms: LeaseTerms): string[] {
+  return [
+    "sh",
+    "-c",
+    RENEW_SCRIPT,
+    "sh",
+    ...renewArgs(terms.ttlS, terms.holder),
+  ];
+}
 
 /**
  * How long a put-back waits for a restore still running on the site — one a dropped connection left
@@ -303,7 +228,7 @@ export const RESTORE_GONE_POLL_MS = 10_000;
 
 /**
  * Space the copy needs beyond the content directory's own size before it is taken, so the shared disk
- * is never the thing that fills up.
+ * is never the thing that fills up — and the put-back keeps beyond the second tree it extracts.
  */
 const COPY_HEADROOM_KB = 1024 * 1024;
 
@@ -341,20 +266,21 @@ export function copyArgv(
 }
 
 /**
- * GNU tar's arguments for putting the copy back, as root, into the WordPress root: each entry with its
- * owner and mode, and `--recursive-unlink`, which empties every directory before extracting into it —
- * `wp-content` first. So it ends as the copy holds it, exactly: what the command added goes, and a
- * directory where the copy has a file is replaced — which a plain extraction refuses, exiting 2
- * half-done. What the copy left out goes too; by then the teardowns have removed it already. A link
- * the command left is removed, never followed. All measured with GNU tar 1.34 and 1.35 (Debian,
- * Ubuntu, Alpine). The archive is opened before `-C` applies, so a name inside the copy's directory
- * works from there (measured).
+ * The put-back's argv, run inside the copy's directory ({@link PUT_BACK_SCRIPT}).
  *
- * @param archive - the copy's path, or its name inside the copy's directory when run there.
  * @param root - the WordPress root's absolute path.
+ * @param terms - the lease the put-back renews, then expires once back.
  */
-export function putBackArgv(archive: string, root: string): string[] {
-  return ["-xpf", archive, "--recursive-unlink", "-C", root];
+export function putBackArgv(root: string, terms: LeaseTerms): string[] {
+  return [
+    "sh",
+    "-c",
+    PUT_BACK_SCRIPT,
+    "sh",
+    root,
+    ...renewArgs(terms.ttlS, terms.holder),
+    String(COPY_HEADROOM_KB),
+  ];
 }
 
 /** How GNU tar's complaint ends, at exit 1, about a file that changed while it was copied. */
@@ -602,13 +528,37 @@ export function inCopyProblem(result: ExecResult): string {
 }
 
 /**
- * Stamps a copy with the current boot's id: done just before every use.
+ * Stamps a copy with the current boot's id and renews its lease: done just before every use, and by
+ * the making run's heartbeat.
+ *
+ * @param transport - the site.
+ * @param dir - the copy's directory.
+ * @param terms - the lease's ttl and holder.
+ * @param token - the making run's token; none for a run settling another's copy.
+ */
+export function stampCopy(
+  transport: Transport,
+  dir: string,
+  terms: LeaseTerms,
+  token?: string,
+): Promise<ExecResult> {
+  return inCopy(
+    transport,
+    dir,
+    renewArgv(terms),
+    token === undefined ? {} : { token },
+  );
+}
+
+/**
+ * Reads a copy directory's `dev:ino` as root inside it ({@link IN_COPY_SCRIPT}'s checks first); judge
+ * it with `parseDirIdentity` (`./content-copy-fence.ts`).
  *
  * @param transport - the site.
  * @param dir - the copy's directory.
  * @param token - the making run's token; none for a run settling another's copy.
  */
-export function stampCopy(
+export function readDirIdentity(
   transport: Transport,
   dir: string,
   token?: string,
@@ -616,7 +566,7 @@ export function stampCopy(
   return inCopy(
     transport,
     dir,
-    STAMP_ARGV,
+    ["stat", "-c", "%d:%i", "."],
     token === undefined ? {} : { token },
   );
 }
@@ -649,30 +599,27 @@ export function readsBackWhole(
 }
 
 /**
- * Puts a whole copy back as root ({@link PUT_BACK_SCRIPT}): stamped, extracted, marked back.
+ * Puts a whole copy back as root ({@link PUT_BACK_SCRIPT}): stamped, extracted beside, swapped in,
+ * marked back.
  *
  * @param transport - the site.
  * @param place - where the copy is.
+ * @param terms - the lease it renews first, then expires once back.
  * @param token - the making run's token; none for a run settling another's copy.
- * @throws {@link Error} if it is no longer the run's (gone, or another's: nothing put back), could not
- * be stamped (nothing put back), extracted (`wp-content` may then be half put back), or marked back —
- * each message says what to do.
+ * @throws {@link CopyNotThisRunsError} if it is no longer the run's (gone, or another's: nothing put
+ * back); {@link Error} if it could not be put back — saying what that left of `wp-content` — or was put
+ * back but not marked so. Each message says what to do.
  */
 export async function putBackCopy(
   transport: Transport,
   place: CopyPlace,
+  terms: LeaseTerms,
   token?: string,
 ): Promise<void> {
   const result = await inCopy(
     transport,
     place.dir,
-    [
-      "sh",
-      "-c",
-      PUT_BACK_SCRIPT,
-      "sh",
-      ...putBackArgv(CONTENT_COPY_FILE, place.root),
-    ],
+    putBackArgv(place.root, terms),
     token === undefined ? {} : { token },
   );
   if (result.exitCode === 0) return;
@@ -690,7 +637,7 @@ export async function putBackCopy(
   const what =
     result.exitCode === STAMP_FAILED
       ? `could not stamp the copy before putting it back (${inCopyProblem(result)}); nothing was put back. `
-      : `could not put wp-content back (${inCopyProblem(result)}); it may be partly as the restore left it. `;
+      : `could not put wp-content back (${inCopyProblem(result)}); ${putBackDamage(result.exitCode)}. `;
   throw new Error(
     `[backwpup/content-copy] ${target}: ${what}` +
       leftoverMessage(target, place, [CONTENT_COPY_FILE]),
@@ -716,14 +663,15 @@ export async function discardCopy(
     transport,
     place.dir,
     [
-      "rm",
-      "-f",
-      "--",
+      "sh",
+      "-c",
+      DISCARD_SCRIPT,
+      "sh",
       CONTENT_COPY_PARTIAL,
       CONTENT_COPY_FILE,
       CONTENT_COPY_RESTORED,
       CONTENT_COPY_EXTRACTED,
-      ...COPY_NOTES,
+      ...COPY_NOTES.filter((name) => name !== CONTENT_COPY_SCRATCH),
     ],
     token === undefined ? {} : { token },
   );
@@ -735,19 +683,96 @@ export async function discardCopy(
   if ((await exec(transport, "test", ["-e", place.dir])).exitCode !== 0) {
     return true;
   }
+  const left = await copyEntries(transport, place.dir, token);
   console.warn(
     `[backwpup/content-copy] ${describeTarget(transport)}: could not remove ${place.dir}; ` +
-      `remove it by hand (\`sudo rm -r ${place.dir}\`) — BackWPup runs refuse this site until it ` +
-      "is gone.",
+      `${removeByHand(place, left)} BackWPup runs refuse this site until it is gone.`,
   );
   return false;
 }
 
-/** A copy that is no longer the run's: gone, or another run's — settled by a run after a reboot. */
+/**
+ * A copy directory's entries, read as root inside it. Never throws: a site that cannot be asked reads
+ * as `undefined`, like a refused listing.
+ *
+ * @param transport - the site.
+ * @param dir - the copy's directory.
+ * @param token - the making run's token, checked; none for a run settling another's copy.
+ * @returns the entry names, or `undefined` when they could not be read.
+ */
+export async function copyEntries(
+  transport: Transport,
+  dir: string,
+  token?: string,
+): Promise<string[] | undefined> {
+  try {
+    const listed = await inCopy(
+      transport,
+      dir,
+      ["ls", "-A"],
+      token === undefined ? {} : { token },
+    );
+    return listed.exitCode === 0
+      ? listed.stdout.split("\n").filter((name) => name !== "")
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * How to settle a copy directory holding the rename probe's ({@link RENAME_PROBE}): it may hold the
+ * site's own `wp-content`, exchanged out by a probe that never exchanged it back (failed, or killed
+ * between its two exchanges), so the directory must never simply be removed. Its contents tell: the
+ * site's files, or nothing once the exchange went back.
+ *
+ * @param place - where the copy is.
+ */
+export function probeRecipe(place: CopyPlace): string {
+  const probe = posix.join(place.dir, RENAME_PROBE);
+  return (
+    `${place.dir} holds ${probe}, left by the check that wp-content can be renamed, which exchanges it with ` +
+    `an empty directory and back. If \`sudo ls -A ${probe}\` lists the site's files, that is the ` +
+    `site's wp-content (wp-content is then a root-only directory holding none of them): exchange it ` +
+    `back — \`sudo mv -T ${place.content} ${probe}.empty && sudo mv -T ${probe} ${place.content}\`; ` +
+    `if it lists nothing, wp-content was exchanged back already: \`sudo rmdir ${probe}\`. Never ` +
+    `remove ${place.dir} while ${probe} is in it; once it is gone, the next BackWPup run on this ` +
+    "site says what to do with the rest."
+  );
+}
+
+/**
+ * What to tell an operator about a copy directory that could not be removed: the probe's recipe when
+ * it holds the probe's directory ({@link probeRecipe}), a look first when what it holds is unknown,
+ * else the removal.
+ *
+ * @param place - where the copy is.
+ * @param entries - what it holds, or `undefined` when that could not be read.
+ */
+export function removeByHand(
+  place: CopyPlace,
+  entries: readonly string[] | undefined,
+): string {
+  if (entries?.includes(RENAME_PROBE) === true) return probeRecipe(place);
+  const remove = `\`sudo rm -r ${place.dir}\``;
+  if (entries === undefined) {
+    return (
+      `look first (\`sudo ls -A ${place.dir}\`): if it holds ${RENAME_PROBE}, that may be the ` +
+      "site's own wp-content — a BackWPup run on this site refuses it, saying how to exchange it " +
+      `back; otherwise remove it by hand: ${remove}.`
+    );
+  }
+  return `remove it by hand: ${remove}.`;
+}
+
+/**
+ * A copy that is no longer the run's: gone, or another run's — claimed by a later run that judged this
+ * one gone (the host rebooted since its last use, or its lease lapsed).
+ */
 export class CopyNotThisRunsError extends Error {}
 
 /**
- * What to tell a run whose copy is no longer its own: another run settled it, after a reboot.
+ * What to tell a run whose copy is no longer its own: a later run claimed it, judging this one gone.
  *
  * @param target - the site, as messages name it.
  * @param place - where the copy was.
@@ -760,7 +785,8 @@ function notThisRunsMessage(
 ): string {
   return (
     `[backwpup/content-copy] ${target}: the copy of wp-content at ${place.dir} is no longer this ` +
-    `run's (${inCopyProblem(result)}) — another run settled it, so nothing was put back.`
+    `run's (${inCopyProblem(result)}) — another run claimed it, after a reboot or past this ` +
+    "run's lease, so nothing was put back; that run, or a later one, settles it."
   );
 }
 
@@ -787,6 +813,9 @@ export function leftoverMessage(
     entries === undefined || entries.length === 0
       ? "nothing"
       : entries.join(", ");
+  if (entries?.includes(RENAME_PROBE) === true) {
+    return `${head} ${probeRecipe(place)} ${tail}`;
+  }
   if (entries !== undefined && heldCopy(entries) === "none") {
     return (
       `${head} It holds no copy to put back (${listed}): no restore ran from it, or it is back ` +
@@ -800,11 +829,23 @@ export function leftoverMessage(
     archive === undefined
       ? `${place.dir}/<the .tar it holds — \`sudo ls -A ${place.dir}\`>`
       : posix.join(place.dir, archive);
+  // Unread, it may hold the rename probe's directory: never to be removed with the rest.
+  const look =
+    entries === undefined
+      ? ` If \`sudo ls -A ${place.dir}\` lists ${RENAME_PROBE}, settle that first: it may hold the ` +
+        "site's own wp-content, and a BackWPup run's refusal then says how to exchange it back."
+      : "";
+  const manual = posix.join(place.dir, "manual");
+  const content = posix.join(place.root, CONTENT_DIR);
   return (
     `${head} That run's \`wp backwpup restore\` may have left wp-content damaged (files ` +
-    "deleted, others owned by the transport's user) and never put it back. If it is damaged, put " +
-    `the copy back: \`sudo tar -xpf ${path} --recursive-unlink -C ${place.root}\`; either way ` +
-    `remove it then: \`sudo rm -r ${place.dir}\`. ${tail}`
+    "deleted, others owned by the transport's user) and never put it back. If it is damaged and " +
+    "`findmnt` shows no mount at or under wp-content, extract the copy beside the site and swap it " +
+    `in: \`sudo mkdir -m 0700 ${manual} && sudo tar -xpf ${path} -C ${manual} && sudo mv -T ` +
+    `${content} ${manual}/damaged && sudo mv -T ${manual}/wp-content ${content}\` — never extract ` +
+    "it over wp-content, which fails while the site writes into it; either way " +
+    `remove it then: \`sudo rm -r ${place.dir}\`. A run settles it itself once it is provably ` +
+    `orphaned — its lease lapsed, or an earlier boot of the host stamped it, and no process uses it.${look} ${tail}`
   );
 }
 
@@ -850,9 +891,65 @@ export function heldCopy(entries: readonly string[]): HeldCopy {
   return entry === CONTENT_COPY_FILE ? "whole" : "unknown";
 }
 
+/** How a {@link ContentCopy} waits, renews and names itself; every field has a default. */
+export interface ContentCopyOptions {
+  /** How long {@link ContentCopy.putBack} waits for a restore still running on the site. */
+  readonly boundMs?: number;
+  /** How often it looks meanwhile. */
+  readonly pollMs?: number;
+  /** The lease's holder: the worker's run and slot (`holderFor`); none outside a worker. */
+  readonly holder?: string;
+  /** How often the lease is renewed while the copy is kept. */
+  readonly renewEveryMs?: number;
+  /** The renewal timer; a spec's stand-in replaces Node's. */
+  readonly every?: Every;
+}
+
+/**
+ * Why {@link HOST_CHECK_SCRIPT} refused a host.
+ *
+ * @param result - its result.
+ */
+export function hostCheckProblem(result: ExecResult): string {
+  if (result.exitCode === 3) {
+    return "root finds no `perl`, which puts the copy back in one swap";
+  }
+  if (result.exitCode === 4) {
+    return "wp-content is on another filesystem than the WordPress root (a mount), which the put-back cannot rename it across";
+  }
+  return `whether the copy could go back could not be checked (${inCopyProblem(result)})`;
+}
+
+/**
+ * Why {@link MOUNT_CHECK_PERL} refused a host: no rename could swap the copy back in.
+ *
+ * @param result - its result.
+ */
+export function swapProblem(result: ExecResult): string {
+  const said = result.stderr.trim().slice(0, 300);
+  if (result.exitCode === MOUNT_INSIDE) {
+    return `a mount is at or under wp-content (${said}), which a put-back would move aside with the tree, or cannot rename`;
+  }
+  if (result.exitCode === NOT_RENAMEABLE) {
+    return `wp-content cannot be renamed (${said}), so the put-back could not swap the copy in`;
+  }
+  if (copyIsGone(result)) {
+    return `its directory is no longer this run's (${inCopyProblem(result)})`;
+  }
+  return `whether the put-back could swap the copy in could not be checked (${inCopyProblem(result)})`;
+}
+
+/**
+ * The rename probe's directory is left in the copy's — its exchange back failed, or the check was cut
+ * off between its two exchanges — so it may hold the site's own `wp-content`: the copy's directory
+ * then stays, and the message says how to exchange it back ({@link probeRecipe}).
+ */
+export class ProbeStrandedError extends Error {}
+
 /**
  * A copy of the site's content directory, taken before a command that rewrites it wholesale and put
- * back afterwards — see the module header.
+ * back afterwards — see the module header. While kept, its lease is renewed on a timer
+ * (`./content-copy-lease.ts`); a run giving up on it expires the lease at once.
  */
 export class ContentCopy {
   /** Where the copy is, once taken. */
@@ -864,27 +961,55 @@ export class ContentCopy {
   /** The host's boot id when the copy was taken. */
   private bootId: string | undefined;
 
+  /** The copy directory's `dev:ino`, which the restore's fence checks. */
+  private fenceId: string | undefined;
+
   /** This run's token, written into the copy it makes. */
   private readonly token = randomBytes(16).toString("hex");
+
+  /** The lease's terms while kept. */
+  private readonly terms: LeaseTerms;
+
+  /** How long and how often a put-back waits for a restore still running. */
+  private readonly wait: { readonly boundMs: number; readonly pollMs: number };
+
+  /** Renews the lease while the copy is kept. */
+  private readonly heartbeat: LeaseHeartbeat;
+
+  /** The latest renewal: each waits for the one before, so two never race on the lease file. */
+  private renewal: Promise<unknown> = Promise.resolve();
 
   /**
    * @param transport - the scenario's site.
    * @param leaveOut - works out, when the copy is taken, what it leaves out — paths relative to the
    * content directory that the scenario's own teardowns remove.
-   * @param wait - how long {@link ContentCopy.putBack} waits for a restore still running on the site,
-   * and how often it looks.
+   * @param options - see {@link ContentCopyOptions}.
    */
   constructor(
     private readonly transport: Transport,
     private readonly leaveOut: () => Promise<readonly string[]>,
-    private readonly wait: {
-      readonly boundMs: number;
-      readonly pollMs: number;
-    } = {
-      boundMs: RESTORE_GONE_WAIT_MS,
-      pollMs: RESTORE_GONE_POLL_MS,
-    },
-  ) {}
+    options: ContentCopyOptions = {},
+  ) {
+    this.terms = { ttlS: LEASE_TTL_S, holder: options.holder ?? NO_HOLDER };
+    // Refused here, not at the first renewal, so a bad holder never reaches a site.
+    renewArgs(this.terms.ttlS, this.terms.holder);
+    this.wait = {
+      boundMs: options.boundMs ?? RESTORE_GONE_WAIT_MS,
+      pollMs: options.pollMs ?? RESTORE_GONE_POLL_MS,
+    };
+    this.heartbeat = new LeaseHeartbeat(
+      () => this.renewOutcome(),
+      (problem) => {
+        console.warn(
+          `[backwpup/content-copy] ${describeTarget(this.transport)}: could not renew the lease ` +
+            `on the copy of wp-content (${problem}); still trying. Past its lease a later run may ` +
+            "settle the copy — this run's own steps on it are then refused, never run over it.",
+        );
+      },
+      options.renewEveryMs,
+      options.every,
+    );
+  }
 
   /** Whether a copy is waiting to be put back. */
   get kept(): boolean {
@@ -892,11 +1017,14 @@ export class ContentCopy {
   }
 
   /**
-   * Takes the copy, once per scenario: the first is the state to return to.
+   * Takes the copy, once per scenario: the first is the state to return to. Then renews its lease
+   * until it is put back or given up.
    *
-   * @throws {@link Error} — and the command must then not run — if the host cannot elevate, a path is
-   * unsafe for root, an earlier run's copy is still there, the disk has no room, or the copy could not
-   * be taken whole.
+   * @throws {@link Error} — and the command must then not run — if the host cannot elevate or put a
+   * copy back, a path is unsafe for root, an earlier run's copy is still there, the disk has no room,
+   * no rename could swap `wp-content` back, or the copy could not be taken whole;
+   * {@link ProbeStrandedError} if the rename probe's directory is left in the copy's, however the
+   * check ended — the copy's directory then stays.
    */
   async keep(): Promise<void> {
     if (this.place !== undefined) return;
@@ -905,12 +1033,17 @@ export class ContentCopy {
     await this.assertRoom(place);
     const keptOut = await this.leaveOut();
     this.bootId = await currentBootId(this.transport);
-    // Made, tokened and stamped in one root command: a reboot cut it short leaves the directory
-    // empty, or holding a token alone — none to put back, which a later run removes.
-    const made = await inCopy(this.transport, place.dir, MAKE_STAMP_ARGV, {
-      mode: "make",
-      token: this.token,
-    });
+    // Made, tokened, stamped and leased in one root command: a reboot cut it short leaves the
+    // directory empty, or holding a token alone — none to put back, which a later run removes.
+    const made = await inCopy(
+      this.transport,
+      place.dir,
+      renewArgv(this.terms),
+      {
+        mode: "make",
+        token: this.token,
+      },
+    );
     if (made.exitCode !== 0) {
       // Removed without its token only where that very command's `mkdir` provably succeeded; any
       // other failure (`sudo` refusing, a missing shell, `mkdir` itself) may be another run's.
@@ -920,22 +1053,43 @@ export class ContentCopy {
           `for the copy (${inCopyProblem(made)}). The restore was not run.`,
       );
     }
-    try {
-      await this.copy(place, keptOut);
-    } catch (error) {
-      // Nothing has been rewritten yet, so a copy that failed is no leftover to settle.
-      await this.discard(place, this.token);
-      throw error;
-    }
+    // Renewed from here on: taking the copy itself may outlast a lease.
     this.place = place;
+    this.heartbeat.start();
+    try {
+      await this.assertSwappable(place);
+      await this.copy(place, keptOut);
+      this.fenceId = await this.identify(place);
+    } catch (error) {
+      await this.stopRenewing();
+      this.place = undefined;
+      // Nothing has been rewritten yet, so a copy that failed is no leftover to settle — unless the
+      // probe left the site's own tree in its directory. Told by what is there, not by how the check
+      // ended: one killed between its two exchanges (a signal, a dropped connection) leaves it too.
+      const entries = await copyEntries(this.transport, place.dir, this.token);
+      const probeLeft =
+        entries === undefined
+          ? error instanceof ProbeStrandedError
+          : entries.includes(RENAME_PROBE);
+      if (!probeLeft) {
+        await this.discard(place, this.token);
+        throw error;
+      }
+      const why =
+        error instanceof ProbeStrandedError
+          ? error.message
+          : `[backwpup/content-copy] ${describeTarget(this.transport)}: the copy of wp-content was ` +
+            `cut short (${errorMessage(error)}). The restore was not run.`;
+      throw new ProbeStrandedError(`${why} ${probeRecipe(place)}`);
+    }
   }
 
   /**
-   * Stamps the copy just before the command runs, so a reboot during it orphans the copy provably —
-   * then checks the host has not rebooted since the copy was taken: a reboot after the stamp would let
-   * the command, run on reconnecting, rewrite the site while another run settles the copy. This
-   * narrows that window to the moment between this check and the command; it cannot close it. Does
-   * nothing when no copy is kept.
+   * Stamps the copy and renews its lease just before the command runs, so a reboot during it orphans
+   * the copy provably — then checks the host has not rebooted since the copy was taken: a reboot after
+   * the stamp would let the command, run on reconnecting, rewrite the site while another run settles
+   * the copy. The command's own fence ({@link ContentCopy.fence}) then refuses it should the copy be
+   * settled meanwhile. Does nothing when no copy is kept.
    *
    * @throws {@link Error} if it could not stamp, or the host rebooted — the command must then not run,
    * and the copy stays for the put-back, or a run settling it.
@@ -943,7 +1097,7 @@ export class ContentCopy {
   async stamp(): Promise<void> {
     if (!this.kept || this.place === undefined) return;
     const target = describeTarget(this.transport);
-    const stamped = await stampCopy(this.transport, this.place.dir, this.token);
+    const stamped = await this.renew(this.terms);
     if (stamped.exitCode !== 0) {
       throw new Error(
         `[backwpup/content-copy] ${target}: could not stamp the copy of ` +
@@ -961,7 +1115,19 @@ export class ContentCopy {
   }
 
   /**
-   * Saves the database's defaults beside the copy, for a run settling it after a reboot to set back:
+   * WP-CLI's global arguments fencing the restore on this copy (`./content-copy-fence.ts`): it runs
+   * only while the copy is still at its path, the directory this run made. None when no copy is kept.
+   */
+  fence(): string[] {
+    if (!this.kept || this.place === undefined || this.fenceId === undefined) {
+      return [];
+    }
+    return fenceArgs(this.place.dir, this.fenceId);
+  }
+
+  /**
+   * Saves the database's defaults beside the copy, for a run settling it — after a reboot or a lapsed
+   * lease — to set back:
    * done before a restore that reaches the database too. Does nothing when no copy is kept.
    *
    * @param defaults - what they are before the command.
@@ -992,23 +1158,34 @@ export class ContentCopy {
 
   /**
    * Puts the copy back, then removes it — once no restore runs on the site any more: one a dropped
-   * connection left running would go on rewriting under the put-back. Does nothing when no copy was
-   * taken, or it is back already.
+   * connection left running would go on rewriting under the put-back. Stops renewing the lease first;
+   * the put-back renews it once more, then expires it. Does nothing when no copy was taken, or it is
+   * back already.
    *
    * @throws {@link Error} if a restore still runs past the bound, or it could not be told, or the copy
-   * could not be put back — the copy is then **kept**, and the message says how to put it back by
-   * hand; or if the copy is no longer this run's (another run settled it after a reboot).
+   * could not be put back — the copy is then **kept**, its lease expired so a later run may settle it
+   * once no process uses it, and the message says how to put it back by hand; or if the copy is no
+   * longer this run's (another run claimed it, after a reboot or past its lease).
    */
   async putBack(): Promise<void> {
     const place = this.place;
     if (place === undefined || this.restored) return;
-    await this.awaitNoUsers(place);
+    // First: a renewal is itself a use of the copy, which the wait below would count.
+    await this.stopRenewing();
     try {
-      await putBackCopy(this.transport, place, this.token);
+      await this.awaitNoUsers(place);
+    } catch (error) {
+      await this.abandon();
+      throw error;
+    }
+    try {
+      await putBackCopy(this.transport, place, this.terms, this.token);
     } catch (error) {
       // Not this run's any more: nothing of it to keep.
       if (error instanceof CopyNotThisRunsError) {
         this.restored = true;
+      } else {
+        await this.expireLease(place);
       }
       throw error;
     }
@@ -1017,8 +1194,101 @@ export class ContentCopy {
   }
 
   /**
+   * Gives the copy up without putting it back — its restore never ended, or the put-back cannot wait
+   * for it: stops renewing and expires the lease, so a later run settles the copy once no process
+   * uses it instead of waiting out the lease. The copy stays. Does nothing when none is kept.
+   */
+  async abandon(): Promise<void> {
+    const place = this.place;
+    if (place === undefined || this.restored) return;
+    await this.stopRenewing();
+    await this.expireLease(place);
+  }
+
+  /** Stops the heartbeat, then waits for any renewal in flight. */
+  private async stopRenewing(): Promise<void> {
+    await this.heartbeat.stop();
+    await this.renewal;
+  }
+
+  /**
+   * Expires the lease, best-effort: a failure is warned about — the lease then lapses by itself.
+   *
+   * @param place - where the copy is.
+   */
+  private async expireLease(place: CopyPlace): Promise<void> {
+    try {
+      const expired = await this.renew({ ttlS: 0, holder: this.terms.holder });
+      if (expired.exitCode === 0 || copyIsGone(expired)) return;
+      console.warn(
+        `[backwpup/content-copy] ${describeTarget(this.transport)}: could not expire the lease on ` +
+          `the copy in ${place.dir} (${inCopyProblem(expired)}); it lapses by itself within ` +
+          `${String(LEASE_TTL_S / 60)} min.`,
+      );
+    } catch (error) {
+      console.warn(
+        `[backwpup/content-copy] ${describeTarget(this.transport)}: could not expire the lease on ` +
+          `the copy in ${place.dir} (${errorMessage(error)}); it lapses by itself within ` +
+          `${String(LEASE_TTL_S / 60)} min.`,
+      );
+    }
+  }
+
+  /**
+   * Stamps the copy and writes its lease on `terms`, after any renewal still in flight.
+   *
+   * @param terms - the ttl and holder to write.
+   * @returns the root command's result.
+   */
+  private renew(terms: LeaseTerms): Promise<ExecResult> {
+    const place = this.place;
+    if (place === undefined) {
+      return Promise.reject(
+        new Error("[backwpup/content-copy] no copy is kept"),
+      );
+    }
+    const next = this.renewal.then(() =>
+      stampCopy(this.transport, place.dir, terms, this.token),
+    );
+    this.renewal = next.catch(() => undefined);
+    return next;
+  }
+
+  /**
+   * One heartbeat renewal, as the heartbeat reads it: `gone` — it stops — only when the copy holds
+   * another run's token. Nothing at its path is a failure, still tried: a run settling it claims it
+   * by renaming it, and hands it back, still this run's, when it may not settle it.
+   */
+  private async renewOutcome(): Promise<RenewOutcome> {
+    const renewed = await this.renew(this.terms);
+    if (renewed.exitCode === 0) return "renewed";
+    if (renewed.exitCode === NOT_THIS_RUNS_COPY) return "gone";
+    return { failed: inCopyProblem(renewed) };
+  }
+
+  /**
+   * The copy directory's `dev:ino`, read as root inside it — what the restore's fence checks.
+   *
+   * @param place - where the copy is.
+   * @throws {@link Error} if it cannot be read; the restore is then not run.
+   */
+  private async identify(place: CopyPlace): Promise<string> {
+    const read = await readDirIdentity(this.transport, place.dir, this.token);
+    const id = read.exitCode === 0 ? parseDirIdentity(read.stdout) : undefined;
+    if (id === undefined) {
+      throw new Error(
+        `[backwpup/content-copy] ${describeTarget(this.transport)}: could not identify the copy's ` +
+          `directory ${place.dir} (${inCopyProblem(read)}), so the restore could not be fenced on it. ` +
+          "The restore was not run.",
+      );
+    }
+    return id;
+  }
+
+  /**
    * Waits, polling, while any process may use the site's copies or a restore runs in its root.
    *
+   * @param place - where the copy is.
    * @throws {@link Error} keeping the copy, past the bound or when it cannot be told.
    */
   private async awaitNoUsers(place: CopyPlace): Promise<void> {
@@ -1043,7 +1313,11 @@ export class ContentCopy {
 
   /**
    * Refuses what root must not act on: a host that cannot elevate, a path that leaves the site, a
-   * content or copy directory that is a link, and a copy an earlier run left.
+   * content or copy directory that is a link, a host the copy could not go back on
+   * ({@link HOST_CHECK_SCRIPT}), and a copy an earlier run left.
+   *
+   * @param place - where the copy goes.
+   * @throws {@link Error} naming what was refused; the restore is then not run.
    */
   private async assertUsable(place: CopyPlace): Promise<void> {
     const target = describeTarget(this.transport);
@@ -1065,6 +1339,15 @@ export class ContentCopy {
       [place.content, place.dir],
       describe,
     );
+    const host = await execElevated(this.transport, "sh", [
+      "-c",
+      HOST_CHECK_SCRIPT,
+      "sh",
+      place.root,
+    ]);
+    if (host.exitCode !== 0) {
+      throw new Error(describe(hostCheckProblem(host)));
+    }
     const [leftover] = await findLeftovers(this.transport, place.root);
     if (leftover !== undefined) {
       throw new Error(
@@ -1074,8 +1357,50 @@ export class ContentCopy {
   }
 
   /**
-   * Refuses a copy the disk has no room for: what the content directory holds, plus headroom.
+   * Refuses a site whose `wp-content` no rename could swap back ({@link MOUNT_CHECK_PERL}, probing
+   * an overlay filesystem), run as root in the copy's directory just made.
    *
+   * @param place - where the copy goes.
+   * @throws {@link Error} if a mount is at or under `wp-content`, it cannot be renamed, or that cannot
+   * be told; {@link ProbeStrandedError} if the probe could not exchange it back.
+   */
+  private async assertSwappable(place: CopyPlace): Promise<void> {
+    const checked = await inCopy(
+      this.transport,
+      place.dir,
+      [
+        "perl",
+        "-e",
+        MOUNT_CHECK_PERL,
+        "--",
+        place.root,
+        MOUNTINFO_PATH,
+        "probe",
+        RENAME_PROBE,
+      ],
+      { token: this.token },
+    );
+    if (checked.exitCode === 0) return;
+    const target = describeTarget(this.transport);
+    if (checked.exitCode === PROBE_STRANDED) {
+      // `keep` adds the way back, once it has looked at what the directory holds.
+      throw new ProbeStrandedError(
+        `[backwpup/content-copy] ${target}: checking wp-content could be renamed, its tree was ` +
+          `exchanged with an empty directory and could not be exchanged back ` +
+          `(${inCopyProblem(checked)}). The restore was not run.`,
+      );
+    }
+    throw new Error(
+      `[backwpup/content-copy] ${target}: refusing to copy wp-content as root — ${swapProblem(checked)}. ` +
+        "The restore was not run.",
+    );
+  }
+
+  /**
+   * Refuses a copy the disk has no room for: what the content directory holds twice — the copy, then
+   * the tree its put-back extracts beside the site's — plus headroom.
+   *
+   * @param place - where the copy goes.
    * @throws {@link Error} naming both sizes, or saying they could not be told.
    */
   private async assertRoom(place: CopyPlace): Promise<void> {
@@ -1092,18 +1417,46 @@ export class ContentCopy {
           "The restore was not run.",
       );
     }
-    if (room.freeKb < room.usedKb + COPY_HEADROOM_KB) {
+    if (room.freeKb < 2 * room.usedKb + COPY_HEADROOM_KB) {
       throw new Error(
-        `[backwpup/content-copy] ${target}: a copy of wp-content needs about ` +
-          `${String(Math.ceil(room.usedKb / 1024))} MB and 1 GB to spare, but only ` +
-          `${String(Math.floor(room.freeKb / 1024))} MB are free. The restore was not run.`,
+        `[backwpup/content-copy] ${target}: a copy of wp-content, and the tree its put-back ` +
+          `extracts beside the site's, need about ${String(Math.ceil((2 * room.usedKb) / 1024))} MB ` +
+          `and 1 GB to spare, but only ${String(Math.floor(room.freeKb / 1024))} MB are free. The ` +
+          "restore was not run.",
       );
     }
   }
 
   /**
+   * Refuses a whole copy whose put-back would find no room for its second tree
+   * ({@link ROOM_CHECK_SCRIPT}, measured as the put-back measures): a tree of small files takes up to
+   * twice its archive, which the size checked before the copy cannot tell.
+   *
+   * @param place - where the copy is.
+   * @throws {@link Error} naming what is short; the restore is then not run.
+   */
+  private async assertPutBackRoom(place: CopyPlace): Promise<void> {
+    const checked = await inCopy(
+      this.transport,
+      place.dir,
+      ["sh", "-c", ROOM_CHECK_SCRIPT, "sh", String(COPY_HEADROOM_KB)],
+      { token: this.token },
+    );
+    if (checked.exitCode === 0) return;
+    throw new Error(
+      `[backwpup/content-copy] ${describeTarget(this.transport)}: the copy of wp-content is taken, ` +
+        `but its put-back would find no room for the tree it extracts beside the site's ` +
+        `(${inCopyProblem(checked)}). The restore was not run.`,
+    );
+  }
+
+  /**
    * Takes the copy, proves it reads back whole — a `tar` that exited 1 for a reason it should not
    * have, `sudo` refusing it included, leaves no archive or a short one — then seals it.
+   *
+   * @param place - where the copy goes.
+   * @param keptOut - paths relative to the content directory left out of it.
+   * @throws {@link Error} naming the step that failed; the restore is then not run.
    */
   private async copy(
     place: CopyPlace,
@@ -1142,12 +1495,14 @@ export class ContentCopy {
       );
     }
     await this.seal(place);
+    await this.assertPutBackRoom(place);
   }
 
   /**
    * Names the copy whole ({@link CONTENT_COPY_FILE}) once it is on disk — its data, then the rename —
    * so a crash cannot leave that name on a copy whose data never reached the disk.
    *
+   * @param place - where the copy is.
    * @throws {@link Error} naming the step that failed; the restore is then not run.
    */
   private async seal(place: CopyPlace): Promise<void> {
@@ -1172,6 +1527,7 @@ export class ContentCopy {
    * Removes a copy that failed, logging — never throwing over — a removal that failed too, so the
    * copy's own failure is the one reported.
    *
+   * @param place - where the copy is.
    * @param token - this run's token, once written; none before.
    */
   private async discard(place: CopyPlace, token?: string): Promise<void> {
@@ -1180,7 +1536,7 @@ export class ContentCopy {
     } catch (error) {
       console.warn(
         `[backwpup/content-copy] ${describeTarget(this.transport)}: could not remove the failed copy ` +
-          `in ${place.dir} (${errorMessage(error)}); remove it by hand: \`sudo rm -r ${place.dir}\`.`,
+          `in ${place.dir} (${errorMessage(error)}); ${removeByHand(place, undefined)}`,
       );
     }
   }

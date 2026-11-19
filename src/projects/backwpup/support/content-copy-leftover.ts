@@ -15,6 +15,7 @@ import { maskSiteUrl } from "../../../common/text";
 import {
   BOOT_ID_PATH,
   CONTENT_COPY_DB_DEFAULTS,
+  DEFAULT_LEASE,
   CONTENT_COPY_FILE,
   CONTENT_COPY_STAMP,
   RECOVERING_PREFIX,
@@ -31,14 +32,21 @@ import {
   parseBootId,
   putBackCopy,
   readBack,
+  readDirIdentity,
   readsBackWhole,
   stampCopy,
 } from "./content-copy";
+import { parseDirIdentity } from "./content-copy-fence";
 import {
   parseDatabaseDefaults,
   restoreDatabaseDefaults,
 } from "./database-defaults";
-import type { CopyPlace } from "./content-copy";
+import {
+  CONTENT_COPY_LEASE,
+  UPTIME_PATH,
+  judgeLease,
+} from "./content-copy-lease";
+import type { CopyPlace, LeaseTerms } from "./content-copy";
 import type { DatabaseDefaults } from "./database-defaults";
 import type { SiteConfig, Transport } from "../../../common/config/types";
 
@@ -48,37 +56,41 @@ import type { SiteConfig, Transport } from "../../../common/config/types";
  * be damaged and the copy may be the only way back — unless it is provably orphaned, when it is
  * settled and the run goes on.
  *
- * **A whole copy is orphaned when stamped by another boot of the host, and no process uses it.**
- * Every use of a copy is stamped with the boot id just before it ({@link CONTENT_COPY_STAMP}); a stamp
- * from another boot means every use so far ran under a kernel since gone. A use that could start
- * after the reboot from an older stamp — a runner on another machine reconnecting, or the replacement
- * of a worker whose teardown was abandoned — is caught by the second half: no process whose argv names
- * a copy of this site or that works in one, and no `wp backwpup restore` running in its WordPress root
- * (`IN_USE_SCRIPT`); checked before the claim and again after it. That narrows the window, it does
- * not close it: a use starting between the second check and the put-back is not seen — and the run
- * that made the copy refuses its own command if the host rebooted after the copy was taken, checked
- * just before the command, which narrows the reboot-after-stamp window the same way. No stamp (a copy
- * an older suite took), an unreadable one, or this boot's → refused: a live run may be between its
- * stamp and its command. Rejected: wall-clock times (a stepped clock moves `btime`; a sleeping runner wakes up) and
- * an age limit.
+ * **A whole copy is orphaned when no run may still use it, and no process uses it.** No run may when
+ * it is stamped by another boot of the host ({@link CONTENT_COPY_STAMP}: every use is stamped just
+ * before it, so every use so far ran under a kernel since gone), or — stamped in this boot — when its
+ * lease lapsed (`./content-copy-lease.ts`: expired on the host's boot-time clock, given up by its run,
+ * or held by this invocation's own worker slot, which proves that worker gone). No stamp, an unreadable one,
+ * no lease (an older suite's copy) or a live one → refused. Wall-clock times and age limits were
+ * rejected: a stepped clock moves them, and a runner on another machine keeps its own.
  *
- * **A copy holding none to put back is removed whenever no process uses it**, whatever its boot: no
- * restore ran from it, or it is back already, so it protects nothing — and a removal cut short (files
- * gone, directory left, stamp included) must not leave the site refused for good. A live run whose
- * copy this is fails safe at its next step: the in-copy script finds the directory gone (its copy or
- * seal fails, and the restore never runs), or its put-back had already succeeded.
+ * **No process uses it** — none whose argv names a copy of this site or that works in one, and no
+ * `wp backwpup restore` running in its WordPress root (`IN_USE_SCRIPT`) — checked before the claim and
+ * again after it. Even a lapsed lease may belong to a live run (asleep, cut off): it is fenced, not
+ * trusted — its root commands find the copy gone, and its restore refuses to start (its fence checks
+ * the copy's directory is still at its path) — so a recovery only ever settles a copy no step of that
+ * run can touch any more. The run that made the copy also refuses its own command if the host
+ * rebooted after the copy was taken.
+ *
+ * **A copy holding none to put back is removed whenever no process uses it**, whatever its boot or
+ * lease: no restore ran from it, or it is back already, so it protects nothing — and a removal cut
+ * short (files gone, directory left, stamp included) must not leave the site refused. A live run
+ * whose copy this is fails safe at its next step: the in-copy script finds the directory gone (its
+ * copy or seal fails, and the restore never runs), or its put-back had already succeeded.
  *
  * **Inspected read-only first**; claimed only to act: an elevated `mv -T` to a unique sibling
  * ({@link RECOVERING_PREFIX}) — atomic, so of two runs one wins and the other finds the source gone
- * and looks again — then judged again, checked for users again, and stamped, so another run reads it
- * as in use. A recovery cut off by a reboot leaves a claimed copy stamped by that boot, settled the
+ * and looks again — then judged again, checked for users again, and stamped with a lease of the
+ * settling run's own, so another run reads it as in use. Refused at any of these (its run renewed it
+ * from inside meanwhile, say), it is handed back to its path when nothing took that since, so a run
+ * still using it carries on. A recovery cut off leaves a claimed copy whose lease lapses, settled the
  * same way later.
  *
- * **Settled by what it holds** ({@link heldCopy}): the whole copy put back if it reads back, then
- * removed — and, when its restore reached the database too, the database's defaults saved beside it
- * set back, the operator told the database may be partly restored; none to put back — nothing, the
- * partial copy (the command runs only once the copy is whole), or the one already back — removed;
- * anything else refused.
+ * **Settled by what it holds** ({@link heldCopy}): the whole copy put back if it reads back — the same
+ * swap a run's own put-back makes, safe on a live site — then removed, and, when its restore reached
+ * the database too, the database's defaults saved beside it set back, the operator told the database
+ * may be partly restored; none to put back — nothing, the partial copy (the command runs only once the
+ * copy is whole), or the one already back — removed; anything else refused.
  *
  * Root acts only inside the directory it proved is the copy's (`IN_COPY_SCRIPT`), so swapping it for
  * a link after a check cannot redirect root. Not covered: the WordPress root itself swapped, by
@@ -108,12 +120,16 @@ interface SettleSite {
   /** The WordPress root's absolute path. */
   readonly root: string;
   readonly setDefaults: SetDatabaseDefaults;
+  /** The lease a settling run stamps a claimed copy with: its own holder. */
+  readonly terms: LeaseTerms;
+  /** The asking worker's holder, when it is one: its own leftover is settled at once. */
+  readonly self: string | undefined;
 }
 
 /** What a leftover calls for. */
 export type Verdict =
-  | { readonly action: "put-back" | "discard" }
-  | { readonly action: "refuse"; readonly why: string };
+  | { readonly action: "discard" }
+  | { readonly action: "put-back" | "refuse"; readonly why: string };
 
 /** What is known about a leftover, read without changing it. */
 export interface LeftoverFacts {
@@ -123,16 +139,21 @@ export interface LeftoverFacts {
   readonly stamp: string | undefined;
   /** The host's current boot id, as read, or `undefined` when it could not be. */
   readonly bootId: string | undefined;
+  /** Its lease's contents, or `undefined` when there is none or it could not be read. */
+  readonly lease?: string | undefined;
+  /** `/proc/uptime` as read after the lease, or `undefined` when it could not be. */
+  readonly uptime?: string | undefined;
 }
 
 /**
  * What a leftover calls for: one holding none to put back is removed; a whole copy is put back only
- * when its stamp is provably another boot's; anything else is refused. Whether a process uses it is
- * asked separately, for both.
+ * when its stamp is another boot's, or this boot's with its lease lapsed; anything else is refused.
+ * Whether a process uses it is asked separately, for both.
  *
  * @param facts - what was read.
+ * @param self - the asking worker's lease holder, if it is one.
  */
-export function judgeLeftover(facts: LeftoverFacts): Verdict {
+export function judgeLeftover(facts: LeftoverFacts, self?: string): Verdict {
   const { entries } = facts;
   if (entries === undefined) {
     return { action: "refuse", why: "what it holds could not be read" };
@@ -155,13 +176,18 @@ export function judgeLeftover(facts: LeftoverFacts): Verdict {
   if (bootId === undefined) {
     return { action: "refuse", why: "the host's boot id could not be read" };
   }
-  if (stamp === bootId) {
+  if (stamp !== bootId) {
     return {
-      action: "refuse",
-      why: "it was used since the host last booted, so a run may still be using it",
+      action: "put-back",
+      why: "an earlier boot of the host stamped its last use",
     };
   }
-  return { action: "put-back" };
+  const lease = judgeLease(facts.lease, bootId, facts.uptime, self);
+  if (lease.state === "lapsed") return { action: "put-back", why: lease.why };
+  return {
+    action: "refuse",
+    why: `it was used since the host last booted, so a run may still be using it: ${lease.why}`,
+  };
 }
 
 /**
@@ -174,11 +200,14 @@ export function judgeLeftover(facts: LeftoverFacts): Verdict {
  *
  * @param site - the site, or `undefined` when the project has none.
  * @param setDefaults - sets the database's defaults back after a put-back; the real one by default.
+ * @param holder - the asking worker's lease holder (`holderFor`): it settles its own worker slot's
+ * copy at once, and stamps any copy it claims with it. None outside a worker.
  * @throws {@link Error} naming the copy and how to settle it, when one is there and was not settled.
  */
 export async function assertNoContentCopyLeft(
   site: Pick<SiteConfig, "baseURL" | "transport"> | undefined,
   setDefaults: SetDatabaseDefaults = restoreDatabaseDefaults,
+  holder?: string,
 ): Promise<void> {
   if (site === undefined || isPlaceholderSite(site)) return;
   const { transport } = site;
@@ -198,7 +227,13 @@ export async function assertNoContentCopyLeft(
     const [dir, ...more] = found;
     if (dir === undefined) return;
     const outcome = await settleLeftover(
-      { transport, root, setDefaults },
+      {
+        transport,
+        root,
+        setDefaults,
+        terms: { ...DEFAULT_LEASE, holder: holder ?? DEFAULT_LEASE.holder },
+        self: holder,
+      },
       dir,
       more,
     );
@@ -257,7 +292,7 @@ async function settleLeftover(
   await assertRootMayActOn(transport, root, [place.content, dir], describe);
 
   const facts = await inspect(transport, dir);
-  const verdict = judgeLeftover(facts);
+  const verdict = judgeLeftover(facts, site.self);
   if (verdict.action === "refuse")
     throw refuse(place, verdict.why, facts.entries);
   await assertUnused(transport, root, (why) =>
@@ -288,39 +323,48 @@ async function settleLeftover(
     );
   }
 
-  // Between the look and the claim, it may have changed or a use begun: the same checks, on what
-  // was claimed — then stamped, so any other run reads it as in use.
+  // Between the look and the claim, it may have changed or a use begun — its run renewing it from
+  // inside, say: the same checks, on what was claimed — then stamped and leased as this run's, so any
+  // other run reads it as in use. Refused, it is handed back to its path, so a run still using it
+  // carries on.
   const again = await inspect(transport, claimed.dir);
-  const reverdict = judgeLeftover(again);
+  const reverdict = judgeLeftover(again, site.self);
+  const handBack = async (why: string): Promise<Error> => {
+    const where = await returnClaim(transport, claimed.dir, dir);
+    if (where === "moved") {
+      return new Error(
+        `[backwpup/content-copy] ${target}: a copy of wp-content an earlier run left, claimed from ` +
+          `${dir} to be settled as ${claimed.dir}, was refused (${why}) and has since moved on: ` +
+          "another run claimed it, and settles it or says why it cannot. BackWPup runs refuse this " +
+          "site until it is settled.",
+      );
+    }
+    return refuse(where === "back" ? place : claimed, why, again.entries);
+  };
   if (reverdict.action !== verdict.action) {
-    throw refuse(
-      claimed,
+    throw await handBack(
       reverdict.action === "refuse"
         ? reverdict.why
         : "it changed while it was claimed",
-      again.entries,
     );
   }
-  await assertUnused(transport, root, (why) =>
-    refuse(claimed, why, again.entries),
-  );
-  const stamped = await stampCopy(transport, claimed.dir);
+  const users = await copyUsers(transport, root);
+  const busy = usersProblem(users);
+  if (busy !== undefined) throw await handBack(busy);
+  const stamped = await stampCopy(transport, claimed.dir, site.terms);
   if (stamped.exitCode !== 0) {
-    throw refuse(
-      claimed,
-      `it could not be stamped (${inCopyProblem(stamped)})`,
-      again.entries,
-    );
+    throw await handBack(`it could not be stamped (${inCopyProblem(stamped)})`);
   }
-  await (verdict.action === "put-back"
-    ? putBackClaimed(site, claimed, again.entries ?? [])
+  await (reverdict.action === "put-back"
+    ? putBackClaimed(site, claimed, again.entries ?? [], reverdict.why)
     : discardClaimed(transport, claimed, again.entries ?? []));
   return "settled";
 }
 
 /**
- * Reads, as root and changing nothing, what a leftover holds, its stamp and the current boot id.
- * Anything unreadable is `undefined`, which {@link judgeLeftover} refuses.
+ * Reads, as root and changing nothing, what a leftover holds, its stamp and lease — then the current
+ * boot id and the host's clock, read after the lease so the clock is never older than it. Anything
+ * unreadable is `undefined`, which {@link judgeLeftover} refuses.
  *
  * @param transport - the site.
  * @param dir - the copy's directory.
@@ -334,16 +378,21 @@ async function inspect(
     listed.exitCode === 0
       ? listed.stdout.split("\n").filter((name) => name !== "")
       : undefined;
-  const stamp =
-    entries?.includes(CONTENT_COPY_STAMP) === true
-      ? await inCopy(transport, dir, ["cat", "--", CONTENT_COPY_STAMP])
-      : undefined;
-  const boot = await exec(transport, "cat", [BOOT_ID_PATH]);
-  return {
-    entries,
-    stamp: stamp?.exitCode === 0 ? stamp.stdout : undefined,
-    bootId: boot.exitCode === 0 ? boot.stdout : undefined,
+  const note = async (name: string): Promise<string | undefined> => {
+    if (entries?.includes(name) !== true) return undefined;
+    const read = await inCopy(transport, dir, ["cat", "--", name]);
+    return read.exitCode === 0 ? read.stdout : undefined;
   };
+  // Each host file read on its own, so one that cannot be read is never blamed on the other.
+  const hostFile = async (path: string): Promise<string | undefined> => {
+    const read = await exec(transport, "cat", [path]);
+    return read.exitCode === 0 ? read.stdout : undefined;
+  };
+  const stamp = await note(CONTENT_COPY_STAMP);
+  const lease = await note(CONTENT_COPY_LEASE);
+  const bootId = await hostFile(BOOT_ID_PATH);
+  const uptime = await hostFile(UPTIME_PATH);
+  return { entries, stamp, bootId, lease, uptime };
 }
 
 /**
@@ -359,15 +408,67 @@ async function assertUnused(
   root: string,
   refuse: (why: string) => Error,
 ): Promise<void> {
-  const users = await copyUsers(transport, root);
+  const busy = usersProblem(await copyUsers(transport, root));
+  if (busy !== undefined) throw refuse(busy);
+}
+
+/**
+ * Why the copy may not be settled, from its users ({@link copyUsers}).
+ *
+ * @param users - their `pid program` lines, or `undefined` when they could not be told.
+ * @returns `undefined` when none uses it.
+ */
+export function usersProblem(
+  users: readonly string[] | undefined,
+): string | undefined {
   if (users === undefined) {
-    throw refuse("whether a process still uses it could not be checked");
+    return "whether a process still uses it could not be checked";
   }
   const [first] = users;
-  if (first !== undefined) {
-    throw refuse(
-      `a process still uses it (${String(users.length)}; first: ${first})`,
-    );
+  return first === undefined
+    ? undefined
+    : `a process still uses it (${String(users.length)}; first: ${first})`;
+}
+
+/** Where a claimed copy is once handed back ({@link returnClaim}): unknown when `moved`. */
+type HandedBack = "back" | "claimed" | "moved";
+
+/**
+ * Hands a claimed copy back to its path, when nothing took that path since: `mv -T -n` never replaces
+ * what is there. Back only when the directory then at the path is the one claimed (its `dev:ino`,
+ * read as root inside each); still claimed when the claimed name is there; else moved on — another
+ * run claimed it meanwhile, so neither path holds it. A claimed name swapped for a link, or one whose
+ * identity cannot be read, stays where it is: no link, nor anything unproved, is moved to the path.
+ *
+ * @param transport - the site.
+ * @param claimed - the claimed directory.
+ * @param dir - the path it was claimed from.
+ * @returns where the copy is.
+ */
+async function returnClaim(
+  transport: Transport,
+  claimed: string,
+  dir: string,
+): Promise<HandedBack> {
+  const identity = async (path: string): Promise<string | undefined> => {
+    const read = await readDirIdentity(transport, path);
+    return read.exitCode === 0 ? parseDirIdentity(read.stdout) : undefined;
+  };
+  const stillClaimed = async (): Promise<HandedBack> =>
+    (await exec(transport, "test", ["-e", claimed])).exitCode === 0
+      ? "claimed"
+      : "moved";
+  try {
+    if ((await exec(transport, "test", ["-L", claimed])).exitCode === 0) {
+      return "claimed";
+    }
+    const was = await identity(claimed);
+    if (was === undefined) return await stillClaimed();
+    await execElevated(transport, "mv", ["-T", "-n", "--", claimed, dir]);
+    if ((await identity(dir)) === was) return "back";
+    return await stillClaimed();
+  } catch {
+    return "claimed";
   }
 }
 
@@ -378,30 +479,44 @@ async function assertUnused(
  * @param site - the site, its WordPress root, and how to set its database's defaults back.
  * @param claimed - where the claimed copy is.
  * @param entries - what it holds.
- * @throws {@link Error} — the copy then kept — if it does not read back or could not be put back.
+ * @param why - why it is orphaned, for the warning.
+ * @throws {@link Error} — the copy then kept, its lease expired — if it does not read back or could
+ * not be put back.
  */
 async function putBackClaimed(
   site: SettleSite,
   claimed: CopyPlace,
   entries: readonly string[],
+  why: string,
 ): Promise<void> {
   const { transport } = site;
   const target = describeTarget(transport);
-  const read = await readBack(transport, claimed.dir, CONTENT_COPY_FILE);
-  if (!readsBackWhole(read)) {
-    throw new Error(
-      `${leftoverMessage(target, claimed, [CONTENT_COPY_FILE])} Left: it does not read back ` +
-        `(${inCopyProblem(read)}), so it was not put back.`,
+  let defaults: DatabaseDefaults | string | undefined;
+  try {
+    const read = await readBack(transport, claimed.dir, CONTENT_COPY_FILE);
+    if (!readsBackWhole(read)) {
+      throw new Error(
+        `${leftoverMessage(target, claimed, [CONTENT_COPY_FILE])} Left: it does not read back ` +
+          `(${inCopyProblem(read)}), so it was not put back.`,
+      );
+    }
+    defaults = entries.includes(CONTENT_COPY_DB_DEFAULTS)
+      ? await savedDefaults(transport, claimed.dir)
+      : undefined;
+    await putBackCopy(transport, claimed, site.terms);
+  } catch (error) {
+    // Given up: expired, so the next run tries again once nothing uses it, not after the lease —
+    // best-effort, never masking why it failed (unexpired, the lease lapses by itself).
+    await stampCopy(transport, claimed.dir, { ...site.terms, ttlS: 0 }).catch(
+      () => undefined,
     );
+    throw error;
   }
-  const defaults = entries.includes(CONTENT_COPY_DB_DEFAULTS)
-    ? await savedDefaults(transport, claimed.dir)
-    : undefined;
-  await putBackCopy(transport, claimed);
   const removed = await discardCopy(transport, claimed);
   console.warn(
-    `[backwpup/content-copy] ${target}: put back a copy of wp-content an earlier boot of the host ` +
-      `orphaned${removed ? ", then removed it" : ""} (${claimed.dir}).` +
+    `[backwpup/content-copy] ${target}: put back a copy of wp-content an earlier run left ` +
+      `orphaned (${why}; no process used it)${removed ? ", then removed it" : ""}: ` +
+      `${claimed.dir}.` +
       (defaults === undefined
         ? ""
         : ` ${await setDefaultsBack(site, defaults)}`),

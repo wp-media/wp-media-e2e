@@ -192,9 +192,18 @@ Limits:
   and the owner is by then known not to be us), yet decides before probing and skips both when the
   transport user already owns the install or the site is in the `site` identity state ([File ownership](#file-ownership-wpownershipts)). BackWPup's guard around `wp backwpup restore` (`support/content-copy.ts`) copies `wp-content` and
   puts it back as root from the start (only root reads every file and restores every owner), refusing
-  to run the command where it cannot; so does settling a copy a reboot orphaned
+  to run the command where it cannot; so does settling an orphaned copy
   (`support/content-copy-leftover.ts`). Root acts on the copy only inside its directory, once proved
-  root's, not a link and — for the run that made it — still holding its token (`IN_COPY_SCRIPT`).
+  root's, not a link and — for the run that made it — still holding its token (`IN_COPY_SCRIPT`). It
+  never extracts over the live `wp-content` (a web request writing into it fails that, `Directory not
+  empty`): it extracts into a root-only scratch beside it, compares, and swaps by rename
+  (`support/content-copy-scripts.ts`: `PUT_BACK_SCRIPT`, `SWAP_PERL`; `MOUNT_CHECK_PERL` refuses a
+  mount at or under `wp-content`, which the swap would move or the removal of the scratch empty, and
+  probes overlayfs by an atomic exchange — a copy whose directory still holds the probe's, however
+  the probe ended, is kept, never removed: it may hold the site's tree, and the message says how to
+  exchange it back; scratch removals keep to one filesystem); a lease on the
+  host's boot-time clock (`support/content-copy-lease.ts`)
+  and a fence on the restore (`support/content-copy-fence.ts`) let a same-boot leftover be settled.
 - **In the `site` state "as themselves" is the web server's identity**, which owns what the suite and
   the plugin write: ownership, residue removal, data directories and `debug.log` run no root command
   there unless the identity is refused (a survivor another user left), then only for that

@@ -358,15 +358,20 @@ export class CliSession {
    * @param args - the subcommand and its arguments, e.g. `["job", "--format=count"]`.
    * @param budgetMs - how long the command may take, for one that blocks on something else — as
    * `status` does on a running job. Omit for a command that simply answers.
+   * @param globals - WP-CLI global arguments the suite adds (a restore's fence), never the scenario.
    * @returns the outcome, whatever it was — a refusal is a result here, never a throw.
    * @throws {@link Error} if the command could not be run, or was still running when its budget ran
    * out — it is then left to finish on the site. Either way the previous result is already
    * forgotten, so no assertion can judge an earlier command in place of the one that never answered.
    */
-  async run(args: readonly string[], budgetMs?: number): Promise<CliResult> {
+  async run(
+    args: readonly string[],
+    budgetMs?: number,
+    globals: readonly string[] = [],
+  ): Promise<CliResult> {
     this.result = undefined;
     this.started = true;
-    const pending = backwpupCli(this.site, args);
+    const pending = backwpupCli(this.site, args, globals);
     const result =
       budgetMs === undefined
         ? await pending

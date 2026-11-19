@@ -116,8 +116,8 @@ export const backwpup: ProductConfig = {
   // A backup job runs in a web request of its own, so one a scenario left running would otherwise
   // outlive the plugin's removal.
   stopRunningWork: stopRunningJobs,
-  // A restore's copy of wp-content a reboot orphaned, settled before the preflight's gates: the
-  // damage it may undo can stop WordPress booting.
+  // A restore's copy of wp-content a reboot or a lapsed lease orphaned, settled before the
+  // preflight's gates: the damage it may undo can stop WordPress booting.
   settleLeftovers: assertNoContentCopyLeft,
   services,
 };

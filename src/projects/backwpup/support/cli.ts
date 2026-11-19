@@ -151,6 +151,8 @@ export function backwpupArgv(args: readonly string[]): readonly string[] {
  *
  * @param transport - the site to run on.
  * @param args - the subcommand and its arguments, e.g. `["job", "--format=count"]`.
+ * @param globals - WP-CLI global arguments the suite adds before them (a restore's fence), kept out
+ * of the result's `argv`, which messages name the command by.
  * @returns the outcome, whatever it was — a non-zero exit is returned, never thrown.
  * @throws {@link Error} only if the command could not be run at all (the transport failed), which
  * `common/wp/exec.ts` distinguishes from a command that ran and refused.
@@ -158,9 +160,10 @@ export function backwpupArgv(args: readonly string[]): readonly string[] {
 export async function backwpupCli(
   transport: Transport,
   args: readonly string[],
+  globals: readonly string[] = [],
 ): Promise<CliResult> {
   const argv = backwpupArgv(args);
-  const result = await wpCli(transport, [...argv]);
+  const result = await wpCli(transport, [...globals, ...argv]);
   return {
     ...result,
     argv,
