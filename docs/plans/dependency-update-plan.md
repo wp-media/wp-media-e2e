@@ -297,6 +297,83 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
   - **Gates:** green; unit 6625 passed (+5 `devices.spec.ts`), 134 skipped; every `*.run.spec.ts` on Chromium 159. Smoke (`@noauth`, every cell): BackWPup 4/4, WP Rocket 6/6.
   - **Live** (Chromium 159 rev 1255): BackWPup pro@nginx 70/70 (52.0 min), free@nginx 53/53 (33.9 min), concurrent on RemoteDesktopQA, as long as on `develop`; WP Rocket twin-apache 4/4, twin-nginx 4/4 (concurrent, Mac twins); `@mobile` and desktop device scenarios passed. No retry, `[page-loads]`, settle-request, wp-login or inert-wait timeout. Twin unit specs 122/123: `housekeeping.ssh-twins.spec.ts:406` exceeded `withTwin`'s lock wait under 6 workers, passed alone (Deferred).
 
+### P7 — Allure 3.33 · s/medium · deps: P1 · independent of: P2–P6, P8–P10
+
+- `npm i -D allure@3.33.0 allure-playwright@3.15.0`. Allure needs Node ≥22.18.
+- **Unchanged (diffed):**
+  - the analytics block `allure-analytics.ts` removes;
+  - `generate -o -c --name`;
+  - the `awesome/` + `dashboard/` layout and `allurerc.mjs`;
+  - the trace content type and step shape (`allure-results.ts`).
+- **Changed:** history lines are keyed by `retryHash` (since 3.19).
+  - Old lines map through `legacyHistoryId`, for the default environment only.
+  - `allure-history.ts` relies only on the top-level `timestamp` and one line per generation, which still hold.
+  - **Risk:** trend and flaky marks may not continue from 3.18 runs.
+- **Comments:** `allure-analytics.ts` ("through 3.22.1"), `allure-history.ts` ("3.18").
+- **Audit:** Allure 3.33 still pulls `glob@13.0.7` (GHSA-3g3m-2fjr-6pw4) and `minimatch@10.2.6` (GHSA-g3hv-75wg-m249).
+  - Try `overrides` to their fixed versions: glob 14.0.6 (a major) and minimatch ≥ 11.0.1.
+  - Keep them only if the "with the real Allure CLI" specs and `report:allure` pass; otherwise leave them in the deferred list.
+- **Done:**
+  - Gates pass, including the real-Allure-CLI block in `allure-report.spec.ts`.
+  - `npm run report:allure` on a cell with 3.18 history shows its trend; if not, document a one-time reset.
+  - `npm audit` no longer lists dompurify, follow-redirects, markdown-it or fast-xml-parser (measured on the upgraded tree).
+
+### P8 — node-ssh 14 · m/hard · deps: P1 · independent of: P2–P7, P9, P10
+
+- **Add the override to `package.json` first:** `"overrides": { "@types/ssh2": { "@types/node": "$@types/node" } }`.
+  - Then run `npm i -D node-ssh@14.0.0 @types/ssh2@^1.15.6`.
+  - Added afterwards, the nested `@types/node` 18.19.130 stays in the lockfile as `invalid` (measured).
+  - `npm ls @types/node` must show one, deduped copy.
+- **Breaking (#132): `execCommand` rejects** with ssh2's error when the connection dies mid-command, where 13.x resolved `code: null`.
+  - `transport-exec.ts:646-660` builds "the connection to X was lost (<reason>) while "<program>" was running…" only on `code === null`.
+  - `exec.ssh.spec.ts:223` and `:285` expect `(read ECONNRESET)` / `(Keepalive timeout)` in it. With node-ssh 14 and no fix, exactly those two fail (measured), which proves the specs catch it.
+  - **Fix:** wrap `ssh.execCommand` in a try/catch.
+    - **`NOT_CONNECTED`:** rethrow unchanged, because `withConnection` retries on it.
+    - **A recorded connection loss** (`connectionLosses.get(ssh)` set; node-ssh's own listener runs first in the same emit, so it is recorded by then): throw the existing "lost (<reason>)" message. Factor it into one helper shared with the `code === null` branch.
+    - **Anything else** (`Unable to exec`, `ERR_OUTPUT_TOO_LARGE`, `ETIMEDOUT`, a throwing callback): throw "<program> could not run over SSH on <site>: <error code or message>". Name the program, never the argv, and attach no `cause`; this is the exec-error rule in AGENTS.md.
+    - Keep the `code === null` branch for a channel closed without an error.
+  - **Specs:** add one for the "anything else" path (e.g. the test server refusing `exec`), asserting that no argument appears.
+- **Also:**
+  - Pass `noBuffer: true`: we collect the chunks ourselves, and without it `ERR_OUTPUT_TOO_LARGE` can reject.
+  - Fix stale comments: the error listener (≈ :437-442; node-ssh now listens for the connection's whole life) and "ssh2 types do not resolve" (`transport-exec.ts:367`, `ssh-server.ts:684`, `exec.ssh.spec.ts:66`).
+  - Replace the stand-in types (`ErrorEmitter`, `Connect`, `Observable`) with `@types/ssh2` types where they fit.
+- **Unaffected:**
+  - only named `{ NodeSSH }` imports;
+  - no `cwd` option;
+  - the test SSH server loads ssh2 itself.
+- **Done:**
+  - Gates pass, and so do the SSH-twins specs.
+  - Live runs pass on both products.
+  - A connection killed mid-command shows the "lost" message, naming only the program.
+
+### P9 — string-width 9 · s/medium · deps: P1 · independent of: P2–P8, P10
+
+- `npm i -D string-width@9.0.0`.
+- **Measured with v9** (official Node 26) against `layout.spec.ts` (`[name, text, columns, columns tmux drew]`):
+  - **Flag:** whole = 2, but the per-code-point sum = 4, so 4.
+  - **Lone regional indicator:** 2. It is a single code point, so `graphemeWidth` (`layout.ts:273`) returns string-width's width early.
+  - **Three indicators:** a flag plus a lone indicator.
+  - **Keycap `1⃣`:** 1.
+  - `cutToWidth`'s flag case (`layout.spec.ts:441`) fails too.
+- **Fix (D2) in `graphemeWidth`:**
+  - A cluster that is a single regional indicator returns 1.
+  - In the per-code-point sum, a regional indicator counts 1.
+  - Result: flag 2, lone 1, three indicators 3, all equal to tmux's column.
+- **Spec change:** the keycap row's measure changes 2 → 1. v9 now matches tmux's measured 1, which still respects the invariant "never below what a terminal draws". State this in the commit message.
+- **Run the whole table on v9** and list any other changed row. Treat it the same way: fix the code if the new width falls below tmux's column; otherwise change the row only to tmux's measured value.
+- **Done:**
+  - Gates pass, including the tmux/pty specs, `live-block.spec.ts`, `orchestrator/line-style.spec.ts` and `orchestrator/status/table.spec.ts`.
+
+### P10 — pixelmatch 8 · xs/easy · deps: P1 · independent of: P2–P9
+
+- `npm i -D pixelmatch@8.0.0`.
+- **API:** unchanged, and it ships its own types; `output` is typed `… | null | undefined`.
+- **Metric:** YIQ is replaced by OKLab/HyAB; `threshold` keeps its 0–1 scale.
+- **Docs:** fix the parity claims at `src/common/visual/compare.ts:7-9` and `src/common/config/visual.ts:4-7`.
+- **Open obligation:** re-tune `DEFAULT_PIXEL_THRESHOLD` with the first real `@visual` scenario.
+- **Spec:** add a near-colour pair to `compare.spec.ts` (indistinguishable colours give 0 diff), so the metric's behaviour is pinned.
+- **Done:** gates pass.
+
 ### P11 — Docs sync and final audit · s/easy · deps: P1–P10 · independent of: —
 
 - **Docs:**
