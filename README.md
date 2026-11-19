@@ -1,7 +1,7 @@
 # wp-media-e2e
 
 End-to-end tests for WP Media products (WP Rocket, BackWPup), on [Playwright](https://playwright.dev) +
-[playwright-bdd](https://vitalets.github.io/playwright-bdd/) (Cucumber/Gherkin). ESM, Node 24,
+[playwright-bdd](https://vitalets.github.io/playwright-bdd/) (Cucumber/Gherkin). ESM, Node 26,
 TypeScript 6 (strict). Design: [`docs/plans/e2e-modernization-plan.md`](docs/plans/e2e-modernization-plan.md).
 
 ## Quick start

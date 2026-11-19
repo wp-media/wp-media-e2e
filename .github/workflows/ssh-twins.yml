@@ -16,6 +16,7 @@ on:
       - "src/common/__fixtures__/ssh-twins*"
       - "healthcheck.ts"
       - "package.json"
+      - ".nvmrc"
       - "package-lock.json"
       - "playwright.unit.config.ts"
       - "docker/ssh-cells/**"

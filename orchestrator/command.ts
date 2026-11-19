@@ -69,7 +69,7 @@ Exit codes:
 
 Under npm, everything after "--" is the orchestrator's: without it, npm takes
 --dry-run for itself (refused). A relative --config is from the directory npm
-was run in. npm 11 (Node 24's own) also takes --once, --task=<id> and
+was run in. npm 11 (Node 26's own) also takes --once, --task=<id> and
 --config=<file> before "--" (refused too).
 
 Examples:

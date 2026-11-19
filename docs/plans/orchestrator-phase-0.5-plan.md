@@ -131,7 +131,7 @@ As built. Module names are under `orchestrator/` (§5).
   nothing, so it runs beside a running orchestrator; it holds no signal handler, so Ctrl-C ends it
   at once. `--once` with it is accepted and changes nothing.
 - Every option goes after `--`. Before it, npm takes an option as its own setting and runs the
-  script without it — `--dry-run` on npm 12 and 11, and on npm 11 (Node 24's own) also `--once`,
+  script without it — `--dry-run` on npm 12 and 11, and on npm 11 (Node 26's own) also `--once`,
   `--task=<id>` and `--config=<file>` — turning a dry run or one task into a real start of every
   task (V471, V479). The command refuses (exit 1, nothing read or written, naming the `--` form)
   when `npm_config_dry_run`, `_once`, `_task` or `_config` is set (not empty, not `false`) and its
@@ -920,7 +920,7 @@ real script, `cli.ts` and `command.ts` over it through `swap-start.mjs`.
 
 Which machine is D4. On it:
 
-1. Tools: Node ≥ 24.16 and npm; git; for BackWPup builds composer (PHP CLI) and `gulp-cli` (V123);
+1. Tools: Node ≥ 26.13.1 and npm (ssh2's native-crypto note: [orchestrator.md](../guides/orchestrator.md)); git; for BackWPup builds composer (PHP CLI) and `gulp-cli` (V123);
    Chromium's system libraries (`npx playwright install-deps chromium`, once, with `sudo`; `npm ci`
    installs Chromium itself); `tmux`. No X server (V126).
 2. A checkout of `develop` and `npm ci` — never `--omit=dev` nor `NODE_ENV=production`: tsx, zod and
