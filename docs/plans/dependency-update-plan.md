@@ -311,31 +311,20 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 
 ### P8 — node-ssh 14 · m/hard · deps: P1 · independent of: P2–P7, P9, P10
 
-- **Add the override to `package.json` first:** `"overrides": { "@types/ssh2": { "@types/node": "$@types/node" } }`.
-  - Then run `npm i -D node-ssh@14.0.0 @types/ssh2@^1.15.6`.
-  - Added afterwards, the nested `@types/node` 18.19.130 stays in the lockfile as `invalid` (measured).
-  - `npm ls @types/node` must show one, deduped copy.
-- **Breaking (#132): `execCommand` rejects** with ssh2's error when the connection dies mid-command, where 13.x resolved `code: null`.
-  - `transport-exec.ts:646-660` builds "the connection to X was lost (<reason>) while "<program>" was running…" only on `code === null`.
-  - `exec.ssh.spec.ts:223` and `:285` expect `(read ECONNRESET)` / `(Keepalive timeout)` in it. With node-ssh 14 and no fix, exactly those two fail (measured), which proves the specs catch it.
-  - **Fix:** wrap `ssh.execCommand` in a try/catch.
-    - **`NOT_CONNECTED`:** rethrow unchanged, because `withConnection` retries on it.
-    - **A recorded connection loss** (`connectionLosses.get(ssh)` set; node-ssh's own listener runs first in the same emit, so it is recorded by then): throw the existing "lost (<reason>)" message. Factor it into one helper shared with the `code === null` branch.
-    - **Anything else** (`Unable to exec`, `ERR_OUTPUT_TOO_LARGE`, `ETIMEDOUT`, a throwing callback): throw "<program> could not run over SSH on <site>: <error code or message>". Name the program, never the argv, and attach no `cause`; this is the exec-error rule in AGENTS.md.
-    - Keep the `code === null` branch for a channel closed without an error.
-  - **Specs:** add one for the "anything else" path (e.g. the test server refusing `exec`), asserting that no argument appears.
-- **Also:**
-  - Pass `noBuffer: true`: we collect the chunks ourselves, and without it `ERR_OUTPUT_TOO_LARGE` can reject.
-  - Fix stale comments: the error listener (≈ :437-442; node-ssh now listens for the connection's whole life) and "ssh2 types do not resolve" (`transport-exec.ts:367`, `ssh-server.ts:684`, `exec.ssh.spec.ts:66`).
-  - Replace the stand-in types (`ErrorEmitter`, `Connect`, `Observable`) with `@types/ssh2` types where they fit.
-- **Unaffected:**
-  - only named `{ NodeSSH }` imports;
-  - no `cwd` option;
-  - the test SSH server loads ssh2 itself.
-- **Done:**
-  - Gates pass, and so do the SSH-twins specs.
-  - Live runs pass on both products.
-  - A connection killed mid-command shows the "lost" message, naming only the program.
+- `overrides: { "@types/ssh2": { "@types/node": "$@types/node" } }` **first**, then `npm i -D node-ssh@14.0.0 @types/ssh2@^1.15.6` (in the other order the nested `@types/node` 18.19.130 stays in the lockfile as `invalid`). Lockfile: `ssh2` still 1.17.0; `make-dir`, `semver` 6.3.1 and node-ssh's nested `is-stream` gone; no new install script; one `@types/node` (26.6.6).
+- **#132:** `execCommand` now rejects where 13.x resolved `code: null`; without the fix exactly `exec.ssh.spec.ts:221` and `:283` fail. `sshExecFailure` (`transport-exec.ts`) sorts a rejection, every message without argv or `cause` (ssh2's exec errors are fixed strings or the server's channel-open text); `failureReason` = a non-empty string `code`, else the message:
+  - ssh2's `Not connected` → returned unchanged, so `withConnection` retries;
+  - a recorded loss (node-ssh's `error` listener runs before ours, and `fail` rejects asynchronously) → `lostConnection`'s `lost (<reason>) while "<program>" was running`;
+  - a client no longer `isConnected()` → `closed before "<program>" was confirmed started (<reason>), so whether it ran is unknown`, never retried: a clean close after the exec request fails it as `Unable to exec` (measured: the command had run). Except `No response from server`, which only a channel still opening gets, before the exec request is sent;
+  - anything else (a refusal on a live connection) → `"<program>" could not run over SSH on <site>: <reason>`.
+  - `code === null` kept: a disposed connection, or a server closing the session, still resolves with neither status nor signal.
+- **`noBuffer: true`:** node-ssh skips its own string copy (stdout/stderr come back `""`), so `ERR_OUTPUT_TOO_LARGE` cannot reject; `onStdout`/`onStderr` as before. The ssh path has no output cap of its own (only execa's `maxBuffer` on local/docker).
+- **Types:** `ErrorEmitter`, `Connect`, `Observable` removed (`ssh.connection` is `Client | null`; prototype patches typed with `Config`/`SSHExecCommandOptions`, one `unbound-method` disable each: called with `.call(this)`); the test server uses `@types/ssh2`'s server types, still loading ssh2 itself; `OPEN`'s `attrs` read as `Partial<Attributes>` (typed complete, no `mode` from `fastPut`).
+- **Other 14.0 changes:** `isConnected()` false until `ready` (we pool only after `connect` resolves); `dispose()` nulls the connection at once, ends it after ≤ 2 s of pending SFTP closes; `TCP_NODELAY` set; `cwd` now `cd … || exit`, and timeouts/`AbortSignal`/`atomic`/`skipUnchanged`, unused.
+- **Specs:** the test server's `refuseExec` and `dropOnExec` (records the command, then `conn.end()` unanswered) pin both paths (exact message, no `cause` or secret, sent once, the connection reused or replaced); `noBuffer`/`noTrim`/no `cwd` asserted; `sshExecFailure` and `failureReason` cases (+16).
+- **Gates:** green; unit 6639 passed, 134 skipped (flakes: Deferred); twin specs 123 passed.
+- **Connection killed mid-command, live** (twin-apache, `sh -c 'sleep …' e2e --key=SECRET-…` through `execAsTransport`): `SIGSTOP` on the session's `sshd: ubuntu@notty` → after 40.1 s `[wp/exec] the connection to ubuntu@127.0.0.1:2210 was lost (Keepalive timeout) while "sh" was running, so how it ended is unknown.`, no `cause`, no secret. `SIGKILL` on it → sshd closes the session cleanly: 1.5 s, the "neither an exit status nor a signal (its channel closed)" message. `SIGKILL` on `[priv]` alone: the session lives on. A reset (`ss -K`) is refused in the container (no `CAP_NET_ADMIN`); `read ECONNRESET` is pinned by `exec.ssh.spec.ts:221`.
+- **Live** (2026-11-19, Node 26.13.1, npm 12.2.3): BackWPup pro@nginx 70/70 (45.5 min; `develop` 52.0), free@nginx 53/53 (29.8; 33.9), concurrent on RemoteDesktopQA, healthcheck exit 0; WP Rocket twin-apache 4/4, twin-nginx 4/4 (Mac). No lost, could-not-run, `Not connected` or SFTP error line; teardown not slowed by `dispose`'s SFTP wait. Run on the build before the "closed before confirmed started" branch, which only a rejected exec reaches (0 in all four runs); specs cover it.
 
 ### P9 — string-width 9 · s/medium · deps: P1 · independent of: P2–P8, P10
 
@@ -404,6 +393,7 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
   - typescript-eslint 8.73.0 adds an experimental `tsgo` backend (optional peer `@typescript/native` ≥ 7.1.0 dev/beta); still experimental.
 - **Docker local env images (D5).**
 - **ssh2 native crypto on Node 26** (mscdex/ssh2#1531): once fixed, drop `orchestrator.md`'s install note.
+- **SSH loss wording:** when an `error` event drops the connection before the command started (channel still opening, or exec reply pending), the recorded-loss message still says `lost (…) while "<program>" was running`, though whether it started is unknown (found by reading, not measured; pre-existing wording); a fix would track the start via node-ssh's `onChannel`.
 - **pixelmatch threshold re-tune** with the first `@visual` scenario.
 - **Plain output:** under `E2E_OUTPUT=plain`, Playwright's own "To open last HTML report run" line still carries ANSI colour when piped through `tee` (seen on `develop` too, not from P4).
 - **Unit-suite robustness** (found on RemoteDesktopQA, Ubuntu 24.04; not dependency issues, same on Node 24):
@@ -414,7 +404,7 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 - **Flaky under load** (full Mac runs; each passes alone):
   - Twin specs: `withTwin`'s 600 s lock wait is exceeded when several workers queue on one twin (`housekeeping.ssh-twins.spec.ts:406` under 6 workers, P6; also P1).
   - `orchestrator/runs/launch.spec.ts:529` and `:579`.
-  - `src/common/__fixtures__/ssh-server.spec.ts:101`.
+  - `src/common/__fixtures__/ssh-server.spec.ts:101`: also fails alone ~1 run in 6, on node-ssh 13.2.1 and 14.0.0 alike: each fake-`sudo` command has a 1 s limit, and a cold connection's first call takes ~0.9–1.1 s.
   - `src/projects/backwpup/support/job-runs.spec.ts:284`: `expect.poll` abandons an in-flight stub `wp` call, whose write races `afterEach`'s `rmSync` (`ENOTEMPTY`).
 
 ## Status
@@ -429,7 +419,7 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 | P5    | done | 2026-11-19 | eslint 10.15.0, typescript-eslint 8.73.0, globals 17.14.0, prettier 3.10.1 (0 reformats), lint-staged 17.6.1 (hook proven); 3 enum casts `as unknown as`; audit 18 → 10, eslint minimatch chain gone |
 | P6    | done | 2026-11-19 | @playwright/test 1.65.1 (Chromium 159); `screen` override + `presetScreen`, floor 1.64; internals unchanged; live pro@nginx 70/70, free@nginx 53/53, twins 4/4 + 4/4, twin specs 122/123 (a lock-wait flake) |
 | P7    | done | 2026-11-19 | allure 3.33.0, allure-playwright 3.15.0; 3.18 history continues (same key, measured); glob 14 override, audit 10 → 0; server on 127.0.0.1 (`allurerc.mjs`); no git facts in reports (`GIT_DIR`) |
-| P8    | pending |      |         |
+| P8    | done | 2026-11-19 | node-ssh 14.0.0, @types/ssh2 1.15.6 (one @types/node); #132 fixed (`Not connected` retried; lost / closed before started / could not run, no argv); `noBuffer`; stand-in types gone; unit 6639, twin specs 123; live pro@nginx 70/70, free@nginx 53/53, twins 4/4 + 4/4 |
 | P9    | pending |      |         |
 | P10   | pending |      |         |
 | P11   | pending |      |         |

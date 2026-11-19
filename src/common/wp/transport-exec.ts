@@ -3,7 +3,7 @@ import { posix } from "node:path";
 import { copyFile } from "node:fs/promises";
 
 import { execa } from "execa";
-import { NodeSSH } from "node-ssh";
+import { NodeSSH, type SSHExecCommandResponse } from "node-ssh";
 
 import { CommandKilledError } from "./errors";
 import { runAsArgv } from "./run-as-argv";
@@ -367,11 +367,12 @@ const connectionLosses = new WeakMap<NodeSSH, Error>();
 const NOT_CONNECTED = "Not connected";
 
 /**
- * The one part of ssh2's client this listens to. ssh2 ships no type declarations, so node-ssh's
- * `connection` field resolves to nothing the type checker can see; this names what is used.
+ * Whether `error` is ssh2's {@link NOT_CONNECTED} refusal, which {@link withConnection} retries on.
+ *
+ * @param error - what a request rejected with.
  */
-interface ErrorEmitter {
-  on(event: "error", listener: (error: Error) => void): unknown;
+function isNotConnected(error: unknown): boolean {
+  return error instanceof Error && error.message === NOT_CONNECTED;
 }
 
 /**
@@ -437,13 +438,14 @@ async function connection(transport: SshTransport): Promise<NodeSSH> {
         { cause },
       );
     });
-  // node-ssh listens for connection errors only while connecting and while opening a channel. An
-  // error after that — a keepalive timeout, a reset — would have no listener, and Node turns an
-  // unhandled 'error' event into an uncaught exception that kills the worker process (measured, for
-  // both). Either way the next call gets a new connection — at once after a reset or a timeout, and
-  // through `withConnection`'s retry while ssh2 has only half-closed it; this listener only keeps the
-  // reason, for the command that was running.
-  (ssh.connection as ErrorEmitter | null)?.on("error", (error) => {
+  // Keeps why the connection was lost, so a command failing with it is reported as a lost
+  // connection rather than as a command that could not run. node-ssh keeps an `error` listener of its
+  // own for the connection's whole life (so an error never goes unhandled) and rejects the command
+  // running with that same error; its listener was added first, while connecting, so by the time
+  // that rejection reaches `runSsh` this one has recorded it. Either way the next call gets a new
+  // connection — at once after a reset or a timeout, and through `withConnection`'s retry while
+  // ssh2 has only half-closed it.
+  ssh.connection?.on("error", (error) => {
     connectionLosses.set(ssh, error);
   });
   connections.set(key, ssh);
@@ -469,9 +471,7 @@ async function withConnection<T>(
   try {
     return await work(ssh);
   } catch (error) {
-    if (!(error instanceof Error) || error.message !== NOT_CONNECTED) {
-      throw error;
-    }
+    if (!isNotConnected(error)) throw error;
     // Marks the client disconnected, which is what the pool checks — so it opens a new one. ssh2
     // offers no way to close a socket it has stopped writing to, so the old one lingers until the
     // server's own close reaches it.
@@ -564,7 +564,8 @@ export function sshWrappedLine(argv: readonly string[]): string {
  * Decodes a command's output from its chunks, all at once, as UTF-8.
  *
  * Decoded whole, never chunk by chunk: a multi-byte character split between two chunks would become
- * two `U+FFFD` halves (node-ssh's own strings do exactly that, measured with 200,000 × `é`).
+ * two `U+FFFD` halves (node-ssh's own strings did exactly that up to 13.x, measured with 200,000 ×
+ * `é`; it is now asked for none, `noBuffer`).
  *
  * @param chunks - the buffers the channel delivered, in order.
  * @returns the text.
@@ -612,6 +613,115 @@ function sshLineFor(
 }
 
 /**
+ * The error for a command whose connection was lost while it ran: how it ended is unknown.
+ *
+ * @param transport - the site's ssh transport.
+ * @param file - the program, the one name the message gives.
+ * @param lost - ssh2's reason (`read ECONNRESET`, `Keepalive timeout`): names neither site nor step.
+ */
+function lostConnection(
+  transport: SshTransport,
+  file: string,
+  lost: Error,
+): Error {
+  return new Error(
+    `[wp/exec] the connection to ${describeTarget(transport)} was lost (${lost.message}) while "${file}" was ` +
+      "running, so how it ended is unknown.",
+  );
+}
+
+/**
+ * ssh2's rejection of a channel still opening when the connection closed. The command line goes out
+ * only once the channel is open, so it was never sent.
+ */
+const CLOSED_WHILE_OPENING = "No response from server";
+
+/**
+ * Whether `error` says the command line was never sent: ssh2's {@link CLOSED_WHILE_OPENING}.
+ *
+ * @param error - what `execCommand` rejected with.
+ */
+function neverSent(error: unknown): boolean {
+  return error instanceof Error && error.message === CLOSED_WHILE_OPENING;
+}
+
+/**
+ * The error for a command whose connection closed cleanly (no `error` event) after its request may
+ * have gone out but before the server confirmed it started: it may have run, or may not.
+ *
+ * @param transport - the site's ssh transport.
+ * @param file - the program, the one name the message gives.
+ * @param reason - {@link failureReason} of the rejection (`Unable to exec`).
+ */
+function closedBeforeConfirmed(
+  transport: SshTransport,
+  file: string,
+  reason: string,
+): Error {
+  return new Error(
+    `[wp/exec] the connection to ${describeTarget(transport)} closed before "${file}" was confirmed started ` +
+      `(${reason}), so whether it ran is unknown.`,
+  );
+}
+
+/**
+ * What `runSsh` throws when node-ssh's `execCommand` rejects.
+ *
+ * - ssh2's {@link NOT_CONNECTED}: returned as it is, for {@link withConnection} to retry on a new
+ *   connection (nothing was sent).
+ * - A connection recorded lost: {@link lostConnection} (node-ssh rejects with the connection's own
+ *   error).
+ * - A connection no longer connected, unless the rejection proves the line unsent
+ *   ({@link CLOSED_WHILE_OPENING}): {@link closedBeforeConfirmed}. ssh2 fails an exec request still
+ *   awaiting its reply as `Unable to exec` when the connection closes — the same words as a refusal,
+ *   though the command may have run. node-ssh marks the client disconnected on the connection's
+ *   `end`/`close`, before ssh2 fails the pending request, so the check sees it. Never retried.
+ * - Anything else, on a live connection — the server refusing the request (`Unable to exec`), a
+ *   channel open failure — or a line proved unsent: `"<program>" could not run`.
+ *
+ * Each names the program and the reason only: the error's code when it has one, else its message —
+ * never the command line, and never the error as a `cause`, since what wraps an error may print it. No
+ * reason can quote an argument: ssh2's and node-ssh's messages are fixed text, or a server's text about
+ * a channel that was opening before the command line was sent.
+ *
+ * @param ssh - the connection the command was sent on.
+ * @param transport - the site's ssh transport.
+ * @param file - the program.
+ * @param error - what `execCommand` rejected with.
+ * @returns the error to throw.
+ */
+export function sshExecFailure(
+  ssh: NodeSSH,
+  transport: SshTransport,
+  file: string,
+  error: unknown,
+): unknown {
+  if (isNotConnected(error)) return error;
+  const lost = connectionLosses.get(ssh);
+  if (lost !== undefined) return lostConnection(transport, file, lost);
+  const reason = failureReason(error);
+  if (!ssh.isConnected() && !neverSent(error)) {
+    return closedBeforeConfirmed(transport, file, reason);
+  }
+  return new Error(
+    `[wp/exec] "${file}" could not run over SSH on ${describeTarget(transport)}: ${reason}.`,
+  );
+}
+
+/**
+ * An error's code when it carries a non-empty string one (`ETIMEDOUT`, `ERR_OUTPUT_TOO_LARGE`), else
+ * its message; for a thrown non-Error, only that it was one — its text is unknown.
+ *
+ * @param error - what was thrown.
+ */
+export function failureReason(error: unknown): string {
+  if (!(error instanceof Error)) return "a non-Error value was thrown";
+  const { code } = error as { code?: unknown };
+  if (typeof code === "string" && code !== "") return code;
+  return error.message === "" ? error.name : error.message;
+}
+
+/**
  * Runs one command over SSH, in the WordPress root unless `options.cwd` says otherwise, as `as` says.
  *
  * Messages name `file`, the program asked for — never `sudo`, which only carries it. As root or the
@@ -619,8 +729,9 @@ function sshLineFor(
  * own name adds one to every call): whoever reads stderr would take it for the command's own.
  *
  * @throws {@link CommandKilledError} when a signal ended the command; Error if the line is refused
- * ({@link sshCommandLine}, {@link runAsArgv}), the connection could not be opened, or it was lost or
- * closed before the command exited, since how it ended is then unknown.
+ * ({@link sshCommandLine}, {@link runAsArgv}), the connection could not be opened, the request was
+ * refused or never sent, or the connection was lost or closed before the command was confirmed started
+ * or before it exited, since whether it ran, or how it ended, is then unknown ({@link sshExecFailure}).
  */
 async function runSsh(
   transport: SshTransport,
@@ -638,27 +749,32 @@ async function runSsh(
   return withConnection(transport, async (ssh) => {
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
-    // No `cwd` option: node-ssh would prepend its own `cd <cwd> ;`, running the command in the
-    // login's home when that directory is missing. The line above does the `cd` itself.
+    // No `cwd` option: the line above does the `cd` itself, quoted like every other word. node-ssh's
+    // own reads a leading `~/` as the login's home, and before 14.0 ran the command there when the
+    // folder was missing.
     //
     // `noTrim` is load-bearing, not a detail: without it node-ssh trims **both ends** of stdout and
     // stderr, which is a different normalisation from every other transport's and silently eats
     // meaningful whitespace — the leading space of a tar member name, an option value stored with
     // one. Turning it off leaves `stripFinalNewline` to do the one normalisation all transports
-    // agree on. Its strings are ignored: decoded per chunk, they break a split character.
-    const result = await ssh.execCommand(line, {
-      noTrim: true,
-      onStdout: (chunk: Buffer) => stdout.push(chunk),
-      onStderr: (chunk: Buffer) => stderr.push(chunk),
-    });
+    // agree on.
+    //
+    // `noBuffer`: the chunks are collected here, so node-ssh keeps no second copy as strings — which
+    // it would decode, and could reject as too large to return (`ERR_OUTPUT_TOO_LARGE`).
+    let result: SSHExecCommandResponse;
+    try {
+      result = await ssh.execCommand(line, {
+        noTrim: true,
+        noBuffer: true,
+        onStdout: (chunk: Buffer) => stdout.push(chunk),
+        onStderr: (chunk: Buffer) => stderr.push(chunk),
+      });
+    } catch (error) {
+      throw sshExecFailure(ssh, transport, file, error);
+    }
     if (result.code === null) {
       const lost = connectionLosses.get(ssh);
-      if (lost !== undefined) {
-        throw new Error(
-          `[wp/exec] the connection to ${describeTarget(transport)} was lost (${lost.message}) while "${file}" was ` +
-            "running, so how it ended is unknown.",
-        );
-      }
+      if (lost !== undefined) throw lostConnection(transport, file, lost);
       // Neither a status nor a signal: the channel closed under it (the connection disposed, the
       // server gone) — not a kill, so not typed as one.
       if (result.signal === null) {

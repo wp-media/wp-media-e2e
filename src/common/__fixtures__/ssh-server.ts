@@ -15,7 +15,9 @@ import type net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { NodeSSH } from "node-ssh";
+import { NodeSSH, type Config } from "node-ssh";
+import type * as Ssh2 from "ssh2";
+import type { Attributes, Connection, SFTPWrapper, ServerChannel } from "ssh2";
 
 import type { SshTransport } from "../config/types";
 import { installExclDd } from "./excl-dd";
@@ -40,107 +42,11 @@ import { removeTempDir } from "./temp-dir";
  * than about 34 KB fails as `Unable to exec` here, where OpenSSH takes far more.
  */
 
-// ── ssh2's server API, as far as this file uses it (the package ships no type declarations) ──────
-
-/** The channel one `exec` request runs on. */
-export interface ExecStream {
-  write(data: string | Buffer): void;
-  /** Stderr's side of the channel. */
-  readonly stderr: { write(data: string | Buffer): void };
-  /** A number is an exit status; a string, the signal the command was killed by. */
-  exit(statusOrSignal: number | string): void;
-  end(): void;
-  once(event: "close", listener: () => void): this;
-  /** Reads (and drops) what the client sends, so the channel can end and emit `close`. */
-  resume(): this;
-}
-
-/** ssh2's server side of one SFTP session. */
-interface SftpSession {
-  on(
-    event: "OPEN",
-    listener: (
-      reqid: number,
-      filename: string,
-      flags: number,
-      attrs: { mode?: number },
-    ) => void,
-  ): this;
-  on(
-    event: "WRITE",
-    listener: (
-      reqid: number,
-      handle: Buffer,
-      offset: number,
-      data: Buffer,
-    ) => void,
-  ): this;
-  on(event: "CLOSE", listener: (reqid: number, handle: Buffer) => void): this;
-  handle(reqid: number, handle: Buffer): void;
-  status(reqid: number, code: number): void;
-}
-
-/** One session on a connection: the requests a client makes on it. */
-interface ServerSession {
-  on(
-    event: "exec",
-    listener: (
-      accept: () => ExecStream,
-      reject: () => void,
-      info: { command: string },
-    ) => void,
-  ): this;
-  on(event: "sftp", listener: (accept: () => SftpSession) => void): this;
-}
-
-/** What a client authenticating offers. */
-interface AuthContext {
-  method: string;
-  accept(): void;
-  reject(methods: string[]): void;
-}
-
-/** One client connection, as the server sees it. */
-export interface ServerConnection {
-  on(event: "error", listener: (error: Error) => void): this;
-  on(event: "authentication", listener: (context: AuthContext) => void): this;
-  on(event: "session", listener: (accept: () => ServerSession) => void): this;
-  /** Sends the client a disconnect, then half-closes the socket. */
-  end(): void;
-}
-
-/** ssh2's `Server`. */
-interface Ssh2Server {
-  listen(port: number, host: string, callback: () => void): void;
-  address(): net.AddressInfo;
-  close(callback?: () => void): void;
-  once(event: "error", listener: (error: Error) => void): this;
-  removeListener(event: "error", listener: (error: Error) => void): this;
-}
-
 /** An OpenSSH key pair, as ssh2 generates one. */
-export interface KeyPair {
-  readonly private: string;
-  readonly public: string;
-}
+export type KeyPair = Ssh2.utils.KeyPairReturn;
 
-/** The parts of the `ssh2` module used here. */
-interface Ssh2 {
-  Server: new (
-    config: { hostKeys: string[] },
-    listener: (connection: ServerConnection) => void,
-  ) => Ssh2Server;
-  utils: {
-    generateKeyPairSync(type: "ed25519"): KeyPair;
-    /** The parsed key, or the Error saying why it could not be. */
-    parseKey(key: string): unknown;
-    sftp: {
-      STATUS_CODE: { OK: number; FAILURE: number; NO_SUCH_FILE: number };
-    };
-  };
-}
-
-const ssh2 = createRequire(import.meta.url)("ssh2") as Ssh2;
+// ssh2 itself, for its server: node-ssh is a client only. Typed by `@types/ssh2`.
+const ssh2 = createRequire(import.meta.url)("ssh2") as typeof Ssh2;
 
 // ── The fake programs ─────────────────────────────────────────────────────────────────────────────
 
@@ -321,7 +227,7 @@ export interface SshTestServer {
   /** Every command line received, oldest first. */
   readonly commands: readonly string[];
   /** Every connection accepted, oldest first — what a spec disconnects. */
-  readonly connections: readonly ServerConnection[];
+  readonly connections: readonly Connection[];
   /**
    * Installs an executable `sh` script on the commands' `PATH`, ahead of the system's.
    *
@@ -357,6 +263,22 @@ export interface SshTestServer {
    * @param on - whether it does.
    */
   sudoNoise(on: boolean): void;
+  /**
+   * Makes the server refuse every `exec` request (`true`) — the client is told `Unable to exec`, and
+   * nothing runs or is recorded in {@link commands} — or run them again (`false`, the default).
+   *
+   * @param on - whether it refuses.
+   */
+  refuseExec(on: boolean): void;
+  /**
+   * Makes the server answer every `exec` request (`true`) by recording it in {@link commands} and
+   * ending the connection cleanly (a disconnect, no error) before replying — so the client has sent
+   * the command line but never learns whether it started — or run them again (`false`, the default).
+   * Nothing is run: what the client must report is the same either way.
+   *
+   * @param on - whether it drops.
+   */
+  dropOnExec(on: boolean): void;
   /**
    * Makes the fake `sudo`, running as `who` (`root`, or a `-u` user), search `dir` while the
    * transport's user cannot (left `000` around each call), or stops it (`undefined`).
@@ -450,7 +372,7 @@ function populateLayout(base: string, clientKey: string): Layout {
 function runCommand(
   layout: Layout,
   command: string,
-  stream: ExecStream,
+  stream: ServerChannel,
   running: Set<ChildProcess>,
   timeoutMs: number,
 ): void {
@@ -490,7 +412,8 @@ function runCommand(
     // Anything it left running in the background goes with it.
     killTethered(child);
     running.delete(child);
-    stream.exit(signal ?? code ?? 255);
+    if (signal === null) stream.exit(code ?? 255);
+    else stream.exit(signal);
     stream.end();
   });
 }
@@ -502,11 +425,12 @@ function runCommand(
  *
  * @param sftp - the accepted session.
  */
-function serveUploads(sftp: SftpSession): void {
+function serveUploads(sftp: SFTPWrapper): void {
   const { OK, FAILURE, NO_SUCH_FILE } = ssh2.utils.sftp.STATUS_CODE;
   const files = new Map<string, number>();
   let next = 0;
-  sftp.on("OPEN", (reqid, filename, _flags, attrs) => {
+  // `attrs` is typed complete, but holds only what the client sent: no `mode` from an upload.
+  sftp.on("OPEN", (reqid, filename, _flags, attrs: Partial<Attributes>) => {
     try {
       const fd = openSync(filename, "w", attrs.mode ?? 0o644);
       const handle = String(next++);
@@ -592,8 +516,12 @@ async function listen(
   timeoutMs: number,
 ): Promise<SshTestServer> {
   const commands: string[] = [];
-  const connections: ServerConnection[] = [];
+  const connections: Connection[] = [];
   const running = new Set<ChildProcess>();
+  /** While set, every `exec` request is refused ({@link SshTestServer.refuseExec}). */
+  let refusingExec = false;
+  /** While set, every `exec` request ends its connection unanswered ({@link SshTestServer.dropOnExec}). */
+  let droppingOnExec = false;
 
   const server = new ssh2.Server({ hostKeys: [hostKey.private] }, (conn) => {
     connections.push(conn);
@@ -605,8 +533,16 @@ async function listen(
     });
     conn.on("session", (accept) => {
       accept()
-        .on("exec", (acceptExec, _reject, info) => {
+        .on("exec", (acceptExec, rejectExec, info) => {
+          if (refusingExec) {
+            rejectExec();
+            return;
+          }
           commands.push(info.command);
+          if (droppingOnExec) {
+            conn.end();
+            return;
+          }
           runCommand(layout, info.command, acceptExec(), running, timeoutMs);
         })
         .on("sftp", (acceptSftp) => {
@@ -623,7 +559,8 @@ async function listen(
   });
 
   return {
-    port: server.address().port,
+    // Listening on a TCP port, so an address, never a pipe's name.
+    port: (server.address() as net.AddressInfo).port,
     base: layout.base,
     keyPath: layout.keyPath,
     root: layout.root,
@@ -650,6 +587,12 @@ async function listen(
       const noise = `${layout.sudoDeny}.noise`;
       if (on) writeFileSync(noise, "");
       else rmSync(noise, { force: true });
+    },
+    refuseExec(on) {
+      refusingExec = on;
+    },
+    dropOnExec(on) {
+      droppingOnExec = on;
     },
     sudoSees(seen) {
       const file = `${layout.sudoDeny}.sees`;
@@ -681,12 +624,6 @@ async function listen(
 
 // ── Steering node-ssh ─────────────────────────────────────────────────────────────────────────────
 
-/** node-ssh's `connect`, typed here because the ssh2 types it is declared with do not resolve. */
-type Connect = (
-  this: NodeSSH,
-  config: Record<string, unknown>,
-) => Promise<NodeSSH>;
-
 /**
  * Points every node-ssh connection at a local port, whatever port a transport declares; its host
  * is never resolved.
@@ -696,12 +633,13 @@ type Connect = (
  * @returns a function restoring node-ssh's own `connect`.
  */
 export function steerNodeSsh(
-  target: () => { readonly port: number } & Record<string, unknown>,
-  seen?: (config: Record<string, unknown>) => void,
+  target: () => { readonly port: number } & Partial<Config>,
+  seen?: (config: Config) => void,
 ): () => void {
-  const prototype = NodeSSH.prototype as unknown as { connect: Connect };
+  const { prototype } = NodeSSH;
+  // eslint-disable-next-line @typescript-eslint/unbound-method -- only ever called with `.call(this, …)`.
   const original = prototype.connect;
-  prototype.connect = function (config) {
+  prototype.connect = function (this: NodeSSH, config: Config) {
     seen?.(config);
     return original.call(this, {
       ...config,
