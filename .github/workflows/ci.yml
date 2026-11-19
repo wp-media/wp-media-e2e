@@ -21,10 +21,24 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+      # Node, then npm 12, then ~/.npm cached: the order setup-chromium/action.yml explains.
       - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
-          cache: npm
+          package-manager-cache: false
+      # The same version and check as setup-chromium/action.yml's.
+      - name: Install npm
+        env:
+          NPM_VERSION: 12.2.3
+        run: |
+          npm install --global "npm@$NPM_VERSION"
+          test "$(npm --version)" = "$NPM_VERSION" || { echo "::error::npm is $(npm --version), not $NPM_VERSION"; exit 1; }
+      - uses: actions/cache@v6
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-
       # --ignore-scripts: skip the Playwright browser postinstall + husky; not needed for static checks.
       - run: npm ci --ignore-scripts
       - run: npm run typecheck

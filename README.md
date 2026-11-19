@@ -2,12 +2,14 @@
 
 End-to-end tests for WP Media products (WP Rocket, BackWPup), on [Playwright](https://playwright.dev) +
 [playwright-bdd](https://vitalets.github.io/playwright-bdd/) (Cucumber/Gherkin). ESM, Node 26,
-TypeScript 6 (strict). Design: [`docs/plans/e2e-modernization-plan.md`](docs/plans/e2e-modernization-plan.md).
+npm 12, TypeScript 6 (strict). Design: [`docs/plans/e2e-modernization-plan.md`](docs/plans/e2e-modernization-plan.md).
 
 ## Quick start
 
 ```bash
-npm install          # also downloads Chromium (see "Browsers")
+npm install --global npm@12.2.3   # once: Node 26 ships npm 11, which package.json's devEngines refuses
+npm --version                     # 12.x: another npm 11 first on PATH (e.g. Homebrew's) still fails
+npm install                       # also downloads Chromium (see "Browsers")
 E2E_CELL=apache npm run test:wp-rocket
 ```
 
@@ -254,7 +256,8 @@ It loads the bypassed and the optimized page, stabilises each (scrolls to load l
 fonts) and fails if they differ beyond tolerance, attaching both renders and a highlighted diff. A size
 difference fails too (a layout change is a regression). Tolerances:
 [`src/common/config/visual.ts`](src/common/config/visual.ts). Tag such scenarios `@visual` to run them as a group, and run
-them in the Playwright container image for pixel-deterministic rendering:
+them in the Playwright container image for pixel-deterministic rendering (its npm is Node's own, so
+`npm install --global npm@12.2.3` there first):
 
 ```bash
 E2E_CELL=apache npm run test:wp-rocket -- --grep @visual

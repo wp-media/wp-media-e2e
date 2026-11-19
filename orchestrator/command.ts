@@ -36,11 +36,13 @@ import { safeBlock, textOf } from "./text";
  * and waits, without a bound, for both outputs to be taken before returning, so `process.exit` drops
  * nothing a slow pipe still holds.
  *
- * Under npm, two things are npm's, not the command's. Without `--`, npm takes an option as its own
- * setting and runs the script **without** it — `--dry-run` on npm 11 and 12, `--once`, `--task=<id>`
- * and `--config=<file>` on npm 11 — so a dry run or a single task would become a real start of every
- * task; the command refuses when npm says it took one ({@link npmTookOption}). And npm runs a script in
- * the package's folder, so a relative `--config` is taken from where npm was run (`INIT_CWD`).
+ * Under npm, two things are npm's, not the command's. Without `--`, npm takes `--dry-run` as its own
+ * setting and runs the script **without** it, so a dry run would become a real start of every task;
+ * npm 12 rejects `--once`, `--task=<id>` and `--config=<file>` there itself, but an npm that takes
+ * them the same way (npm 11, run past `devEngines` with `--force`) would turn `--once` or one task
+ * into a real start of every task. The command refuses when npm says it took one
+ * ({@link npmTookOption}). And npm runs a script in the package's folder, so a relative `--config` is
+ * taken from where npm was run (`INIT_CWD`).
  *
  * A closed standard output or error (`… | head`) is no crash: the failure is dropped, the exit code
  * unchanged.
@@ -69,8 +71,8 @@ Exit codes:
 
 Under npm, everything after "--" is the orchestrator's: without it, npm takes
 --dry-run for itself (refused). A relative --config is from the directory npm
-was run in. npm 11 (Node 26's own) also takes --once, --task=<id> and
---config=<file> before "--" (refused too).
+was run in. npm 12 rejects --once, --task=<id> and --config=<file> before "--"
+itself; an npm that took them too is refused the same way.
 
 Examples:
   npm run orchestrator -- start --dry-run
@@ -79,7 +81,8 @@ Examples:
 
 /**
  * The options npm takes as its own settings when they come before `--`, by the variable npm then sets
- * (`npm_config_<name>`, `-` as `_`): npm 12 takes only `--dry-run`, npm 11 all four.
+ * (`npm_config_<name>`, `-` as `_`): npm 12 takes only `--dry-run` (it rejects the other three), npm 11
+ * all four.
  */
 export const NPM_TAKEN_OPTIONS = [
   { variable: "npm_config_dry_run", option: "--dry-run" },

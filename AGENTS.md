@@ -17,7 +17,8 @@ End-to-end (E2E) tests for WP Media plugins: WP Rocket (performance), BackWPup (
 
 | Area               | Tech                                                                                                                                                            |
 | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Runtime            | **Node ≥ 26.13.1** (`engines`; `.nvmrc` pins 26), **ESM** (`"type": "module"`)                                                                                  |
+| Runtime            | **Node ≥ 26.13.1** (`engines`; `.nvmrc` and `.node-version` pin 26), **ESM** (`"type": "module"`)                                                               |
+| Package manager    | **npm ≥ 12.2.3** (`devEngines`; Node 26 ships 11: `npm install --global npm@12.2.3`); dependency scripts per `allowScripts` (see [`.npmrc`](.npmrc))            |
 | Language           | **TypeScript 6**, strict (`tsc` type-checks only — Playwright transpiles via esbuild)                                                                           |
 | Browser automation | **Playwright ≥ 1.62** (`@playwright/test`), Chromium only — the floor is load-bearing, see [wordpress-automation.md](docs/architecture/wordpress-automation.md) |
 | BDD                | **Cucumber/Gherkin** via **`playwright-bdd`** (`bddgen` generates specs)                                                                                        |
@@ -669,7 +670,9 @@ ErrorType}`, `{@link …}`, `@example` with ` ```ts `. **Never** JSDoc type anno
 
 ## Required workflow after every edit
 
-After any code change, run **all** of these and make them pass before calling the work done:
+After any code change, run **all** of these and make them pass before calling the work done, with
+npm ≥ 12 first on `PATH` (`npm --version`): an npm 11 earlier on it — Homebrew's Node 26 ships one —
+fails every npm command here (`EBADDEVENGINES`), and `test:unit`'s `npm run` specs use `PATH`'s npm:
 
 ```bash
 npm run typecheck     # tsc
