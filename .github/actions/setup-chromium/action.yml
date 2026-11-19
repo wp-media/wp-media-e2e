@@ -1,14 +1,33 @@
 name: Node, packages and Chromium
 description: >-
-  Node from .nvmrc, the locked packages, and Playwright's Chromium, cached. Runs after
+  Node from .nvmrc, npm 12, the locked packages, and Playwright's Chromium, cached. Runs after
   actions/checkout (a local action is read from the checkout).
 runs:
   using: composite
   steps:
+    # No setup-node cache (`cache: npm`, or its automatic one from devEngines): it asks `npm config
+    # get cache` in the checkout before npm 12 is installed, and there Node 26's own npm 11 fails
+    # even that on package.json's devEngines (EBADDEVENGINES), failing the step. So: npm 12 first,
+    # then the same ~/.npm cache by hand. ci.yml's quality job does the same.
     - uses: actions/setup-node@v7
       with:
         node-version-file: .nvmrc
-        cache: npm
+        package-manager-cache: false
+    # package.json's devEngines floor (a global install is not checked against it), then proof it is
+    # the npm on PATH; ci.yml's quality job keeps the same version.
+    - name: Install npm
+      env:
+        NPM_VERSION: 12.2.3
+      run: |
+        npm install --global "npm@$NPM_VERSION"
+        test "$(npm --version)" = "$NPM_VERSION" || { echo "::error::npm is $(npm --version), not $NPM_VERSION"; exit 1; }
+      shell: bash
+    - uses: actions/cache@v6
+      with:
+        path: ~/.npm
+        key: npm-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+        restore-keys: |
+          npm-${{ runner.os }}-
     # --ignore-scripts: no browser postinstall, no husky; Chromium is installed below.
     - run: npm ci --ignore-scripts
       shell: bash

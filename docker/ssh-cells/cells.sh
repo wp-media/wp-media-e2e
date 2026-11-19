@@ -401,8 +401,9 @@ write_overlays() {
 # failure the overlays are removed (every run would crash on them) and the loader's message printed.
 check_overlays_load() {
   say "Checking the overlays load beside any sites.json"
+  # --loglevel=warn: npm 12's npx otherwise prints its command line, this script included, as notices.
   # shellcheck disable=SC2016 # TypeScript, expanded by tsx
-  if ! (cd "$REPO" && npx --no-install tsx --eval '
+  if ! (cd "$REPO" && npx --no-install --loglevel=warn tsx --eval '
     import { loadSites } from "./src/common/config/sites";
     try {
       for (const product of ["backwpup", "wp-rocket"]) {

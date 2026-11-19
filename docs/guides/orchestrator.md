@@ -14,7 +14,9 @@ Design and the decisions behind it: [`docs/plans/orchestrator-phase-0.5-plan.md`
 
 ## Install on the runner
 
-1. Tools: Node ≥ 26.13.1 and npm; git; for BackWPup builds composer (PHP CLI) and `gulp-cli`
+1. Tools: Node ≥ 26.13.1 and npm ≥ 12.2.3 (`npm install --global npm@12.2.3`: Node 26 ships npm 11,
+   which `package.json`'s `devEngines` refuses, so `npm ci` and `npm run orchestrator` fail with
+   `EBADDEVENGINES`); git; for BackWPup builds composer (PHP CLI) and `gulp-cli`
    (`npm install --global gulp-cli`); `tmux`. Chromium's system libraries, once:
    `npx playwright install-deps chromium` (it asks for `sudo`); `npm ci` installs Chromium itself.
    No X server: runs are headless. ssh2's optional native crypto does not build on Node 26
@@ -206,9 +208,10 @@ npm run orchestrator -- start [--config <file>] [--task <id>…] [--once] [--dry
 npm run orchestrator -- start --help
 ```
 
-- **Every option goes after `--`.** Before it npm takes the option for itself (`--dry-run` on npm 11
-  and 12; also `--once`, `--task=…`, `--config=…` on npm 11) and the orchestrator would start every
-  task for real. It notices and refuses (exit 1), naming the `--` form.
+- **Every option goes after `--`.** Before it npm takes `--dry-run` for itself and the orchestrator
+  would start every task for real. It notices and refuses (exit 1), naming the `--` form. npm 12
+  rejects `--once`, `--task=…`, `--config=…` there itself (`EUNKNOWNCONFIG`); npm 11, past
+  `devEngines` only with `--force`, took those too, and they are refused the same way.
 - `--task a b --task c` selects tasks; an unknown id is refused. Without it, every task runs.
 - A relative `--config` is from the folder you ran npm in.
 - `--version`, the dry run's first line and the `started` line (`suite <v>`, read once as it starts)

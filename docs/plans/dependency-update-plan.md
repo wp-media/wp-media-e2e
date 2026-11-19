@@ -94,7 +94,7 @@ Sources: nodejs.org/dist/index.json, the v25.0.0/v26.0.0 release notes, `depreca
 - **CI installs with `npm ci --ignore-scripts`** and installs Chromium itself, so CI never exercises `allowScripts`.
 - **`npm install-scripts prune --dry-run` reports two dead entries:**
   - `fsevents@2.3.2` (not installed);
-  - the APVM key (`github:…automation-plugin-version-manager: false`; APVM has no install scripts; its `prepare` runs `husky`).
+  - the APVM key (`github:…automation-plugin-version-manager: false`; its `prepare` runs `husky`). A misreport, not dead: see P2's Measured.
 - **`allow-git=root` refuses a *changed* git pin:** `npm i` fails with `EALLOWGIT` (reproduced on 11.19.1 and 11.20.0).
   - `npm i --allow-git=all` once, or `npm i --package-lock-only`, works; `npm ci` with `root` then installs the new pin.
 
@@ -197,10 +197,10 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
   - In CI: one step in `ci.yml` and `setup-chromium/action.yml` after setup-node.
 - **Pin it:** add `devEngines.packageManager` to `package.json` (`{ "name": "npm", "version": ">=12.2.3", "onFail": "error" }`).
 - **Clean `allowScripts`:**
-  - Run `npm install-scripts prune`, then check the result.
-  - The dead `fsevents@2.3.2` and APVM entries go; a key that names the APVM git dependency must not come back.
-  - `esbuild@0.28.2`, `ssh2@1.17.0`, `cpu-features@0.0.10` and `fsevents@2.3.3` stay.
+  - Run `npm install-scripts prune --dry-run` on macOS, then remove only the dead `fsevents@2.3.2` by hand.
+  - The APVM key stays (prune misreports git dependencies: see Measured), and so do `esbuild@0.28.2`, `ssh2@1.17.0`, `cpu-features@0.0.10` and `fsevents@2.3.3`.
     - ssh2's script compiles nothing on 26 but must still be allowed, so its JS fallback is chosen the same way it is today.
+  - Never prune on Linux: fsevents is macOS-only, so prune always lists `fsevents@2.3.3` there.
 - **Prove the install on a clean clone:** `rm -rf node_modules && npm ci` (no `--ignore-scripts`).
   - The root `postinstall` must install Chromium, and npm must report no blocked script.
   - The APVM git pin must install with `allow-git=root`.
@@ -215,7 +215,22 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
   - Gates pass.
   - The clean `npm ci` behaves as above.
   - CI passes.
-  - `npm install-scripts prune --dry-run` reports nothing.
+  - On macOS after an install, `npm install-scripts ls` reports nothing and `npm install-scripts prune --dry-run` lists only the APVM key.
+- **Measured** (2026-11-19, official 26.13.1, npm 12.2.3 installed globally into it):
+  - **Prune misreports the git dependency.** Its answer depends on whether npm reads the hidden lockfile (`node_modules/.package-lock.json`, current after an install; neither lockfile flags apvm-napi's `prepare`) or the installed tree (no hidden lockfile, or `node_modules` touched after it):
+    - hidden lockfile: `ls` none; prune lists the APVM key as having no install scripts;
+    - tree, APVM key removed: `ls` reports `apvm-napi@3.0.0 (prepare: husky)` unreviewed, prune lists `fsevents@2.3.3`; with the key, `ls` none, prune `fsevents@2.3.3`;
+    - a changed pin (`#cli/v3.2.0`, `npm install --allow-git=all`) without the key: npm warns APVM's `prepare` blocked; with it, silent (the audit's measurement). c3854a8 added the key for this.
+    - So only `fsevents@2.3.2` (not installed) was removed; the key stays. On Linux prune also lists `fsevents@2.3.3` (not installed there). The lockfile has install scripts only in cpu-features, esbuild, fsevents 2.3.3, ssh2. `devEngines` leaves `package-lock.json` unchanged.
+  - **Clean `npm ci`** (tracked files copied, fresh npm cache and `PLAYWRIGHT_BROWSERS_PATH`): exit 0, 341 packages; the root `postinstall` downloaded Chromium, FFmpeg and the headless shell; `prepare` set husky; no blocked-script warning. cpu-features built, esbuild's binary in place, ssh2's crypto build failed quietly (`bindingAvailable: false`, the JS fallback). APVM installed from its git pin under `allow-git=root`.
+  - **Negative controls:** `esbuild` taken out of `allowScripts` → `npm warn install-scripts … esbuild@0.28.2 (postinstall: node install.js)` blocked (a warning, exit 0); `--allow-git=none` → `EALLOWGIT`; a changed pin (`#v3.3.0`) under `root` → `EALLOWGIT` on npm 12 too (P4's `--allow-git=all` holds).
+  - **npm 11 (11.19.1, 11.20.0) in the checkout:** `ci`, `install`, `run`, `exec`/`npx`, `ls`, `pkg`, `config get` all fail `EBADDEVENGINES`; `--version` and `npm i -g npm@12.2.3` work; `--force` bypasses with a warning.
+  - **CI:** setup-node's `cache: npm` (and its automatic cache, which `devEngines.packageManager` turns on) runs `npm config get cache` in the checkout with Node 26's own npm 11 (11.20.0 since 26.11.0; 11.12.1–11.19.1 before, nodejs.org/dist/index.json), which fails, and setup-node fails the step (v7 source). So both places use `package-manager-cache: false`, then `npm install --global npm@12.2.3`, then `actions/cache@v6` on `~/.npm` keyed by the lockfile.
+  - **Flags:** every npm/npx flag in scripts, `.github/`, `docker/`, `.husky/` and docs is spelled in full and accepted by npm 12 (`--ignore-scripts`, `--global`/`-g`, `--silent`, `--dry-run`, `--no-git-tag-version`, `--allow-git=…`, `--package-lock-only`, npx `--no-install`). An abbreviation (`--ignore-script`) now exits 1 with `Invalid abbreviated flag`; an unknown flag, such as `--once`/`--task=x`/`--config=c.json` before `--` in `npm run orchestrator`, exits 1 with `EUNKNOWNCONFIG` from npm itself (only `--dry-run` reaches the script, refused as before). The orchestrator's runs never go through npm (`runs/commands.ts`).
+  - **npm 12 prints script banners** as `npm notice run …` on stderr (npm 11: `> …` on stdout); nothing parses them. `npx` prints one too, its arguments line by line, so `cells.sh`'s `npx --no-install tsx --eval '<script>'` echoed the whole script: it passes `--loglevel=warn` (errors and the child's exit code kept).
+  - **`.node-version`** (fnm and other managers read it) still said 24: now 26, like `.nvmrc`; no other file pins Node.
+  - **npm 11 first on `PATH`** (e.g. Homebrew's Node 26, whose own npm is 11.20.0) fails every npm command in the checkout: `.husky/pre-commit` ran `npx lint-staged` and blocked commits, so it runs `lint-staged` (husky 9 puts `node_modules/.bin` on `PATH`; a commit in a scratch clone with Homebrew's npm first passed and ran ESLint). `cli.spec.ts`'s `npm run` tests use `PATH`'s npm, as an operator does (the npm beside `process.execPath` would not help: Homebrew's is npm 11 too); AGENTS.md and the README state npm 12 first on `PATH`.
+  - **`npm audit`:** 18 (2 high, 14 moderate, 2 low, no critical): dompurify is now rated low by the advisory data, identically on npm 11.19.1, so not an npm 12 change.
 
 ### P3 — Low-risk runtime bumps · xs/easy · deps: P1 · independent of: P2, P4–P10
 
@@ -424,7 +439,7 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 | ----- | ------- | ---- | ------- |
 | P0    | done | 2026-11-18 | 24.22.3 and 26.13.1 green: 6511 passed, 130 skipped, no flake; audit 18 (1 critical, 2 high, 14 moderate, 1 low; picomatch advisory withdrawn); 2 dead allowScripts entries |
 | P1    | done | 2026-11-19 | `.nvmrc` 26, `engines` >=26.13.1, @types/node 26.6.6, setup-node v7; gates green (6511 passed, 130 skipped); live pro@nginx 70/70, free@nginx 53/53, twins 4/4 + 4/4, twin specs 122; no Node-26 warning |
-| P2    | pending |      |         |
+| P2    | done | 2026-11-19 | npm 12.2.3 (devEngines, onFail error); CI caches ~/.npm itself (setup-node's npm cache runs npm 11); allowScripts: fsevents@2.3.2 dropped, APVM deny key kept; clean `npm ci` ok; `.node-version` 26; hook runs `lint-staged` |
 | P3    | pending |      |         |
 | P4    | pending |      |         |
 | P5    | pending |      |         |
