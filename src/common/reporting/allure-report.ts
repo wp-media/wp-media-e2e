@@ -254,8 +254,16 @@ export function allureGenerateArgs(paths: {
 }
 
 /**
- * Allure's environment: the caller's, plus the history file `allurerc.mjs` reads (`ALLURE_HISTORY`)
- * and its layout switch (`ALLURE_SINGLE_FILE`).
+ * A `GIT_DIR` no git can open (`/dev/null` is no folder): outside a CI, Allure asks git for the
+ * origin URL (credentials and all), branch and commit, and writes them into the report. Like
+ * `captureGitInfo` off, a report names no author, branch or remote; what was tested is the run's
+ * facts line.
+ */
+export const NO_GIT_DIR = "/dev/null/not-a-repository";
+
+/**
+ * Allure's environment: the caller's, plus the history file `allurerc.mjs` reads (`ALLURE_HISTORY`),
+ * its layout switch (`ALLURE_SINGLE_FILE`) and {@link NO_GIT_DIR}, so no git facts reach the report.
  *
  * @param base - the environment to start from.
  * @param historyPath - the history file Allure reads and appends to.
@@ -270,6 +278,7 @@ export function allureEnv(
     ...base,
     ALLURE_HISTORY: historyPath,
     ALLURE_SINGLE_FILE: layout === "single-file" ? "true" : "false",
+    GIT_DIR: NO_GIT_DIR,
   };
 }
 

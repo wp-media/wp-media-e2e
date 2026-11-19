@@ -116,7 +116,8 @@ auto|plain|fancy`; quiet for `--list`, `--ui` and `PW_TEST_REPORTER` (Playwright
   APVM's output also by value (`maskValues`, against `GITHUB_TOKEN`/`GH_TOKEN`).
 - **What a run tested** — one facts line as the reports' title/banner/name, every fact in
   `<report dir>/run-facts.json`. `captureGitInfo` is **off**: Playwright would turn it on under CI and
-  put authors' emails and a diff in the report.
+  put authors' emails and a diff in the report. Allure gets `GIT_DIR=NO_GIT_DIR` (`allureEnv`): its
+  git lookup would embed the origin URL (credentials too), branch and commit.
 - **Report retention** — each run prunes its own cell's reports as it ends (`E2E_REPORTS_KEEP`, 20;
   30 days; the newest complete one up to 182); `npm run report:prune` does every cell.
 - **One cell, one orchestrator run** — a lock per site, keyed by `baseURL`, shared by every
@@ -166,7 +167,7 @@ npm run orchestrator:soak                           # minutes; ORCHESTRATOR_SOAK
 npm run report                                      # open the newest Playwright HTML report
 npm run report -- wp-rocket apache                  # a product/cell's newest
 npm run report:allure                               # Allure for the newest run
-npm run report:allure -- wp-rocket apache --open
+npm run report:allure -- wp-rocket apache --open    # serves on 127.0.0.1 only (remote: ssh -L)
 npm run report:allure -- backwpup pro@nginx <RUN_ID>  # that run
 npm run report:prune                                # dry run of retention over every cell
 npm run report:prune -- --apply                     # remove (--keep, --older-than, --keep-newest-for, --product, --cell)

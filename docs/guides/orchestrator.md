@@ -91,7 +91,7 @@ file, and with it another state directory. It must be yours and closed to other 
 | `notifications.datator`          | `url`: HTTPS, ending with `/` (Datator answers `301` without it). `apiKey`. Omit `datator` to turn it off                                                                    |
 | `reports.sshHost`                | Optional host or `user@host`: Slack's report paths become `scp` commands from it                                                                                             |
 | `reports.bundle.mode`            | `archive` (default): `report.tar.gz`; `folder`: `report/`; `both`; `none`: no bundle, no Allure ([Report bundle](#report-bundle))                                           |
-| `reports.bundle.traces`          | `strip` (default): Allure without Playwright traces, one file per page; `keep`: with them, a folder report that needs `npx allure open`                                       |
+| `reports.bundle.traces`          | `strip` (default): Allure without Playwright traces, one file per page; `keep`: with them, a folder report served with the landing page's `npx allure open` command (loopback only)                                       |
 | `serverWarningThreshold`         | 1–1000, default 5: warns when that many tasks share one server                                                                                                               |
 
 Checked at start and by `--dry-run`: a misspelt key, a value out of bounds, an unknown product or
@@ -287,7 +287,7 @@ included), a fresh `allure/` (named by the run's facts line, with the cell's `al
 | `mode: both`     | Both; Slack gives the archive's command                                                |
 | `mode: none`     | Nothing, no Allure                                                                     |
 | `traces: strip`  | Default. Allure without Playwright traces, one HTML file per page: opens from disk     |
-| `traces: keep`   | Allure with them, a folder report: served with `npx allure open allure`                |
+| `traces: keep`   | Allure with them, a folder report: served on loopback with `npx --yes allure@3.33.0 open --host 127.0.0.1 allure` (the landing page gives it; remote: `ssh -L`) |
 
 The landing page opens from disk and names what needs HTTP, with the command to run from the unpacked
 folder: Playwright's trace viewer (`npx playwright show-report playwright`), rich Cucumber

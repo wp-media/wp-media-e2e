@@ -1,6 +1,9 @@
 import { test, expect } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import {
+  ALLURE_SERVE_VERSION,
   allureEntry,
   bundleNameProblem,
   bundleOutputs,
@@ -171,15 +174,34 @@ test.describe("allureEntry", () => {
     });
   });
 
-  test("a folder report says how to serve it", () => {
+  test("a folder report says how to serve it: this Allure, on loopback only", () => {
     expect(
       allureEntry({ ok: true, layout: "folder", pages: ["index.html"] }),
     ).toMatchObject({
       serve: {
         why: expect.stringContaining("served over HTTP"),
-        command: "npx allure open allure",
+        command: "npx --yes allure@3.33.0 open --host 127.0.0.1 allure",
       },
     });
+  });
+
+  test("the serve command's Allure is the one this checkout installs", () => {
+    // A bump of `allure` must move the command with it: an older npx Allure may lack `--host`.
+    const installed = JSON.parse(
+      readFileSync(
+        join(
+          import.meta.dirname,
+          "..",
+          "..",
+          "..",
+          "node_modules",
+          "allure",
+          "package.json",
+        ),
+        "utf8",
+      ),
+    ) as { version: unknown };
+    expect(ALLURE_SERVE_VERSION).toBe(installed.version);
   });
 
   test("no page, or a failure, is missing with the reason", () => {

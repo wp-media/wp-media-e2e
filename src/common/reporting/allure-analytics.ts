@@ -12,7 +12,7 @@ import { join } from "node:path";
 /**
  * Keeping Allure's reports from phoning home. Allure 3's awesome and dashboard plugins write a
  * Google Tag Manager loader into their `index.html` unconditionally (`analyticsEnable: true` is
- * hard-coded, with no option or variable to turn it off, through Allure 3.22.1), so every report
+ * hard-coded, with no option or variable to turn it off, through Allure 3.33.0), so every report
  * opened online would load Google's script and send its plugin, Allure version and report id. This
  * removes that loader — the exact block the plugins' template renders, and nothing else — from a
  * freshly generated report. Fail-safe: a file where the block is not found exactly once, or that

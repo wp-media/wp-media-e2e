@@ -39,6 +39,7 @@ import {
 import {
   DEFAULT_ALLURE_BIN,
   DEFAULT_ALLURE_CONFIG,
+  NO_GIT_DIR,
   OUTPUT_TAIL_BYTES,
   allureEnv,
   allureGenerateArgs,
@@ -201,17 +202,42 @@ test.describe("pure parts", () => {
     ]);
   });
 
-  test("allureEnv: the caller's environment plus the history and the layout switch", () => {
-    const base = { PATH: "/bin", ALLURE_HISTORY: "/stale" };
+  test("allureEnv: the caller's environment plus the history, the layout switch and no git", () => {
+    const base = {
+      PATH: "/bin",
+      ALLURE_HISTORY: "/stale",
+      GIT_DIR: "/the/checkout/.git",
+    };
     expect(allureEnv(base, "/h.jsonl", "single-file")).toEqual({
       PATH: "/bin",
       ALLURE_HISTORY: "/h.jsonl",
       ALLURE_SINGLE_FILE: "true",
+      GIT_DIR: NO_GIT_DIR,
     });
     expect(allureEnv(base, "/h.jsonl", "folder").ALLURE_SINGLE_FILE).toBe(
       "false",
     );
     expect(base.ALLURE_HISTORY).toBe("/stale");
+    expect(base.GIT_DIR).toBe("/the/checkout/.git");
+  });
+
+  test("NO_GIT_DIR: a path git cannot open as a repository", () => {
+    const git = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: import.meta.dirname,
+      encoding: "utf8",
+      env: { PATH: process.env.PATH, GIT_DIR: NO_GIT_DIR },
+    });
+    expect(git.status).not.toBe(0);
+    expect(git.stdout).toBe("");
+  });
+
+  test("allurerc.mjs: every server it starts (`allure open`, `serve`) listens on loopback only", async () => {
+    const config = (await import(
+      pathToFileURL(DEFAULT_ALLURE_CONFIG).href
+    )) as {
+      default: { host?: unknown };
+    };
+    expect(config.default.host).toBe("127.0.0.1");
   });
 
   test("staleWorkDirNames: work folders of dead processes, and this process's unused ones", () => {
@@ -1189,6 +1215,58 @@ test.describe("generateAllureReport, with the real Allure CLI", () => {
       "BackWPup · pro@nginx · run 1",
     ]);
     expect(workDirs()).toEqual([]);
+  });
+
+  test("a report generated inside a git checkout names none of its remote, credentials, branch or commit", async () => {
+    // The report root inside a checkout, as `reports/` is: its origin URL carries a token.
+    const git = (...args: string[]): string =>
+      spawnSync("git", ["-C", root, ...args], {
+        encoding: "utf8",
+        env: { PATH: process.env.PATH, HOME: root },
+      }).stdout.trim();
+    git("init", "-q", "-b", "feature/secret-x");
+    git(
+      "remote",
+      "add",
+      "origin",
+      "https://x-access-token:ghp_FAKE@github.com/acme/repo.git",
+    );
+    git(
+      "-c",
+      "user.name=n",
+      "-c",
+      "user.email=n@e",
+      "commit",
+      "-q",
+      "--allow-empty",
+      "-m",
+      "x",
+    );
+    const sha = git("rev-parse", "HEAD");
+    // Without NO_GIT_DIR, Allure's git calls from the work folder would find this checkout.
+    expect(sha).toMatch(/^[0-9a-f]{40}$/);
+
+    await generateAllureReport(options(undefined, { traces: "keep" }));
+
+    const files = [
+      join(cellDir, "allure-history.jsonl"),
+      ...readdirSync(join(runDir, "allure"), { recursive: true })
+        .map((name) => join(runDir, "allure", String(name)))
+        .filter((path) => statSync(path).isFile()),
+    ];
+    expect(files.length).toBeGreaterThan(10);
+    for (const file of files) {
+      const text = readFileSync(file, "latin1");
+      for (const fact of [
+        "ghp_FAKE",
+        "x-access-token",
+        "secret-x",
+        "acme/repo",
+        sha,
+      ]) {
+        expect(text.includes(fact), `${fact} in ${file}`).toBe(false);
+      }
+    }
   });
 
   test("allurerc.mjs: one file per plugin when ALLURE_SINGLE_FILE is unset, as a manual `allure generate` runs", async () => {

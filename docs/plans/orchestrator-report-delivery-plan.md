@@ -309,7 +309,7 @@ not in this plan.
   and dashboard plugins through 3.22.1 (`ALLURE_NO_ANALYTICS` reaches only allure2). The exact template
   block is cut from each page at the report's top and one folder down; a page not matching exactly is
   left byte for byte and named (`analytics.left`).
-- `keep` stays a folder report, served with `npx allure open allure`; `strip` stays single file.
+- `keep` stays a folder report, served with `npx --yes allure@<installed> open --host 127.0.0.1 allure` (loopback; exact version, which has `--host`); `strip` stays single file.
 - `results.jsonl` is raw-only: the bundle is for people.
 - A failed Allure generation never fails the run: reports are derived.
 - `REPORT_MODE=rich`: Cucumber is copied whole and the landing page says to serve it.

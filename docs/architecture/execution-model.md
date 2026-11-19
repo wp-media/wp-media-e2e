@@ -341,7 +341,8 @@ then; schema v1); the verdict is the summary's (`verdictOf`).
   masked, HTML-escaped in the banner, escaped for the properties file (separators, `\`, controls,
   non-ASCII as `\uXXXX`, read back exact by Allure). `captureGitInfo` is off in the config factory:
   unset, Playwright enables it under CI and the HTML report would carry authors' emails and the PR's
-  diff.
+  diff. Allure generates with `GIT_DIR` at a path git cannot open (`NO_GIT_DIR`, `allureEnv`): run in
+  the checkout, it would write the origin URL (credentials included), branch and commit into the report.
 - **Never fails a run**: every step is caught; the first failure warns once (terminal sink, else
   stderr). Nothing for
   `--list`, nor with a command-line `--reporter` (it replaces every configured reporter).
