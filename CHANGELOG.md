@@ -26,6 +26,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 - No file ownership handover when commands already run as the site's user.
 - CI: unit tests in two shards; SSH twins in CI.
+- **Requires Node ≥ 26.13.1 and npm ≥ 12.2.3** (`engines`, `devEngines`: npm 11 fails every npm
+  command in the checkout). Node 26 ships npm 11 (Homebrew's too): `npm install --global npm@12.2.3`,
+  first on `PATH`.
+- Dependencies at their latest stable; `npm audit` 18 → 0:
+  - Playwright 1.65.1 (Chromium 159); `@mobile` reports the Pixel 5 screen (393×851).
+  - Allure 3.33: history from 3.18 reports continues; its server listens on `127.0.0.1` only
+    (remote: `ssh -L`).
+  - APVM 3.3.0: fresh WP Rocket zips keep nested vendor `php*`/`package*` files (new SHA-256).
+  - node-ssh 14: a dropped SSH connection is reported as lost while the program ran, or closed
+    before it was confirmed started (whether it ran unknown); never the command's arguments.
+  - pixelmatch 8: OKLab/HyAB colour metric, so the A/B threshold (0.2) no longer matches
+    Playwright's YIQ sensitivity.
 
 ### Fixed
 
@@ -34,6 +46,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 - BackWPup: a `wp-content` copy orphaned by a server reboot is recovered.
 - SSH: command line built and quoted by the suite; `sudo`'s unresolvable-hostname line removed.
 - Stuck page navigations fail fast and report the requests the page lost.
+- Allure reports no longer embed the checkout's git origin URL (credentials included), branch or
+  commit.
+- Terminal widths: a flag counts 2 columns, a lone regional indicator 1, as tmux draws them.
+- Unit and SSH-twin specs that flaked under load.
 
 ## [1.0.0]
 

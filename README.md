@@ -262,9 +262,8 @@ fonts) and fails if they differ beyond tolerance, attaching both renders and a h
 difference fails too (a layout change is a regression). Tolerances:
 [`src/common/config/visual.ts`](src/common/config/visual.ts). Tag such scenarios `@visual` to run them as a group, and run
 them in the Playwright container image for pixel-deterministic rendering:
-`mcr.microsoft.com/playwright:v<installed @playwright/test version>-noble`, which ships Node 26 from
-1.65 (Node 24 before, below `engines`; npm only warns). Its npm is Node's own, so
-`npm install --global npm@12.2.3` there first:
+`mcr.microsoft.com/playwright:v<installed @playwright/test version>-noble`, which ships Node 26 (from
+v1.65). Its npm is Node's own (11), so `npm install --global npm@12.2.3` there first:
 
 ```bash
 E2E_CELL=apache npm run test:wp-rocket -- --grep @visual

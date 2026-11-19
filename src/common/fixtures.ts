@@ -226,6 +226,9 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
   hasTouch: async ({ $tags, hasTouch }, use) => {
     await use(deviceForTags($tags)?.hasTouch ?? hasTouch);
   },
+  // No unit spec covers these overrides (they need the runner): WP Rocket's `@mobile` smoke
+  // scenario (`smoke.feature`, run by CI's `@noauth` smoke) is their guard — without `screen`,
+  // a phone would report the desktop's screen and that scenario fails.
   screen: async ({ $tags, screen }, use) => {
     await use(deviceForTags($tags)?.screen ?? screen);
   },

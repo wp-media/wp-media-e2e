@@ -241,8 +241,8 @@ Fallback reasons, each with its fix:
 
 | Part | Version |
 | --- | --- |
-| Runtime and language | Node ≥ 24.16, TypeScript 6.0.x strict |
-| Libraries | `node-ssh` ^13.2.1 (`execCommand` only since 12.1: its `exec`'s `shell-escape` 0.2.0 bypassed); execa ^10; `@playwright/test` ^1.62 (`request.newContext` for the probe; `BrowserContext.request` for the settling request, which shares the context's cookies); no new dependency |
+| Runtime and language | Node ≥ 26.13.1, TypeScript 6.0.x strict |
+| Libraries | `node-ssh` ^14.0.0 (`execCommand` only since 12.1: its `exec`'s `shell-escape` 0.2.0 bypassed); execa ^10; `@playwright/test` ^1.65.1 (`request.newContext` for the probe; `BrowserContext.request` for the settling request, which shares the context's cookies); no new dependency |
 | Target hosts | Ubuntu 24.04, sudo ≥ 1.9, `/bin/sh` = dash, GNU coreutils |
 | Twins | `ubuntu:24.04`; apache2 + php8.3-fpm; nginx + php8.5-fpm (`ondrej/php` PPA, minor pinned); MariaDB (apache) / MySQL (nginx); openssh-server; sudo; WP-CLI 2.12.0 phar (SHA-512 pinned) |
 
