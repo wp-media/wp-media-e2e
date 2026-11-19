@@ -384,14 +384,18 @@ function shell(line: string, ...args: string[]): string {
 /**
  * Starts a writer like the site's: in a tight loop, recreates `wp-content` and a folder in it when
  * missing (`wp_mkdir_p`) and writes files into both (the debug log, caches) — as `www-data` in the
- * twin. Stop it with {@link stopWriter}.
+ * twin. Run work beside it with {@link whileWriting}.
+ *
+ * A write fails whenever its folder was removed after the `mkdir`, the race itself; it goes through
+ * `true`, never `:`: a failed redirection of a special built-in (`:`) ends a POSIX shell, so the
+ * writer would stop at the very moment it matters.
  *
  * @param root - the WordPress root.
  */
 function startWriter(root: string): ChildProcess {
   const loop =
     'n=0; while :; do n=$((n+1)); mkdir -p "$1/wp-content/e2e-writer" 2>/dev/null; ' +
-    ': > "$1/wp-content/e2e-writer/w$n" 2>/dev/null; : > "$1/wp-content/e2e-writer-$n" 2>/dev/null; done';
+    'true > "$1/wp-content/e2e-writer/w$n" 2>/dev/null; true > "$1/wp-content/e2e-writer-$n" 2>/dev/null; done';
   const argv = ["sh", "-c", loop, "e2e-writer", root];
   const [file = "", ...args] =
     GNU_HOST === "twin"
@@ -405,6 +409,58 @@ async function stopWriter(writer: ChildProcess): Promise<void> {
   if (GNU_HOST === "twin") onGnu(["pkill", "-f", "e2e-writer"]);
   writer.kill("SIGKILL");
   await new Promise((resolve) => setTimeout(resolve, 200));
+}
+
+/** How long {@link expectWriting} waits for the writer's next file. */
+const WRITER_WAIT_MS = 10_000;
+
+/**
+ * Waits until the writer makes a file in `wp-content` after this call began, proving it writes now;
+ * throws, naming `when`, if none comes within {@link WRITER_WAIT_MS}: whatever ran beside a writer
+ * that stopped proves nothing.
+ *
+ * @param root - the WordPress root.
+ * @param when - when it was checked, for the message (`before it began`).
+ * @throws {@link Error} when the writer made nothing in time.
+ */
+async function expectWriting(root: string, when: string): Promise<void> {
+  // A file outside wp-content, so no listing sees it; `find -newer` compares to its mtime.
+  const mark = `${root}/e2e-writer-mark`;
+  shell('touch -- "$1"', mark);
+  const deadline = Date.now() + WRITER_WAIT_MS;
+  while (Date.now() < deadline) {
+    const made = shell(
+      'find "$1/wp-content" -maxdepth 1 -name "e2e-writer-*" -newer "$2" 2>/dev/null | head -n 1',
+      root,
+      mark,
+    );
+    if (made !== "") return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(
+    `the writer made no file in wp-content within ${String(WRITER_WAIT_MS)} ms ${when}: it has stopped, so nothing proves the site wrote meanwhile`,
+  );
+}
+
+/**
+ * Runs `work` while a writer ({@link startWriter}) writes into `wp-content`: only once it is seen
+ * writing, and fails unless it still writes after, so `work` ran beside it throughout.
+ *
+ * @param root - the WordPress root.
+ * @param work - what runs beside the writer (synchronous: `onGnu` blocks).
+ * @returns what `work` returned.
+ * @throws {@link Error} when the writer was not writing before or after `work`.
+ */
+async function whileWriting<T>(root: string, work: () => T): Promise<T> {
+  const writer = startWriter(root);
+  try {
+    await expectWriting(root, "before it began");
+    const result = work();
+    await expectWriting(root, "after it ended");
+    return result;
+  } finally {
+    await stopWriter(writer);
+  }
 }
 
 /**
@@ -471,15 +527,15 @@ test.describe("PUT_BACK_SCRIPT under a live writer", () => {
   }
 
   // Proves the writer reproduces the incident, so the test below is no stronger than the old way.
+  // The race is near-certain on the first try; a few more absorb a host that schedules the writer
+  // out of one whole removal.
   test("the old put-back — extracting over wp-content — fails while the site writes into it", async () => {
     await withSite(async ({ root, copy }) => {
-      const writer = startWriter(root);
-      const tries: string[] = [];
-      try {
-        for (
-          let i = 0;
-          i < 3 && tries.every((t) => !t.includes("Directory not empty"));
-          i += 1
+      const tries = await whileWriting(root, () => {
+        const outcomes: string[] = [];
+        while (
+          outcomes.length < 3 &&
+          outcomes.every((t) => !t.includes("Directory not empty"))
         ) {
           const old = onGnu(
             [
@@ -492,11 +548,10 @@ test.describe("PUT_BACK_SCRIPT under a live writer", () => {
             ],
             copy,
           );
-          tries.push(`exit ${String(old.code)}: ${old.stderr}`);
+          outcomes.push(`exit ${String(old.code)}: ${old.stderr}`);
         }
-      } finally {
-        await stopWriter(writer);
-      }
+        return outcomes;
+      });
       expect(tries.join("\n")).toMatch(
         /exit 2: tar: wp-content: Cannot unlink: Directory not empty/,
       );
@@ -505,16 +560,12 @@ test.describe("PUT_BACK_SCRIPT under a live writer", () => {
 
   test("puts wp-content back exactly while the site writes into it, then marks the copy back and expires its lease", async () => {
     await withSite(async ({ root, copy, before }) => {
-      const writer = startWriter(root);
-      let result: ReturnType<typeof onGnu>;
-      try {
-        result = onGnu(
+      const result = await whileWriting(root, () =>
+        onGnu(
           ["sh", "-c", PUT_BACK_SCRIPT, "sh", root, "900", "r#0", "1024"],
           copy,
-        );
-      } finally {
-        await stopWriter(writer);
-      }
+        ),
+      );
       expect(result.code, result.stderr).toBe(0);
       expect(listing(root)).toBe(before);
       expect(shell('ls -A "$1"', copy).split("\n").sort()).toEqual(
@@ -537,10 +588,8 @@ test.describe("PUT_BACK_SCRIPT under a live writer", () => {
   test("the rename probe leaves wp-content exactly as it was, while the site writes into it", async () => {
     await withSite(async ({ root, copy }) => {
       const damaged = listing(root);
-      const writer = startWriter(root);
-      let result: ReturnType<typeof onGnu>;
-      try {
-        result = onGnu(
+      const result = await whileWriting(root, () =>
+        onGnu(
           [
             "perl",
             "-e",
@@ -552,10 +601,8 @@ test.describe("PUT_BACK_SCRIPT under a live writer", () => {
             RENAME_PROBE,
           ],
           copy,
-        );
-      } finally {
-        await stopWriter(writer);
-      }
+        ),
+      );
       expect(result.code, result.stderr).toBe(0);
       expect(listing(root)).toBe(damaged);
       expect(shell('ls -A "$1"', copy)).not.toContain(RENAME_PROBE);
