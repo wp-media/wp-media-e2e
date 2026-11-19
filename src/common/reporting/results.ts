@@ -17,7 +17,7 @@ import { redactSecrets, withoutFormat } from "../text";
  * the results stream (`results-stream.ts`) and the end-of-run summary (`run-summary.ts`) both build
  * on it, so the two can never disagree about a run.
  *
- * Measured with Playwright 1.63 and playwright-bdd 9.2:
+ * Measured with Playwright 1.63 and playwright-bdd 9.2, the same on 1.65.1:
  *
  * - A Gherkin step is a `test.step` titled with its keyword (`When the backup runs`); a Background's
  *   steps sit inside the `Before Hooks › Background` hook step.

@@ -225,12 +225,20 @@ The module also owns **file transfer** (same dispatch, same cached SSH connectio
   login). It does not create the parent; staging does.
 - `assertResolvedInsideRoot` — where a path really leads ([Symlinks](#symlinks)).
 
-## Playwright ≥ 1.62 is a floor, not a preference
+## Playwright ≥ 1.64 is a floor, not a preference
 
-**Do not downgrade below 1.62.** On 1.61 an ordinary wp-admin save (post/redirect/get) could leave
-the tab **permanently unable to produce frames**: `requestAnimationFrame` dropped to 0 and stayed
-there across navigations and reloads; only a new tab was clean. Primitives needing a frame broke while
-DOM reads kept working, so it looked like a locator problem:
+**Do not downgrade below 1.64** (`package.json` asks for the version tested, ^1.65.1). Two releases
+set it:
+
+- **1.64** added the `screen` option fixture, which the `@mobile` profile overrides: on 1.63 a test
+  file overriding it does not load (`Fixture "screen" references itself, but does not have a base
+  implementation`).
+- **1.62** re-enabled Chromium's `RenderDocument` (below).
+
+On 1.61 an ordinary wp-admin save (post/redirect/get) could leave the tab **permanently unable to
+produce frames**: `requestAnimationFrame` dropped to 0 and stayed there across navigations and
+reloads; only a new tab was clean. Primitives needing a frame broke while DOM reads kept working, so
+it looked like a locator problem:
 
 | Primitive                                  | Needs a frame                                          | On a wedged tab                    |
 | ------------------------------------------ | ------------------------------------------------------ | ---------------------------------- |

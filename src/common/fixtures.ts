@@ -226,6 +226,9 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
   hasTouch: async ({ $tags, hasTouch }, use) => {
     await use(deviceForTags($tags)?.hasTouch ?? hasTouch);
   },
+  screen: async ({ $tags, screen }, use) => {
+    await use(deviceForTags($tags)?.screen ?? screen);
+  },
 });
 
 export const { Given, When, Then, Step, Before, After, BeforeAll, AfterAll } =

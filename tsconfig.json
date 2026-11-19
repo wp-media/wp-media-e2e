@@ -1,9 +1,11 @@
 {
   // Visit https://aka.ms/tsconfig to read more about this file.
   //
-  // The Playwright runner transpiles these files on the fly with esbuild: no
-  // build step and no file extensions required in imports. `tsc` is used only
-  // for type-checking (`noEmit`), so resolution mirrors the bundler.
+  // The Playwright runner transpiles these files on the fly with Babel (the
+  // orchestrator runs under tsx, i.e. esbuild): no build step and no file
+  // extensions required in imports. `tsc` is used only for type-checking
+  // (`noEmit`), so resolution mirrors the bundler. Playwright follows
+  // `useDefineForClassFields`, on for this `target`, as `tsc` checks it.
   "compilerOptions": {
     // --- Environment ---
     "module": "esnext",

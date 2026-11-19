@@ -60,7 +60,7 @@ export function assertPinKnown(
 }
 
 /**
- * Whether a `--project` filter selects a project, by Playwright's own rule (`filterProjects`, 1.63):
+ * Whether a `--project` filter selects a project, by Playwright's own rule (`filterProjects`, 1.65.1):
  * case-insensitive, and each `*` matches any run of characters.
  *
  * @param filter - one `--project` value, as typed.

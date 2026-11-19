@@ -15,19 +15,19 @@ End-to-end (E2E) tests for WP Media plugins: WP Rocket (performance), BackWPup (
 
 ## Key technologies
 
-| Area               | Tech                                                                                                                                                            |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Runtime            | **Node ≥ 26.13.1** (`engines`; `.nvmrc` and `.node-version` pin 26), **ESM** (`"type": "module"`)                                                               |
-| Package manager    | **npm ≥ 12.2.3** (`devEngines`; Node 26 ships 11: `npm install --global npm@12.2.3`); dependency scripts per `allowScripts` (see [`.npmrc`](.npmrc))            |
-| Language           | **TypeScript 6**, strict (`tsc` type-checks only — Playwright transpiles via esbuild)                                                                           |
-| Browser automation | **Playwright ≥ 1.62** (`@playwright/test`), Chromium only — the floor is load-bearing, see [wordpress-automation.md](docs/architecture/wordpress-automation.md) |
-| BDD                | **Cucumber/Gherkin** via **`playwright-bdd`** (`bddgen` generates specs)                                                                                        |
-| WP-CLI transport   | **execa** (local/docker), **node-ssh** (ssh)                                                                                                                    |
-| Visual diff        | **pixelmatch** + **pngjs**                                                                                                                                      |
-| Terminal layout    | **string-width** (display width per grapheme, never below what a terminal draws; ambiguous width narrow)                                                        |
-| Orchestrator       | **zod 4** (its config), **commander 15** (its `start`)                                                                                                          |
-| Reporting          | Playwright HTML, Cucumber HTML, **Allure** (`allure`, `allure-playwright`)                                                                                      |
-| Quality            | **ESLint** (typescript-eslint, strict + type-checked), **Prettier**, **husky** + **lint-staged**                                                                |
+| Area               | Tech                                                                                                                                                                                                                                                                                  |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime            | **Node ≥ 26.13.1** (`engines`; `.nvmrc` and `.node-version` pin 26), **ESM** (`"type": "module"`)                                                                                                                                                                                     |
+| Package manager    | **npm ≥ 12.2.3** (`devEngines`; Node 26 ships 11: `npm install --global npm@12.2.3`); dependency scripts per `allowScripts` (see [`.npmrc`](.npmrc))                                                                                                                                  |
+| Language           | **TypeScript 6**, strict (`tsc` type-checks only — Playwright transpiles via Babel)                                                                                                                                                                                                   |
+| Browser automation | **Playwright ≥ 1.65.1** (`@playwright/test`), Chromium only — floor 1.64 (`screen`, [device profiles](#device-profiles-desktop--mobile)); 1.62's `RenderDocument` reason still applies ([why](docs/architecture/wordpress-automation.md#playwright--164-is-a-floor-not-a-preference)) |
+| BDD                | **Cucumber/Gherkin** via **`playwright-bdd`** (`bddgen` generates specs)                                                                                                                                                                                                              |
+| WP-CLI transport   | **execa** (local/docker), **node-ssh** (ssh)                                                                                                                                                                                                                                          |
+| Visual diff        | **pixelmatch** + **pngjs**                                                                                                                                                                                                                                                            |
+| Terminal layout    | **string-width** (display width per grapheme, never below what a terminal draws; ambiguous width narrow)                                                                                                                                                                              |
+| Orchestrator       | **zod 4** (its config), **commander 15** (its `start`)                                                                                                                                                                                                                                |
+| Reporting          | Playwright HTML, Cucumber HTML, **Allure** (`allure`, `allure-playwright`)                                                                                                                                                                                                            |
+| Quality            | **ESLint** (typescript-eslint, strict + type-checked), **Prettier**, **husky** + **lint-staged**                                                                                                                                                                                      |
 
 ## Repository structure
 
@@ -224,7 +224,7 @@ generation fails. Shared fixtures:
 | `context` (override)      | —      | Watches the site's own requests; a failed scenario that lost some warns `[page-loads]` and attaches `page-load-failures`. |
 | `baseURL` (override)      | —      | Points navigation at the bound site.                                                                                      |
 | `storageState` (override) | —      | The bound site's saved login, or an empty session for `@noauth`.                                                          |
-| device options (override) | —      | `viewport` / `userAgent` / `isMobile` / `hasTouch` / `deviceScaleFactor`: the `@mobile` profile, else desktop.            |
+| device options (override) | —      | `viewport` / `screen` / `userAgent` / `isMobile` / `hasTouch` / `deviceScaleFactor`: the `@mobile` profile, else desktop. |
 
 WP Rocket's [`fixtures.ts`](src/projects/wp-rocket/fixtures.ts) adds `visitor`: a logged-out visitor
 asking for pages over HTTP, each visit's WP Rocket footprint read (`support/footprint.ts`: only a page
@@ -380,10 +380,13 @@ Tag-driven, per scenario, never a project dimension
 
 - **Default** — Desktop Chrome at `1600×700`.
 - **`@mobile`** — Pixel 5 (a Chromium preset, our only browser) at `389×829`: the full preset (user
-  agent, touch, scale), not just a narrow viewport, so responsive CSS, touch handlers and
+  agent, touch, scale, screen), not just a narrow viewport, so responsive CSS, touch handlers and
   user-agent checks see a phone.
 
-Both viewports are pinned, so a Playwright upgrade cannot shift them.
+Both viewports are pinned, so a Playwright upgrade cannot shift them. Each screen (`window.screen`)
+is its preset's (1920×1080, 393×851 on 1.65.1), read and checked by `presetScreen`: the presets'
+type omits it, and since 1.64 a spread preset applies it, so an `@mobile` scenario without the
+`screen` override would report the desktop's.
 
 ## Improvement gate (lint)
 

@@ -26,7 +26,7 @@ import {
 /**
  * How a run's results are read: which attempt is a test's last, its final status, the first error a
  * failure shows and where, where a scenario sits, and the counts. Each step tree below is the shape a
- * real run produced (Playwright 1.63, playwright-bdd 9.2) for the case it is named after.
+ * real run produced (Playwright 1.63, the same on 1.65.1; playwright-bdd 9.2) for the case it is named after.
  */
 
 /** An attempt with these steps and this error, as {@link firstError} reads it. */
@@ -146,7 +146,7 @@ test.describe("cleanMessage", () => {
   });
 
   test("drops Playwright's call log, whose element markup carries attribute values", () => {
-    // Verbatim, as Playwright 1.63 reported a locator timeout on `<input value="…">`.
+    // Abridged from what Playwright 1.65.1 reports for a locator timeout on `<input value="…">`.
     const message =
       "TimeoutError: locator.click: Timeout 500ms exceeded.\nCall log:\n" +
       "\u001b[2m  - waiting for locator('#pw')\u001b[22m\n" +
@@ -167,7 +167,7 @@ test.describe("cleanMessage", () => {
   });
 
   test("masks credentials, before the cut could leave one without the @ that marks it", () => {
-    // Verbatim, as Playwright 1.63 reported a navigation to a basic-auth URL.
+    // Abridged from what Playwright 1.65.1 reports for a navigation to a basic-auth URL.
     expect(
       cleanMessage(
         "page.goto: net::ERR_UNSAFE_PORT at http://u:SECRETPW@127.0.0.1:9/wp-login.php\nCall log:\n" +
@@ -459,7 +459,7 @@ test.describe("firstError — what a failure shows, and where", () => {
   });
 
   test("a body that failed with no step, after its Before hooks ended: no step, never a closing hook", () => {
-    // The auth setup failing its preflight, as Playwright 1.63 reported it.
+    // The auth setup failing its preflight, as Playwright 1.65.1 reports it.
     const message = "Error: [preflight] Transport verification failed";
     const steps = [
       step("Before Hooks", "hook", {

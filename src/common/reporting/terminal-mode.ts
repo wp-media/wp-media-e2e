@@ -5,7 +5,7 @@ import type {
 } from "../terminal/capabilities";
 
 /**
- * Who owns the screen while the terminal reporter runs, read from what Playwright 1.63 leaves in the
+ * Who owns the screen while the terminal reporter runs, read from what Playwright 1.65.1 leaves in the
  * reporter's reach (each checked in `playwright/lib`, and through the real runner where it can be):
  *
  * - `--list`: Playwright adds `_mode: "list"` to every reporter's options.
@@ -14,7 +14,7 @@ import type {
  *   asks the test server to intercept stdio, which replaces `process.stdout.write` with an own
  *   property of the stream — what a client of `playwright test-server` (an editor) that intercepts
  *   leaves too.
- * - watch mode: only `PWTEST_WATCH` turns it on (1.63 has no `--watch` flag). It does not intercept
+ * - watch mode: only `PWTEST_WATCH` turns it on (1.65.1 has no `--watch` flag). It does not intercept
  *   stdio, so the reporter prints there: only its context changes (no live region).
  * - `PW_TEST_REPORTER`: appends a second reporter to the configured stack, which then prints too.
  *   `--add-reporter` appends the same way and is not detected (only `argv` would show it): an added

@@ -19,7 +19,7 @@ test.describe("resolveInvocationId", () => {
     expect(env[INVOCATION_ENV]).toBe(`10:${TOKEN}`);
   });
 
-  // Playwright sets `TEST_WORKER_INDEX` in each worker before it loads the config (measured, 1.63).
+  // Playwright sets `TEST_WORKER_INDEX` in each worker before it loads the config (measured, 1.65.1).
   test("a worker takes its runner's, writing nothing", () => {
     const env: NodeJS.ProcessEnv = {
       [INVOCATION_ENV]: `10:${TOKEN}`,
