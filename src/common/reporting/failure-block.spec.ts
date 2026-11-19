@@ -27,7 +27,7 @@ import { terminalStyle } from "./terminal-lines";
  */
 
 /**
- * Playwright's own reading of a `--grep` value (`forceRegExp`, `playwright/lib/util.js` 1.63): a
+ * Playwright's own reading of a `--grep` value (`forceRegExp`, `playwright/lib/util.js` 1.65.1): a
  * value wrapped in slashes is a pattern with the flags after it; anything else is matched with `gi`.
  */
 function playwrightGrep(value: string): RegExp {
@@ -52,7 +52,7 @@ const ABOVE = ["f.feature.spec.js", "Feature"] as const;
 
 /**
  * Whether `--grep=<value>` selects a test, matched against the text Playwright builds for it
- * (`_grepTitleWithTags`, 1.63): the root's empty title, the project, then the file and each describe
+ * (`_grepTitleWithTags`, 1.65.1): the root's empty title, the project, then the file and each describe
  * — each title followed by its tags — the test's title, its tags, joined by spaces. By default the
  * test sits in {@link ABOVE}, neither tagged, and carries `@noauth`, as playwright-bdd puts a
  * scenario's tags on the test.
@@ -704,7 +704,7 @@ test.describe("failureFacts", () => {
   });
 
   test("a setup whose body threw with no step: no Step line, never a hook that ran after it", () => {
-    // The auth setup failing its preflight, as Playwright 1.63 reported it: only hooks began, the
+    // The auth setup failing its preflight, as Playwright 1.65.1 reports it: only hooks began, the
     // body's error on none of them, and the browser fixture torn down in Worker Cleanup.
     const facts = failureFacts(
       {

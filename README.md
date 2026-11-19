@@ -256,8 +256,10 @@ It loads the bypassed and the optimized page, stabilises each (scrolls to load l
 fonts) and fails if they differ beyond tolerance, attaching both renders and a highlighted diff. A size
 difference fails too (a layout change is a regression). Tolerances:
 [`src/common/config/visual.ts`](src/common/config/visual.ts). Tag such scenarios `@visual` to run them as a group, and run
-them in the Playwright container image for pixel-deterministic rendering (its npm is Node's own, so
-`npm install --global npm@12.2.3` there first):
+them in the Playwright container image for pixel-deterministic rendering:
+`mcr.microsoft.com/playwright:v<installed @playwright/test version>-noble`, which ships Node 26 from
+1.65 (Node 24 before, below `engines`; npm only warns). Its npm is Node's own, so
+`npm install --global npm@12.2.3` there first:
 
 ```bash
 E2E_CELL=apache npm run test:wp-rocket -- --grep @visual

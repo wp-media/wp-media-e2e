@@ -286,114 +286,16 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 
 ### P6 — Playwright 1.65.1 · m/medium · deps: P1 · independent of: P2–P5, P7–P10
 
-- `npm i -D @playwright/test@1.65.1`; the root `postinstall` downloads Chromium 159.
-- **Breaking (1.64): presets now apply `screen`.**
-  - `DESKTOP`/`MOBILE` (`src/common/config/devices.ts`) spread presets, so `@mobile` (Pixel 5) would report 1920×1080.
-  - 1.65.1 exposes `screen` as an option fixture (`contextOptions.screen`), so the existing tag-driven pattern works.
-  - **Fix:**
-    - Add `screen` to `DeviceProfile` as a sixth override in `src/common/fixtures.ts`.
-    - Delete the "Deliberately not applied: the preset's `screen`" comment in `devices.ts`.
-    - Extend `devices.spec.ts`: desktop 1920×1080, `@mobile` 393×851, both taken from the presets rather than hard-coded.
-    - Assert `window.screen` in `observedDevice` (`src/common/steps/world.steps.ts`) against the selected profile's `screen`, so the `@mobile` smoke checks it.
-- **Other 1.64/1.65 changes, checked as not affecting us:**
-  - Elements in hidden iframes now count as hidden: we use no iframes or frame locators in `src`.
-  - `--update-snapshots=missing` now passes: we don't use `updateSnapshots`.
-  - JSX follows the tsconfig: we have no JSX.
-  - Class fields follow `useDefineForClassFields`: one initializer reads `this` (`table-padding.php.spec.ts:39`), and it reads another field, which is safe.
-  - Fix the `tsconfig.json` comment: Playwright transpiles with Babel, not esbuild.
-- **Internals we rely on, unchanged in 1.65.1** (source-diffed):
-  - `PLAYWRIGHT_NO_COPY_PROMPT`, `PW_TEST_REPORTER`, `_mode`, `PWTEST_WATCH`, `PLAYWRIGHT_HTML_TITLE`, `captureGitInfo`;
-  - trace `snapshots.dom:false`;
-  - project filtering, the retry rule, drain signals;
-  - a worker's env handed on at stop;
-  - graceful-fs patch marks;
-  - `forceRegExp` and `_grepTitleWithTags`.
-  - `secrets.run.spec.ts`, `results-stream.run.spec.ts`, `import-boundary.spec.ts` and the tmux/pty specs exercise them.
-- **Playwright Docker image** (`@visual`; README, authoring-tests.md): ships Node 24 up to 1.63 and Node 26 from 1.65.1 (Dockerfile.noble `ARG NODE_VERSION`), so the container matches `engines` only from here. A mismatch only warns: `.npmrc` has no `engine-strict`.
-- **Comments naming 1.63 to update:**
-  - source: `terminal-mode.ts`, `authenticate.ts`, `results.ts`, `cell-pin.ts`, `import-probe.ts`, `__fixtures__/reporter-fakes.ts`;
-  - specs: `outcome.spec.ts`, `failure-block.spec.ts`, `results.spec.ts`.
-- **Done:**
-  - Gates pass with browsers installed normally; the `*.run.spec.ts` specs need the real Chromium.
-  - The `@noauth` smoke passes on both products, and the `@mobile` smoke checks a 393-wide screen.
-  - Live `@plugin` runs pass on both products.
-
-### P7 — Allure 3.33 · s/medium · deps: P1 · independent of: P2–P6, P8–P10
-
-- `npm i -D allure@3.33.0 allure-playwright@3.15.0`. Allure needs Node ≥22.18.
-- **Unchanged (diffed):**
-  - the analytics block `allure-analytics.ts` removes;
-  - `generate -o -c --name`;
-  - the `awesome/` + `dashboard/` layout and `allurerc.mjs`;
-  - the trace content type and step shape (`allure-results.ts`).
-- **Changed:** history lines are keyed by `retryHash` (since 3.19).
-  - Old lines map through `legacyHistoryId`, for the default environment only.
-  - `allure-history.ts` relies only on the top-level `timestamp` and one line per generation, which still hold.
-  - **Risk:** trend and flaky marks may not continue from 3.18 runs.
-- **Comments:** `allure-analytics.ts` ("through 3.22.1"), `allure-history.ts` ("3.18").
-- **Audit:** Allure 3.33 still pulls `glob@13.0.7` (GHSA-3g3m-2fjr-6pw4) and `minimatch@10.2.6` (GHSA-g3hv-75wg-m249).
-  - Try `overrides` to their fixed versions: glob 14.0.6 (a major) and minimatch ≥ 11.0.1.
-  - Keep them only if the "with the real Allure CLI" specs and `report:allure` pass; otherwise leave them in the deferred list.
-- **Done:**
-  - Gates pass, including the real-Allure-CLI block in `allure-report.spec.ts`.
-  - `npm run report:allure` on a cell with 3.18 history shows its trend; if not, document a one-time reset.
-  - `npm audit` no longer lists dompurify, follow-redirects, markdown-it or fast-xml-parser (measured on the upgraded tree).
-
-### P8 — node-ssh 14 · m/hard · deps: P1 · independent of: P2–P7, P9, P10
-
-- **Add the override to `package.json` first:** `"overrides": { "@types/ssh2": { "@types/node": "$@types/node" } }`.
-  - Then run `npm i -D node-ssh@14.0.0 @types/ssh2@^1.15.6`.
-  - Added afterwards, the nested `@types/node` 18.19.130 stays in the lockfile as `invalid` (measured).
-  - `npm ls @types/node` must show one, deduped copy.
-- **Breaking (#132): `execCommand` rejects** with ssh2's error when the connection dies mid-command, where 13.x resolved `code: null`.
-  - `transport-exec.ts:646-660` builds "the connection to X was lost (<reason>) while "<program>" was running…" only on `code === null`.
-  - `exec.ssh.spec.ts:223` and `:285` expect `(read ECONNRESET)` / `(Keepalive timeout)` in it. With node-ssh 14 and no fix, exactly those two fail (measured), which proves the specs catch it.
-  - **Fix:** wrap `ssh.execCommand` in a try/catch.
-    - **`NOT_CONNECTED`:** rethrow unchanged, because `withConnection` retries on it.
-    - **A recorded connection loss** (`connectionLosses.get(ssh)` set; node-ssh's own listener runs first in the same emit, so it is recorded by then): throw the existing "lost (<reason>)" message. Factor it into one helper shared with the `code === null` branch.
-    - **Anything else** (`Unable to exec`, `ERR_OUTPUT_TOO_LARGE`, `ETIMEDOUT`, a throwing callback): throw "<program> could not run over SSH on <site>: <error code or message>". Name the program, never the argv, and attach no `cause`; this is the exec-error rule in AGENTS.md.
-    - Keep the `code === null` branch for a channel closed without an error.
-  - **Specs:** add one for the "anything else" path (e.g. the test server refusing `exec`), asserting that no argument appears.
-- **Also:**
-  - Pass `noBuffer: true`: we collect the chunks ourselves, and without it `ERR_OUTPUT_TOO_LARGE` can reject.
-  - Fix stale comments: the error listener (≈ :437-442; node-ssh now listens for the connection's whole life) and "ssh2 types do not resolve" (`transport-exec.ts:367`, `ssh-server.ts:684`, `exec.ssh.spec.ts:66`).
-  - Replace the stand-in types (`ErrorEmitter`, `Connect`, `Observable`) with `@types/ssh2` types where they fit.
-- **Unaffected:**
-  - only named `{ NodeSSH }` imports;
-  - no `cwd` option;
-  - the test SSH server loads ssh2 itself.
-- **Done:**
-  - Gates pass, and so do the SSH-twins specs.
-  - Live runs pass on both products.
-  - A connection killed mid-command shows the "lost" message, naming only the program.
-
-### P9 — string-width 9 · s/medium · deps: P1 · independent of: P2–P8, P10
-
-- `npm i -D string-width@9.0.0`.
-- **Measured with v9** (official Node 26) against `layout.spec.ts` (`[name, text, columns, columns tmux drew]`):
-  - **Flag:** whole = 2, but the per-code-point sum = 4, so 4.
-  - **Lone regional indicator:** 2. It is a single code point, so `graphemeWidth` (`layout.ts:273`) returns string-width's width early.
-  - **Three indicators:** a flag plus a lone indicator.
-  - **Keycap `1⃣`:** 1.
-  - `cutToWidth`'s flag case (`layout.spec.ts:441`) fails too.
-- **Fix (D2) in `graphemeWidth`:**
-  - A cluster that is a single regional indicator returns 1.
-  - In the per-code-point sum, a regional indicator counts 1.
-  - Result: flag 2, lone 1, three indicators 3, all equal to tmux's column.
-- **Spec change:** the keycap row's measure changes 2 → 1. v9 now matches tmux's measured 1, which still respects the invariant "never below what a terminal draws". State this in the commit message.
-- **Run the whole table on v9** and list any other changed row. Treat it the same way: fix the code if the new width falls below tmux's column; otherwise change the row only to tmux's measured value.
-- **Done:**
-  - Gates pass, including the tmux/pty specs, `live-block.spec.ts`, `orchestrator/line-style.spec.ts` and `orchestrator/status/table.spec.ts`.
-
-### P10 — pixelmatch 8 · xs/easy · deps: P1 · independent of: P2–P9
-
-- `npm i -D pixelmatch@8.0.0`.
-- **API:** unchanged, and it ships its own types; `output` is typed `… | null | undefined`.
-- **Metric:** YIQ is replaced by OKLab/HyAB; `threshold` keeps its 0–1 scale.
-- **Docs:** fix the parity claims at `src/common/visual/compare.ts:7-9` and `src/common/config/visual.ts:4-7`.
-- **Open obligation:** re-tune `DEFAULT_PIXEL_THRESHOLD` with the first real `@visual` scenario.
-- **Spec:** add a near-colour pair to `compare.spec.ts` (indistinguishable colours give 0 diff), so the metric's behaviour is pinned.
-- **Done:** gates pass.
+- `npm i -D @playwright/test@1.65.1`; a targeted `npm i` runs no root `postinstall`, so Chromium 159 (revision 1255) came only from `npm run setup` (`npm ci`/`npm install` run it).
+- **Measured** (2026-11-19, official 26.13.1, npm 12.2.3; 1.65.1 still npm's `latest`; sources: GitHub releases v1.64.0–v1.65.1, the installed bundles diffed against 1.63.0, probes run on both):
+  - **Lockfile:** only `@playwright/test`, `playwright`, `playwright-core` (1.63.0 → 1.65.1); range `^1.65.1`.
+  - **`screen` (breaking, 1.64):** presets now apply `screen`, an option fixture new in 1.64; on 1.63 a file overriding it does not load, so 1.64 is the floor (AGENTS.md, `wordpress-automation.md`). `DeviceProfile` gains `screen` (sixth override in `fixtures.ts`), read by `presetScreen` (`devices.ts`; `DeviceDescriptor`'s type omits it and 92 of 207 presets lack it); `observedDevice` asserts `window.screen` (Desktop Chrome 1920×1080, Pixel 5 393×851). Without the override the `@mobile` smoke fails.
+  - **Transpiler:** Babel, not esbuild (tsx's): `useDefineForClassFields` true for `esnext` (`tsc` checks define semantics, TS2729); `tsconfig.json` and AGENTS.md corrected.
+  - **Internals the suite relies on** (`PLAYWRIGHT_NO_COPY_PROMPT`, `PW_TEST_REPORTER`/`printsToStdio`, `_mode`, `PWTEST_WATCH`, `PLAYWRIGHT_HTML_TITLE`, `captureGitInfo`, trace `snapshots.dom`, `forceRegExp`/`_grepTitleWithTags`, retries, SIGINT/worker stop, the produced environment, `TEST_WORKER_INDEX`, output-folder removal, graceful-fs marks): identical to 1.63.0 but bundler renames. `filterProjects` drops `default: false` projects only without `--project` (none set; `cell-pin.spec.ts`'s named path unchanged). No `RenderDocument` in Chromium's disabled features. By probe, identical: step trees, the locator-timeout and basic-auth `goto` messages, `globalTimeout`'s errors.
+  - **Other release notes** (grep): nothing used (frame locators, `updateSnapshots`, JSX, cookie APIs, `proxy`, request `params`, `.css` imports, blob reporter, CJS, `retryStrategy`).
+  - **Docker image** (`@visual`): v1.65.1's `Dockerfile.noble` ships Node 26 (NodeSource `node_26.x`; 24 up to v1.64.1); README states the tag and Node.
+  - **Gates:** green; unit 6625 passed (+5 `devices.spec.ts`), 134 skipped; every `*.run.spec.ts` on Chromium 159. Smoke (`@noauth`, every cell): BackWPup 4/4, WP Rocket 6/6.
+  - **Live** (Chromium 159 rev 1255): BackWPup pro@nginx 70/70 (52.0 min), free@nginx 53/53 (33.9 min), concurrent on RemoteDesktopQA, as long as on `develop`; WP Rocket twin-apache 4/4, twin-nginx 4/4 (concurrent, Mac twins); `@mobile` and desktop device scenarios passed. No retry, `[page-loads]`, settle-request, wp-login or inert-wait timeout. Twin unit specs 122/123: `housekeeping.ssh-twins.spec.ts:406` exceeded `withTwin`'s lock wait under 6 workers, passed alone (Deferred).
 
 ### P11 — Docs sync and final audit · s/easy · deps: P1–P10 · independent of: —
 
@@ -442,6 +344,11 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
   - `src/common/__fixtures__/temp-dir.spec.ts` (2 tests) fails when the checkout itself lives under the OS temp folder (`/tmp/…`).
   - `src/projects/wp-rocket/support/config-edits.php.spec.ts` (9 tests) fails on PHP 7.4: `__fixtures__/wp-rocket-edits-harness.php:136` uses `str_contains()` (PHP ≥ 8); polyfill it, or skip with a reason when the local PHP is older.
   - `src/projects/backwpup/support/content-copy-put-back.spec.ts:474` ("the old put-back … fails while the site writes") once did not reproduce the old failure there: its reproduction is timing-dependent.
+- **Flaky under load** (full Mac runs; each passes alone):
+  - Twin specs: `withTwin`'s 600 s lock wait is exceeded when several workers queue on one twin (`housekeeping.ssh-twins.spec.ts:406` under 6 workers, P6; also P1).
+  - `orchestrator/runs/launch.spec.ts:529` and `:579`.
+  - `src/common/__fixtures__/ssh-server.spec.ts:101`.
+  - `src/projects/backwpup/support/job-runs.spec.ts:284`: `expect.poll` abandons an in-flight stub `wp` call, whose write races `afterEach`'s `rmSync` (`ENOTEMPTY`).
 
 ## Status
 
@@ -453,7 +360,7 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 | P3    | done | 2026-11-19 | execa 10.2.1, commander 15.1.0; maxBuffer re-measured (still-running child now SIGTERM, outcome unchanged), comment + doc fixed, spec added |
 | P4    | done | 2026-11-19 | apvm-napi `#v3.3.0` (allow-git=all once); API superset, enums runtime; fresh WP Rocket zips +3 nested vendor files (new SHA); V257 clean; offline commit pins hit; live pro@nginx 70/70, free@nginx 53/53, twin-apache 4/4, all built fresh |
 | P5    | done | 2026-11-19 | eslint 10.15.0, typescript-eslint 8.73.0, globals 17.14.0, prettier 3.10.1 (0 reformats), lint-staged 17.6.1 (hook proven); 3 enum casts `as unknown as`; audit 18 → 10, eslint minimatch chain gone |
-| P6    | pending |      |         |
+| P6    | done | 2026-11-19 | @playwright/test 1.65.1 (Chromium 159); `screen` override + `presetScreen`, floor 1.64; internals unchanged; live pro@nginx 70/70, free@nginx 53/53, twins 4/4 + 4/4, twin specs 122/123 (a lock-wait flake) |
 | P7    | pending |      |         |
 | P8    | pending |      |         |
 | P9    | pending |      |         |

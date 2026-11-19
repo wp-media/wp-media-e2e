@@ -46,7 +46,7 @@ export const BEST_EFFORT_ALLOWANCE_PER_SITE_MS =
 
 /**
  * The variable that stops Playwright writing a failed test's page snapshot into `error-context.md`.
- * Undocumented — read in Playwright 1.63's own source each time a snapshot would be taken — so
+ * Undocumented — read in Playwright 1.65.1's own source each time a snapshot would be taken — so
  * `secrets.run.spec.ts` proves it still works.
  */
 const FAILURE_SNAPSHOT_OFF = "PLAYWRIGHT_NO_COPY_PROMPT";

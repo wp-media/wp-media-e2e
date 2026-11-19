@@ -5,7 +5,7 @@ import type { StepLike } from "../reporting/results";
 /**
  * For specs: just enough of Playwright's reporter objects — a test, an attempt, a step — to drive the
  * suite's reporters without a runner. Each holds only what the reporters read; the shapes were taken
- * from real runs (Playwright 1.63, playwright-bdd 9.2), see `reporting/results.ts`.
+ * from real runs (Playwright 1.63, the same on 1.65.1; playwright-bdd 9.2), see `reporting/results.ts`.
  */
 
 /** The folder the fake scenarios' generated specs live in. */

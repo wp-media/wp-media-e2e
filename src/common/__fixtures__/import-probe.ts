@@ -18,7 +18,7 @@ import { execInChildNode } from "./child-node";
  * One change is accepted, by name ({@link GRACEFUL_FS_PATCH}): graceful-fs's. Playwright bundles it
  * (`playwright-core`'s `utilsBundle.js`, and again in `playwright`'s `expect.js`), and the product
  * list reaches Playwright through the products' support modules, so importing `products.ts` wraps
- * `fs.close`, `fs.closeSync`, `process.cwd` and `process.chdir` — measured with Playwright 1.63. The
+ * `fs.close`, `fs.closeSync`, `process.cwd` and `process.chdir` — measured with Playwright 1.65.1. The
  * wrappers keep what they wrap (a close retries graceful-fs's queued opens; `cwd` is cached and
  * `chdir` clears the cache), and avoiding them would mean a product list that never loads its
  * products' support code. It is recognised by its marks, not by name: all four at once, each close

@@ -343,7 +343,7 @@ test.describe("runOutcome — error: the run could not test", () => {
   });
 
   test("the run's time limit, said rather than the error Playwright writes with it", () => {
-    // What Playwright 1.63 writes for `globalTimeout`: the error, then `timedout`.
+    // What Playwright 1.65.1 writes for `globalTimeout`: the error, then `timedout`.
     const events = [
       runError("Timed out waiting 4s for the test suite to run"),
       runEnd("timedout", { total: 2, passed: 1, didNotRun: 1 }),

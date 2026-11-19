@@ -8,7 +8,7 @@ import { randomBytes } from "node:crypto";
  *
  * It rides the environment as `<pid>:<token>`, believed only by the process that wrote it and by its
  * **direct children that are Playwright workers**: forked straight from the runner (`ppid`), each
- * given `TEST_WORKER_INDEX` before it loads the config (measured, Playwright 1.63). Anything else
+ * given `TEST_WORKER_INDEX` before it loads the config (measured, Playwright 1.65.1). Anything else
  * that inherited it writes its own: a run started from a worker (its parent is no writer), or one the
  * runner started directly (no worker index). Residual: a runner started directly by a runner that
  * itself inherited a worker's `TEST_WORKER_INDEX` — a run inside a run inside a worker — shares its
