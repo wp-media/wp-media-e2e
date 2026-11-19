@@ -191,14 +191,17 @@ function fromExeca(
   result: ExecaOutcome,
   cwd?: string,
 ): ExecResult {
-  // execa caps captured output (100 MB of characters by default) and still reports **the child's own
-  // exit code** — measured: `isMaxBuffer` with `exitCode` 0, 1 and 2 alike. A capped success is the
-  // dangerous shape: the caller would read a silently shortened stdout as the whole answer, and an
+  // execa caps captured output (100 MB of characters by default) and ends a child still running past
+  // it with `killSignal` (SIGTERM; SIGKILL 5 s later if still alive), the direct child only. Measured,
+  // every case `isMaxBuffer`: a child that exits first keeps **its own exit code** (0 and 2 alike),
+  // one still running reports SIGTERM (SIGKILL if it ignores that), one that keeps writing SIGPIPE
+  // (the broken pipe comes first: `yes`). execa destroys the overflowing stream but waits for the
+  // other pipes to close, so a descendant holding one of them delays the result. A capped success is
+  // the dangerous shape: the caller would read a silently shortened stdout as the whole answer, and an
   // assertion about what is *not* in it would pass. So it is raised rather than returned: the command
-  // ran, but its answer cannot be trusted, which is "could not ask at all" and not an outcome.
-  // Checked first, because a command that keeps writing is ended by the broken pipe (measured:
-  // `yes` reports SIGPIPE), and naming the signal would hide the cause.
-  // Applies to `local` and `docker` only — the ssh transport accumulates output with no cap at all.
+  // ran, but its answer cannot be trusted, which is "could not ask at all" and not an outcome. Checked
+  // first: naming the signal would hide the cause. Applies to `local` and `docker` only — the ssh
+  // transport accumulates output uncapped.
   if (result.isMaxBuffer === true) {
     throw new Error(
       `[wp/exec] "${label}" produced more output than can be captured, so its result was ` +

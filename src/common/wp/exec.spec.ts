@@ -232,6 +232,31 @@ test.describe("exec — a failure never quotes the command's arguments", () => {
     );
   });
 
+  // A command still running once over the cap is ended by execa's SIGTERM, not waited on: the race
+  // turns a wait for `sleep 60` into a failure naming it; naming the signal would hide the cause.
+  test("output over the capture cap, from a command still running", async () => {
+    let timer: NodeJS.Timeout | undefined;
+    const waited = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error("the command over the cap was waited on, not ended"));
+      }, 15_000);
+    });
+    try {
+      const run = exec(local, "sh", [
+        "-c",
+        "yes | head -c 100000001; exec sleep 60",
+        "sh",
+        ARG,
+      ]);
+      expect(await Promise.race([failureOf(run), waited])).toBe(
+        '[wp/exec] "sh" produced more output than can be captured, so its result was truncated ' +
+          "and cannot be trusted.",
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
   // A command that never stops writing is ended by the broken pipe, so it has a signal and no exit
   // code; naming SIGPIPE would hide the cause. The `--` matters: GNU `yes` (CI, the cells) refuses
   // `--key=…` as an unknown option and exits at once, while BSD `yes` (macOS) just repeats it.

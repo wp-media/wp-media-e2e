@@ -240,6 +240,18 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
   - Re-measure, then fix the stale comment at ≈ :195-201 ("still reports the child's own exit code — measured").
 - **commander 15.1:** only deprecates `storeOptionsAsProperties` and `combineFlagAndOptionalValue`, which we don't use.
 - **Done:** gates pass and the comment states the newly measured behaviour.
+- **Measured** (2026-11-19, official 26.13.1; both still npm's `latest`; lockfile: only these two change, `pretty-ms`/`yoctocolors` ranges in execa's entry, installed versions unchanged):
+  - **maxBuffer probe** (raw execa, `reject: false`, `maxBuffer: 1000` unless noted; 10.0.1 → 10.2.1), always `isMaxBuffer: true`:
+    - writes then exits 0 / 2: exit code kept on both;
+    - writes, then `sleep 3; exit 2`: 10.0.1 exit 2 after 3 s; 10.2.1 `SIGTERM`, usually still 3 s (the `sleep` grandchild holds stderr, and execa destroys only the overflowing stdout, then waits for the other pipes; ~11 ms when SIGTERM lands before `sh` starts `sleep`), 15 ms with `exec sleep 3`;
+    - a descendant holding only stderr delays the result (~2 s for `sleep 2`), only stdout not (~24 ms);
+    - SIGTERM ignored (`trap '' TERM; exec sleep 8`): `SIGKILL` at ~5 s (`forceKillAfterDelay` defaults to 5 s); only the direct child is signalled (`killDescendants` false);
+    - `yes` (small and default cap): `SIGPIPE` on both (the broken pipe comes before the kill);
+    - spec cases at the default cap (`yes | head -c 100000001` exit 0; `yes` `SIGPIPE`): unchanged.
+  - So `fromExeca`'s outcome is unchanged (`isMaxBuffer` first); comment rewritten, `wordpress-automation.md` names `SIGTERM` too. New `exec.spec.ts` case "from a command still running" (`…; exec sleep 60`): passes on 10.2.1 in 3.8 s; on 10.0.1 its 15 s deadline fails it ("waited on, not ended").
+  - **execa 10.1.0–10.2.1 notes, against our options** (`reject: false`, `stdin: "ignore"`, `cwd`, `timeout` in `preflight.ts`; no `all`, `killSignal`, `forceKillAfterDelay`, `cancelSignal`, `maxBuffer`, `encoding`, `extendEnv`, sync methods): only "invalid `timeout`/`forceKillAfterDelay` values fixed" and wrong-typed options now refused touch them, and ours are valid literals. `orchestrator/runs/leader.ts`'s `maxBuffer` is `node:child_process`'s.
+  - **commander 15.1.0:** no deprecated API used; its fixes (negative-number `E` exponent, Unicode variadic placeholders, inspector ports, help groups, `getOptionValueSourceWithGlobals`, `InvalidOptionArgumentError` undeprecated) touch nothing in `orchestrator/command.ts` (`command.spec.ts`'s verbatim messages pass).
+  - **Gates:** green; unit 6619 passed, 134 skipped, 1 load flake passing alone 3×: `job-runs.spec.ts:284` (`expect.poll`'s 1 s timeout abandons an in-flight stub `wp`, which writes its count file while `afterEach` removes the folder: `ENOTEMPTY`; not execa's).
 
 ### P4 — APVM 3.3.0 · s/medium · deps: P1 · independent of: P2, P3, P6–P10
 
@@ -440,7 +452,7 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 | P0    | done | 2026-11-18 | 24.22.3 and 26.13.1 green: 6511 passed, 130 skipped, no flake; audit 18 (1 critical, 2 high, 14 moderate, 1 low; picomatch advisory withdrawn); 2 dead allowScripts entries |
 | P1    | done | 2026-11-19 | `.nvmrc` 26, `engines` >=26.13.1, @types/node 26.6.6, setup-node v7; gates green (6511 passed, 130 skipped); live pro@nginx 70/70, free@nginx 53/53, twins 4/4 + 4/4, twin specs 122; no Node-26 warning |
 | P2    | done | 2026-11-19 | npm 12.2.3 (devEngines, onFail error); CI caches ~/.npm itself (setup-node's npm cache runs npm 11); allowScripts: fsevents@2.3.2 dropped, APVM deny key kept; clean `npm ci` ok; `.node-version` 26; hook runs `lint-staged` |
-| P3    | pending |      |         |
+| P3    | done | 2026-11-19 | execa 10.2.1, commander 15.1.0; maxBuffer re-measured (still-running child now SIGTERM, outcome unchanged), comment + doc fixed, spec added |
 | P4    | pending |      |         |
 | P5    | pending |      |         |
 | P6    | pending |      |         |

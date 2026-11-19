@@ -48,7 +48,8 @@ not set it), which `wpCli` passes as `--user` ([below](#wordpress-runs-as-the-si
 - **An exec error names the program and the reason, never the arguments.** The argv carries a
   `--key=` value and every value a `wp eval` snippet embeds (`phpLiteral`'s base64 is an encoding, not
   a cipher). execa's messages quote the command line, so on `local`/`docker` the message is built from
-  `isMaxBuffer` (checked first: endless output arrives killed by `SIGPIPE`), `signal` and `code`
+  `isMaxBuffer` (checked first: a child still running past the cap is ended by execa's `SIGTERM`, or
+  by `SIGPIPE` while still writing), `signal` and `code`
   (`ENOENT` means a missing program or a missing working directory alike). The label is the program
   only (`wp`, `sudo rm`, `docker exec <container> wp`; `docker cp`'s adds the suite's own paths); a
   command run as the site's identity is named by its program, never `sudo`. No
