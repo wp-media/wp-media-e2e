@@ -298,7 +298,7 @@ terminal's `report:`/`fetch:` lines under one `fitsSlack` rule.
 
 ## Stack
 
-Existing TypeScript on Node 24, `tsx`, the repo's Playwright unit runner; the Allure 3.18 CLI
+Existing TypeScript on Node 26, `tsx`, the repo's Playwright unit runner; the Allure 3 CLI (3.33)
 already in `node_modules` and `allurerc.mjs`; the system `tar` available on the runner and macOS;
 Node `fs`/`path`. No new dependency. The later dashboard (React/Vite) serves `report/index.html`;
 not in this plan.

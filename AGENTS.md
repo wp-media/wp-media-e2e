@@ -22,12 +22,12 @@ End-to-end (E2E) tests for WP Media plugins: WP Rocket (performance), BackWPup (
 | Language           | **TypeScript 6**, strict (`tsc` type-checks only — Playwright transpiles via Babel)                                                                                                                                                                                                   |
 | Browser automation | **Playwright ≥ 1.65.1** (`@playwright/test`), Chromium only — floor 1.64 (`screen`, [device profiles](#device-profiles-desktop--mobile)); 1.62's `RenderDocument` reason still applies ([why](docs/architecture/wordpress-automation.md#playwright--164-is-a-floor-not-a-preference)) |
 | BDD                | **Cucumber/Gherkin** via **`playwright-bdd`** (`bddgen` generates specs)                                                                                                                                                                                                              |
-| WP-CLI transport   | **execa** (local/docker), **node-ssh** (ssh)                                                                                                                                                                                                                                          |
-| Visual diff        | **pixelmatch** + **pngjs**                                                                                                                                                                                                                                                            |
-| Terminal layout    | **string-width** (display width per grapheme, never below what a terminal draws; ambiguous width narrow)                                                                                                                                                                              |
+| WP-CLI transport   | **execa 10** (local/docker), **node-ssh 14** (ssh)                                                                                                                                                                                                                                    |
+| Visual diff        | **pixelmatch 8** (OKLab/HyAB metric: its threshold is not Playwright's YIQ one) + **pngjs**                                                                                                                                                                                           |
+| Terminal layout    | **string-width 9** (display width per grapheme, never below what a terminal draws; ambiguous width narrow)                                                                                                                                                                            |
 | Orchestrator       | **zod 4** (its config), **commander 15** (its `start`)                                                                                                                                                                                                                                |
-| Reporting          | Playwright HTML, Cucumber HTML, **Allure** (`allure`, `allure-playwright`)                                                                                                                                                                                                            |
-| Quality            | **ESLint** (typescript-eslint, strict + type-checked), **Prettier**, **husky** + **lint-staged**                                                                                                                                                                                      |
+| Reporting          | Playwright HTML, Cucumber HTML, **Allure 3** (`allure` 3.33, `allure-playwright`)                                                                                                                                                                                                     |
+| Quality            | **ESLint 10** (typescript-eslint 8, strict + type-checked), **Prettier**, **husky** + **lint-staged**                                                                                                                                                                                 |
 
 ## Repository structure
 
@@ -68,7 +68,7 @@ orchestrator/               # runs cells in loops. Layout and design: docs/plans
 │                           # parent.ts (the parent's PID at boot: command.ts's first import); start-lines.ts, dry-run.ts (pure); text.ts (masking, safeSiteUrl); log.ts (its terminal via src/common/terminal/stream.ts's writeSafely/backlogBytes), screen.ts (on a TTY: styled lines via line-style.ts, the status table in a live region, cleared before `exiting` and on a crash, the process's own stdout/stderr writes printed above it via stdio-capture.ts; a pipe stays plain, byte for byte), files.ts, folders.ts, error-code.ts
 │                           # config/ (zod schema, parse, check, site-key, load, product-list, secrets) · runs/ (identity, environment, commands, launch, stop, shutdown, end, outcome, run.json record, bundle: the download bundle after each run — `reports.bundle`, 4 min, stopped past a drain — and Slack's `bundleCommand`)
 │                           # state/ (atomic writes, orchestrator.lock, site locks, inspect, orphans, counter, run folders + retention) · events/ (bus, run.finished v1)
-│                           # tasks/ (cycle: one run; loop: cycle + cooldown, --once; activity: what they tell `onActivity`) · status/ (the status table: results.jsonl tail, progress, task board, plain table, its colours; drawn on a TTY by screen.ts) · notify/ (bounded POST, Slack, Datator) · __fixtures__/ (fake suite, fake start, HTTP sink)
+│                           # tasks/ (cycle: one run; loop: cycle + cooldown, --once; activity: what they tell `onActivity`) · status/ (the status table: results.jsonl tail, progress, task board, plain table, its colours; drawn on a TTY by screen.ts) · notify/ (bounded POST, Slack, Datator) · __fixtures__/ (fake suite, fake start, HTTP sink; h2-sink: HTTP/2-only TLS, throwaway openssl cert)
 │                           # soak.spec.ts (hundreds of runs over the fake suite; ORCHESTRATOR_SOAK=1, npm run orchestrator:soak)
 docker/                     # local WordPress for the `docker` transport
 docker/ssh-cells/           # SSH twins of the cells (Ubuntu 24.04, apache/nginx, sudo): Dockerfile.<stack>, site.sh <variant> resets, check.sh proves (Phase 12)
@@ -728,8 +728,8 @@ history:
 - [`orchestrator-report-delivery-plan.md`](docs/plans/orchestrator-report-delivery-plan.md) — each
   run's report bundle (Allure, `report.tar.gz`, Slack's fetch command; done): its standing decisions.
 - [`dependency-update-plan.md`](docs/plans/dependency-update-plan.md) — Node 26, npm 12 and every
-  dependency to its latest stable (Playwright 1.65, node-ssh 14, string-width 9, …): facts, decisions,
-  phases P0–P11 and their status.
+  dependency to its latest stable (Playwright 1.65, node-ssh 14, string-width 9, …; done): its
+  decisions, the facts behind them and open obligations.
 
 ## When to update these docs
 

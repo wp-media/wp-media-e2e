@@ -15,7 +15,7 @@
 ## TL;DR
 
 - The suite runs Gherkin through the Playwright runner (`playwright-bdd`, not the Cucumber CLI) on
-  ESM, Node 24 and strict TypeScript. Goal: match or beat the baseline in capabilities, reporting,
+  ESM, Node 26 and strict TypeScript. Goal: match or beat the baseline in capabilities, reporting,
   maintainability and security, and add multi-product, multi-environment parallel runs.
 - Porting means modernise, never copy 1:1: every capability is re-implemented with current
   Playwright idioms (web-first assertions, auto-waiting locators, fixtures, `storageState`), strict
@@ -550,7 +550,7 @@ Phase 10 — Cleanup & validation (open).
 Phase 11 — Shared SSH server profiles (open; after Phase 12). Configuration and transport;
 depends on nothing (independent of Phase 6 and Phase 10); before 6H. Phase 12's `runAs`/`umask` join
 the fields a profile cannot carry. Stack:
-existing TypeScript on Node 24, `node-ssh` as already used, the repo's Playwright unit runner, and
+existing TypeScript on Node 26, `node-ssh` as already used, the repo's Playwright unit runner, and
 `node:fs`/`node:path`; no new dependency.
 
 - Goal: stop repeating what belongs to the server. A site's `transport` still says `"mode": "ssh"`,
@@ -715,7 +715,8 @@ Cucumber HTML formatter: media-rich on failure (base64 screenshot and video) but
 viewer, no trends. Most other libraries have modern, often built-in replacements.
 
 - Drop, never carry over (Phase 10 checks it): `axios`, `@types/axios` (deprecated stub), `boxen`,
-  `node-zip`, direct `ssh2` and `@types/ssh2` (ssh2 stays a transitive dependency of node-ssh),
+  `node-zip`, direct `ssh2` (it stays a transitive dependency of node-ssh; `@types/ssh2` came back
+  as node-ssh 14's optional peer, for its types),
   `multiple-cucumber-html-reporter`, `@types/cucumber` (deprecated stub), `eslint-plugin-es5`, and
   the duplicate `playwright` (redundant with `@playwright/test`). Proven unused by repo-wide
   inspection.
@@ -724,7 +725,7 @@ viewer, no trends. Most other libraries have modern, often built-in replacements
   - `shelljs` (+ types) → execa: promise-based, array args (no injection), structured errors, ESM.
   - `chalk` → `node:util` `styleText`: no dependency; emits no escapes off a TTY and honours
     `NO_COLOR` (verified on Node 24).
-  - Add `string-width@8.3.0` (ESM, Node ≥ 20) as a dev dependency, like every package here (`npm ci`
+  - Add `string-width` (9.0.0; ESM, Node ≥ 22) as a dev dependency, like every package here (`npm ci`
     installs them for runs): the terminal's width cuts need real display columns for emoji, CJK and
     combining marks. No `slice-ansi`/`wrap-ansi` — layout runs on plain text and permanent lines let
     the terminal wrap; `Intl.Segmenter` gives the grapheme boundaries for the cut.
