@@ -3,7 +3,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { join } from "node:path";
 
-import { NodeSSH } from "node-ssh";
+import { NodeSSH, type Config, type SSHExecCommandOptions } from "node-ssh";
 
 import {
   SSH_KEEPALIVE,
@@ -11,9 +11,11 @@ import {
   disposeConnections,
   exec,
   execElevated,
+  failureReason,
   resetElevationCaches,
   shellQuote,
   sshCommandLine,
+  sshExecFailure,
 } from "./exec";
 import { CommandKilledError } from "./errors";
 import { HOSTILE_ARGUMENTS } from "../__fixtures__/hostile-arguments";
@@ -32,10 +34,10 @@ import {
  * Against an in-process ssh2 server that **runs** each command line with `sh -c`, reached through a
  * local proxy the test can cut or hold half-open, so nothing leaves the machine and the client side
  * is exactly the code the cells use. What is pinned is that every argument reaches the program as it
- * was given, that a working directory that cannot be entered runs nothing, and the difference between
- * a command failing and the **worker dying** — node-ssh stops listening for connection errors once a
- * channel is open, and an unhandled `error` event is an uncaught exception — and between a dead
- * connection costing a scenario and costing a reconnect.
+ * was given, that a working directory that cannot be entered runs nothing, that a connection lost
+ * under a command is reported as that — never as a kill, and never as the worker dying of an
+ * unhandled `error` event, an uncaught exception — and the difference between a dead connection
+ * costing a scenario and costing a reconnect.
  */
 
 let server: SshTestServer;
@@ -51,7 +53,9 @@ const links: net.Socket[] = [];
 /** The proxy's server-facing sockets, closed with the links after each test. */
 const upstreams: net.Socket[] = [];
 /** Every config node-ssh was asked to connect with, newest last. */
-const configs: Record<string, unknown>[] = [];
+const configs: Config[] = [];
+/** The options of every `execCommand` the transport made, newest last. */
+const execOptions: SSHExecCommandOptions[] = [];
 /** Resolves the moment the client has a command's channel open — see {@link runningCommand}. */
 let channelOpened: (() => void) | undefined;
 /** While set, the probing the client is steered to use instead of the transport's own. */
@@ -63,15 +67,8 @@ let keepaliveOverride:
  */
 const teardown: (() => void | Promise<void>)[] = [];
 
-/** node-ssh's `execCommand`, typed here because the ssh2 types it is declared with do not resolve. */
-interface Observable {
-  execCommand: (
-    this: NodeSSH,
-    command: string,
-    options?: Record<string, unknown>,
-  ) => Promise<unknown>;
-}
-const prototype = NodeSSH.prototype as unknown as Observable;
+const { prototype } = NodeSSH;
+// eslint-disable-next-line @typescript-eslint/unbound-method -- only ever called with `.call(this, …)`.
 const originalExecCommand = prototype.execCommand;
 
 test.beforeAll(async () => {
@@ -126,9 +123,14 @@ test.beforeAll(async () => {
     (config) => configs.push(config),
   );
   teardown.push(unsteer);
-  // node-ssh calls `onChannel` right after it stops listening for connection errors itself, which
-  // is the moment an error has nobody but the transport to catch it.
-  prototype.execCommand = function (command, options = {}) {
+  // node-ssh calls `onChannel` once the server has accepted the command: from then on, an error on
+  // the connection is one under a running command.
+  prototype.execCommand = function (
+    this: NodeSSH,
+    command: string,
+    options: SSHExecCommandOptions = {},
+  ) {
+    execOptions.push(options);
     return originalExecCommand.call(this, command, {
       ...options,
       onChannel: () => {
@@ -140,6 +142,8 @@ test.beforeAll(async () => {
 
 test.afterEach(() => {
   disposeConnections();
+  server.refuseExec(false);
+  server.dropOnExec(false);
   holdFin = false;
   keepaliveOverride = undefined;
   connectPort = proxyPort;
@@ -160,9 +164,9 @@ const transport = (): ReturnType<SshTestServer["transport"]> =>
 /**
  * Starts a command that never answers, and resolves once its channel is open on the client.
  *
- * Earlier than that, node-ssh's own listener catches a connection error, so a reset landing there
- * would not exercise the transport's at all. The pending command is wrapped rather than returned,
- * since an async function returning a promise would wait for it — and it never settles on its own.
+ * Earlier than that, a reset would land on a command not yet running, not the case the tests below
+ * pin. The pending command is wrapped rather than returned, since an async function returning a
+ * promise would wait for it — and it never settles on its own.
  */
 async function runningCommand(): Promise<{
   readonly pending: Promise<unknown>;
@@ -310,6 +314,80 @@ test("a command killed by a signal is a CommandKilledError carrying the signal",
   expect((error as CommandKilledError).signal).toBe("SIGSEGV");
 });
 
+// ssh2's reason is all there is to go on; the argv carries what must never reach a report.
+test("a command the server refuses to run names the program and the reason, never its arguments", async () => {
+  await exec(transport(), "echo", ["warm"]);
+  server.refuseExec(true);
+  const opened = configs.length;
+  const sent = server.commands.length;
+
+  const error: unknown = await exec(transport(), "wp", [
+    "--key=SECRET-ssh-planted",
+  ]).catch((caught: unknown) => caught);
+
+  expect(error).toBeInstanceOf(Error);
+  expect(error).not.toBeInstanceOf(CommandKilledError);
+  expect((error as Error).message).toBe(
+    '[wp/exec] "wp" could not run over SSH on tester@site.test: Unable to exec.',
+  );
+  expect((error as Error).cause).toBeUndefined();
+  expect(String((error as Error).stack)).not.toContain("SECRET");
+  // Refused, not lost: no second connection, no second try.
+  expect(configs.length).toBe(opened);
+  expect(server.commands.length).toBe(sent);
+});
+
+test("a refused command leaves the connection usable for the next one", async () => {
+  await exec(transport(), "echo", ["warm"]);
+  server.refuseExec(true);
+  await exec(transport(), "echo", ["refused"]).catch(() => undefined);
+  server.refuseExec(false);
+  const opened = configs.length;
+
+  const result = await exec(transport(), "echo", ["again"]);
+
+  expect(result.stdout).toBe("again");
+  expect(configs.length).toBe(opened);
+});
+
+// ssh2 fails the pending request as `Unable to exec`, a refusal's words, yet the command line had
+// gone out: the server may have started it. "Could not run" would tell an operator nothing happened.
+test("a connection closed before the server confirms a command started says whether it ran is unknown", async () => {
+  await exec(transport(), "echo", ["warm"]);
+  server.dropOnExec(true);
+  const opened = configs.length;
+  const sent = server.commands.length;
+
+  const error: unknown = await exec(transport(), "wp", [
+    "--key=SECRET-ssh-planted",
+  ]).catch((caught: unknown) => caught);
+
+  expect(error).toBeInstanceOf(Error);
+  expect(error).not.toBeInstanceOf(CommandKilledError);
+  expect((error as Error).message).toBe(
+    '[wp/exec] the connection to tester@site.test closed before "wp" was confirmed started ' +
+      "(Unable to exec), so whether it ran is unknown.",
+  );
+  expect((error as Error).cause).toBeUndefined();
+  expect(String((error as Error).stack)).not.toContain("SECRET");
+  // Sent once, never retried: a second try could run it twice.
+  expect(server.commands.length).toBe(sent + 1);
+  expect(configs.length).toBe(opened);
+});
+
+test("a connection closed before a command was confirmed started leaves the next command a new one", async () => {
+  await exec(transport(), "echo", ["warm"]);
+  server.dropOnExec(true);
+  await exec(transport(), "echo", ["dropped"]).catch(() => undefined);
+  server.dropOnExec(false);
+  const opened = configs.length;
+
+  const result = await exec(transport(), "echo", ["again"]);
+
+  expect(result.stdout).toBe("again");
+  expect(configs.length).toBe(opened + 1);
+});
+
 test("a lost connection is not a CommandKilledError", async () => {
   const { pending } = await runningCommand();
   links.at(-1)?.resetAndDestroy();
@@ -370,6 +448,118 @@ test("every connection is opened with the probing that gives a silent link up wi
   expect(
     SSH_KEEPALIVE.intervalMs * (SSH_KEEPALIVE.countMax + 1),
   ).toBeLessThanOrEqual(60_000);
+});
+
+// ── What a rejected execCommand becomes ─────────────────────────────────────────────────────────
+
+test.describe("sshExecFailure", () => {
+  // Never connected — what a closed connection looks like to node-ssh — and no loss recorded for it.
+  const closed = new NodeSSH();
+  // A live connection, as far as the check reads one: a rejection on it is the server's refusal.
+  const live = Object.assign(new NodeSSH(), { isConnected: () => true });
+
+  test("ssh2's refusal of a request on a dead socket is passed on as it is, for the retry", () => {
+    const refusal = new Error("Not connected");
+
+    expect(sshExecFailure(closed, transport(), "wp", refusal)).toBe(refusal);
+    expect(sshExecFailure(live, transport(), "wp", refusal)).toBe(refusal);
+  });
+
+  test("a rejection on a live connection names the program and the reason, with no cause", () => {
+    const failure = sshExecFailure(
+      live,
+      transport(),
+      "wp",
+      new Error("Unable to exec"),
+    ) as Error;
+
+    expect(failure.message).toBe(
+      '[wp/exec] "wp" could not run over SSH on tester@site.test: Unable to exec.',
+    );
+    expect(failure.cause).toBeUndefined();
+  });
+
+  test("a rejection on a closed connection says whether the program ran is unknown, with no cause", () => {
+    const failure = sshExecFailure(
+      closed,
+      transport(),
+      "wp",
+      new Error("Unable to exec"),
+    ) as Error;
+
+    expect(failure.message).toBe(
+      '[wp/exec] the connection to tester@site.test closed before "wp" was confirmed started ' +
+        "(Unable to exec), so whether it ran is unknown.",
+    );
+    expect(failure.cause).toBeUndefined();
+  });
+
+  test("a closed connection's reason is its code, never a message that could quote an argument", () => {
+    const failure = sshExecFailure(
+      closed,
+      transport(),
+      "wp",
+      Object.assign(new Error("--key=SECRET"), { code: "ECONNABORTED" }),
+    ) as Error;
+
+    expect(failure.message).toContain("(ECONNABORTED)");
+    expect(failure.message).not.toContain("SECRET");
+  });
+
+  // ssh2 sends the command line only once the channel is open; a close before that is this error.
+  test("a channel still opening when the connection closed could not run: nothing was sent", () => {
+    const failure = sshExecFailure(
+      closed,
+      transport(),
+      "wp",
+      new Error("No response from server"),
+    ) as Error;
+
+    expect(failure.message).toBe(
+      '[wp/exec] "wp" could not run over SSH on tester@site.test: No response from server.',
+    );
+    expect(failure.cause).toBeUndefined();
+  });
+});
+
+test.describe("failureReason", () => {
+  /** An Error carrying `code`, as ssh2's and node-ssh's do. */
+  const coded = (message: string, code: unknown): Error =>
+    Object.assign(new Error(message), { code });
+
+  const cases: readonly (readonly [string, unknown, string])[] = [
+    [
+      "a string code wins over the message",
+      coded("--key=SECRET", "ETIMEDOUT"),
+      "ETIMEDOUT",
+    ],
+    ["no code: the message", new Error("Unable to exec"), "Unable to exec"],
+    [
+      "an empty code: the message",
+      coded("Unable to exec", ""),
+      "Unable to exec",
+    ],
+    [
+      "a numeric code (SFTP's): the message",
+      coded("No such file", 2),
+      "No such file",
+    ],
+    [
+      "no code and no message: the error's name",
+      new RangeError(""),
+      "RangeError",
+    ],
+    [
+      "a thrown non-Error: never its text",
+      "--key=SECRET",
+      "a non-Error value was thrown",
+    ],
+  ];
+  for (const [name, error, reason] of cases) {
+    test(name, () => {
+      expect(failureReason(error)).toBe(reason);
+    });
+  }
 });
 
 // ── The command line ─────────────────────────────────────────────────────────────────────────────
@@ -561,6 +751,16 @@ test("node-ssh is sent the whole command line and left to change no folder of it
   expect(server.commands.at(-1)).toBe(
     `cd -- ${shellQuote(server.root)} && exec 'true' 'a b'`,
   );
+  expect(execOptions.at(-1)?.cwd).toBeUndefined();
+});
+
+// The transport collects the chunks itself: a copy node-ssh kept as strings would be decoded chunk
+// by chunk, trimmed at both ends, and could be refused as too large to return.
+test("node-ssh is asked to keep no output of its own and to trim nothing", async () => {
+  const result = await exec(transport(), "printf", ["  a\\n  "]);
+
+  expect(result.stdout).toBe("  a\n  ");
+  expect(execOptions.at(-1)).toMatchObject({ noBuffer: true, noTrim: true });
 });
 
 // The twins share a host and differ by port, so a declared port must reach node-ssh, and an

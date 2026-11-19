@@ -64,8 +64,9 @@ not set it), which `wpCli` passes as `--user` ([below](#wordpress-runs-as-the-si
   nothing: `local` throws, `ssh` returns the failed `cd` (non-zero exit, the shell's reason).
 - **The `ssh` command line** (`sshCommandLine`): `cd -- <cwd> && exec <file> <args…>`, every word —
   the program too — single-quoted by `shellQuote` (`'` → `'\''`, `""` → `''`), sent with no node-ssh
-  `cwd`. node-ssh's own `exec` was dropped: its `shell-escape` lost an empty argument, and its
-  `cd <cwd> ;` ran the command in the login's home when `cwd` was missing. Refused before connecting:
+  `cwd` (its `cd` reads a leading `~/` as the home; before 14.0, `cd <cwd> ;` ran the command in the
+  login's home when `cwd` was missing). node-ssh's own `exec` was dropped: its `shell-escape` lost an
+  empty argument. Refused before connecting:
   a `cwd` that is not absolute (`cd -- ''` is a no-op; a relative one resolves from the login's home or
   `CDPATH`) and a program starting with `-` (dash's `exec` takes no `--`). `exec` runs **an executable
   on the login's `PATH`** — a `wp` shell function or alias (`~/.bashrc`) is never run. The SSH user's
@@ -75,8 +76,9 @@ not set it), which `wpCli` passes as `--user` ([below](#wordpress-runs-as-the-si
   recording fake `sudo` on its `PATH` and real SFTP writes
   ([`__fixtures__/ssh-server.ts`](../../src/common/__fixtures__/ssh-server.ts); ssh2's server caps a
   line at ~34 KB, OpenSSH took 64 KiB). Output is collected as buffers and decoded once
-  (`decodeOutput`): node-ssh's own strings decode each chunk alone, turning a multi-byte character split
-  between two chunks into `U+FFFD` (measured with 200,000 × `é`).
+  (`decodeOutput`), with node-ssh keeping no strings of its own (`noBuffer`; up to 13.x they decoded
+  each chunk alone, turning a multi-byte character split between two chunks into `U+FFFD`, measured
+  with 200,000 × `é`; 14.0's can be refused as too large to return, `ERR_OUTPUT_TOO_LARGE`).
 - **The `site` state's line** (`sshWrappedLine`): `exec 'sudo' '-n' '-u' <u> '-g' <g> '--' '/bin/sh'
   '-c' <RUN_AS_SCRIPT> 'e2e-run-as' <umask> <cwd> <file> <args…>` (`runAsArgv`; numeric halves `#id`),
   **no outer `cd`**: the wrapper sets the umask and enters `cwd` as the identity, so the SSH user needs
@@ -113,10 +115,17 @@ not set it), which `wpCli` passes as `--user` ([below](#wordpress-runs-as-the-si
 - SSH connections are cached per endpoint; `disposeConnections()` closes them (worker teardown).
 - **A broken SSH link fails the command on it, never the run.** Each connection is probed every 10 s
   (`SSH_KEEPALIVE`), so a silent link is dropped within ~40 s (unprobed, a command was still waiting
-  after 70 s). node-ssh listens for errors only while connecting or opening a channel, and an
-  unhandled `error` event ends the worker (measured: `ECONNRESET` mid-command), so the transport keeps
-  its own listener: the command fails with `the connection to <host> was lost (<reason>)` and the next
-  one reconnects. A connection that died **between** commands costs a reconnect, not a failure: once
+  after 70 s). node-ssh (14.0) listens for connection errors for the connection's whole life and
+  rejects the running command with the error; the transport records each error too, so that command
+  fails with `the connection to <host> was lost (<reason>) while "<program>" was running` and the next
+  one reconnects. A connection that closes cleanly after the request went out but before the server
+  confirmed the start (ssh2 then says `Unable to exec`, as for a refusal, though the command may have
+  run) fails with `the connection to <host> closed before "<program>" was confirmed started (<reason>),
+  so whether it ran is unknown`. Any other rejection — the server refusing the request on a live
+  connection, or a channel still opening when it closed (`No response from server`: nothing sent) —
+  fails as `"<program>" could not run over SSH on <host>: <code or message>`. Each names the program
+  alone, no argument, no `cause`, and none is retried; a channel closed with neither status nor signal
+  (the connection disposed under it) says so. A connection that died **between** commands costs a reconnect, not a failure: once
   ssh2 half-closes its socket (after a protocol error or a server's disconnect) it refuses every request with `Not connected` before sending anything,
   while node-ssh still reports it connected (minutes on a failing link; met twice by a runner waking
   from sleep). That refusal alone is retried once on a new connection, for commands and uploads
