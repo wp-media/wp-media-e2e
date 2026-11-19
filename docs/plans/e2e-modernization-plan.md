@@ -277,10 +277,10 @@ As built: authoring-tests.md, "Page Object Model".
 The baseline's BackstopJS was fully disabled (`return; // Skip VR tests` in every step, zero
 committed references) and used only an A/B model: the page with optimisations bypassed
 (`?nowprocket`) against the optimised page, same run, no stored baseline. So the active model is
-that A/B check, diffed with pixelmatch + pngjs (the engine Playwright uses internally, browser-free
-and unit-testable). A committed-baseline helper (`screenshot.ts`, `toHaveScreenshot`) exists as
-wiring only; if it is ever activated, generate baselines in the CI image or container, commit them
-per project and mask dynamic regions.
+that A/B check, diffed with pixelmatch + pngjs (browser-free and unit-testable; from pixelmatch 8 an
+OKLab/HyAB metric, while Playwright bundles a YIQ pixelmatch). A committed-baseline helper
+(`screenshot.ts`, `toHaveScreenshot`) exists as wiring only; if it is ever activated, generate
+baselines in the CI image or container, commit them per project and mask dynamic regions.
 
 As built: README, "Visual regression"; AGENTS.md, "Visual testing". The `@visual` scenarios land
 with WP Rocket's port.
@@ -368,8 +368,9 @@ Phase 7 — Terminal output (done 2026-11-01). The suite and the orchestrator.
     (`forceColorWithoutTty: false`), and keeps its piped bytes and its lines' Unicode glyphs (7V69,
     7V85).
   - Width measured per grapheme as max(`string-width` of the cluster, Σ of its code points), a regional
-    indicator 1 (in the sum and alone), ambiguous narrow (user decision 2026-10-27): never below what tmux draws (7V20, 7V21). Live rows are cut;
-    permanent lines never, but for a 500-code-point cap; commands, paths and a rule's title never.
+    indicator 1 (in the sum and alone), ambiguous narrow (user decision 2026-10-27): never below what
+    tmux draws (7V20, 7V21). Live rows are cut; permanent lines never, but for a 500-code-point cap;
+    commands, paths and a rule's title never.
   - A C/POSIX locale changes only the symbols, never colour or live (user decision).
   - Live region: `\r\n` inside it (7V27); one repaint per print burst (7V26); resize erases from the
     old block's top row, never `\x1b[J` from the top-left (tmux's `scroll-on-clear`, 7V22, 7V24);

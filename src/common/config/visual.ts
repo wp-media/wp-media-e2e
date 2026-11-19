@@ -1,16 +1,22 @@
 import type { PlaywrightTestConfig } from "@playwright/test";
 
 /**
- * Shared visual-comparison tolerances and config. Used by BOTH visual models so they
- * fail at the same sensitivity:
+ * Shared visual-comparison tolerances and config. Both visual models share the pixel ratio:
  *  - the optimized-vs-unoptimized A/B check (`src/common/visual/ab.ts`) — what WP Rocket uses, and
  *  - committed-baseline `toHaveScreenshot` (via {@link VISUAL_EXPECT}) — the general capability.
+ * Their per-pixel metrics differ (see {@link DEFAULT_PIXEL_THRESHOLD}).
  */
 
 /** Share of pixels (0–1) allowed to differ before a visual check fails. Reliability-first default. */
 export const DEFAULT_MAX_DIFF_PIXEL_RATIO = 0.01;
 
-/** Per-pixel color sensitivity (0 strict … 1 lax). Matches Playwright's `toHaveScreenshot` default. */
+/**
+ * Per-pixel color sensitivity of the A/B check (0 strict … 1 lax): the largest OKLab HyAB distance
+ * (black vs white = 1) still counted equal by pixelmatch. Numerically Playwright's
+ * `toHaveScreenshot` default, but not its sensitivity: Playwright bundles a YIQ pixelmatch, whose
+ * 0.2 lets through some changes HyAB counts (pure blue vs navy) and counts some HyAB lets through.
+ * Untuned for HyAB: re-tune it against the first real A/B scenario.
+ */
 export const DEFAULT_PIXEL_THRESHOLD = 0.2;
 
 /**
