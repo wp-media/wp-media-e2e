@@ -313,9 +313,15 @@ test.describe("displayWidth", () => {
     ["family without ZWJ", "\u{1f468}\u{1f469}\u{1f467}", 6, 6],
     ["rainbow flag", "\u{1f3f3}\ufe0f\u200d\u{1f308}", 3, 2],
     ["flag", "\u{1f1eb}\u{1f1f7}", 2, 2],
+    ["flag between letters", "a\u{1f1eb}\u{1f1f7}b", 4, 4],
+    ["two flags", "\u{1f1eb}\u{1f1f7}\u{1f1ef}\u{1f1f5}", 4, 4],
     ["one regional indicator", "\u{1f1eb}", 1, 1],
+    ["first regional indicator, A", "\u{1f1e6}", 1, 1],
+    ["last regional indicator, Z", "\u{1f1ff}", 1, 1],
+    ["U+1F200, just past them", "\u{1f200}", 2, 2],
+    ["regional indicator + VS16", "\u{1f1eb}\ufe0f", 2, 2],
     ["three regional indicators", "\u{1f1eb}\u{1f1f7}\u{1f1ef}", 3, 3],
-    ["keycap", "1\u20e3", 2, 1],
+    ["keycap", "1\u20e3", 1, 1],
     ["keycap + VS16", "1\ufe0f\u20e3", 2, 2],
     ["# keycap + VS16", "#\ufe0f\u20e3", 2, 2],
     ["heart", "\u2764", 1, 1],
@@ -445,6 +451,8 @@ test.describe("cutToWidth", () => {
     expect(cutToWidth("\u{1f1eb}\u{1f1f7}\u{1f1ef}x", 3, "")).toBe(
       "\u{1f1eb}\u{1f1f7}\u{1f1ef}",
     );
+    expect(cutToWidth("\u{1f1eb}x", 1, "")).toBe("\u{1f1eb}");
+    expect(cutToWidth("\u{1f1eb}\u{1f1f7}", 1, "")).toBe("");
     expect(cutToWidth("a#\ufe0f\u20e3b", 2, "")).toBe("a");
     expect(cutToWidth("\u4e2d\u6587\u5b57", 5, "")).toBe("\u4e2d\u6587");
     expect(cutToWidth("e\u0301e\u0301", 1, "")).toBe("e\u0301");

@@ -44,6 +44,9 @@ export const LINE_CAP = 500;
  */
 const MEASURE = { ambiguousIsNarrow: true };
 
+/** One regional indicator symbol (a flag is two); {@link codePointWidth} counts it 1 column. */
+const REGIONAL_INDICATOR = /^[\u{1F1E6}-\u{1F1FF}]$/u;
+
 /** Splits text into user-perceived characters (grapheme clusters), as terminals group them. */
 const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
@@ -262,23 +265,34 @@ export function capLine(text: string, ellipsis: string): string {
 
 /**
  * The columns a grapheme takes, never fewer than a terminal draws: the larger of `string-width`'s
- * measure of the cluster and the sum of its code points' own. Terminals draw some clusters per code
- * point (Thai KO KAI + SARA AM and Devanagari KSSA take 2; a base then 2 more per emoji modifier)
- * where `string-width` counts the first; others draw a whole emoji sequence in 2.
- * The larger never lets a live row wrap; a sequence counted wider than drawn only pads a column
- * short.
+ * measure of the cluster and the sum of its code points' own ({@link codePointWidth}). Terminals
+ * draw some clusters per code point (Thai KO KAI + SARA AM and Devanagari KSSA take 2; a base then 2
+ * more per emoji modifier) where `string-width` counts the first; others draw a whole emoji sequence
+ * in 2. The larger never lets a live row wrap; a sequence counted wider than drawn only pads a
+ * column short.
  *
  * @param cluster - one grapheme cluster, with no control character.
  */
 function graphemeWidth(cluster: string): number {
   // Printable ASCII, most of any line: one column, no lookup.
   if (cluster.length === 1 && cluster >= " " && cluster <= "~") return 1;
-  const whole = stringWidth(cluster, MEASURE);
   const points = codePoints(cluster);
-  if (points.length === 1) return whole;
+  if (points.length === 1) return codePointWidth(cluster);
+  const whole = stringWidth(cluster, MEASURE);
   let sum = 0;
-  for (const point of points) sum += stringWidth(point, MEASURE);
+  for (const point of points) sum += codePointWidth(point);
   return Math.max(whole, sum);
+}
+
+/**
+ * The columns one code point takes on its own. A regional indicator (U+1F1E6–U+1F1FF) is 1, as
+ * tmux draws a lone one: `string-width` counts it 2, which would make a flag's per-code-point sum 4
+ * where a terminal draws the pair in 2. Anything else is `string-width`'s measure.
+ *
+ * @param point - one code point, a surrogate pair as one.
+ */
+function codePointWidth(point: string): number {
+  return REGIONAL_INDICATOR.test(point) ? 1 : stringWidth(point, MEASURE);
 }
 
 /**
