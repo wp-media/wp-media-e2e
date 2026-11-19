@@ -49,6 +49,7 @@ import { formatOwner, parseOwner } from "./state/lock-owner";
 import { readPidSpace } from "./state/pid-space";
 import { dryRun, type CommandDeps } from "./command";
 import { runOnce } from "./tasks/cycle";
+import type { LoopDeps } from "./tasks/loop";
 import {
   CHECKOUT,
   EXIT_WAIT_MS,
@@ -476,6 +477,30 @@ async function signalWhenReady(
     proc.emit(signal);
     clock.ms += stepMs;
   }
+}
+
+/**
+ * A `runOnce` whose run never ends and records nothing, and when the loop entered it. A stop signalled
+ * before then finds the loop still taking its cell: it ends `stopped` with no run, so a spec about a
+ * stuck loop awaits `entered` first — the `started` line and the first table come before it.
+ *
+ * @returns the stand-in, and a promise resolved at its first call.
+ */
+function stuckRun(): {
+  runOnce: NonNullable<LoopDeps["runOnce"]>;
+  entered: Promise<void>;
+} {
+  let resolve!: () => void;
+  const entered = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return {
+    entered,
+    runOnce: () => {
+      resolve();
+      return { stop: () => undefined, done: new Promise(() => undefined) };
+    },
+  };
 }
 
 test.describe("start — --once", () => {
@@ -1274,17 +1299,14 @@ test.describe("start — stopping", () => {
 
   test("a loop stuck with no run recorded running says so", async () => {
     const config = await writeConfig({ tasks: [TASKS[0]] });
+    const stuck = stuckRun();
     const r = rig(undefined, {
       killSettleMs: 100,
-      loop: {
-        runOnce: () => ({
-          stop: () => undefined,
-          done: new Promise(() => undefined),
-        }),
-      },
+      loop: { runOnce: stuck.runOnce },
     });
     const started = start({ config }, r.deps);
     await expect.poll(logText).toContain("started · suite unknown · 1 task");
+    await stuck.entered;
     for (const _ of [1, 2, 3]) {
       r.proc.emit("SIGINT");
       r.clock.ms += 2_000;
@@ -2681,18 +2703,15 @@ test.describe("start — the terminal's screen", () => {
   test("closes the table before the lines naming what a give-up leaves", async () => {
     const config = await writeConfig({ tasks: [TASKS[0]] });
     const screen = recording();
+    const stuck = stuckRun();
     const r = rig(undefined, {
       killSettleMs: 100,
       screen: screen.factory,
-      loop: {
-        runOnce: () => ({
-          stop: () => undefined,
-          done: new Promise(() => undefined),
-        }),
-      },
+      loop: { runOnce: stuck.runOnce },
     });
     const started = start({ config }, r.deps);
     await expect.poll(() => screen.events.includes("show")).toBe(true);
+    await stuck.entered;
     for (const _ of [1, 2, 3]) {
       r.proc.emit("SIGINT");
       r.clock.ms += 2_000;
