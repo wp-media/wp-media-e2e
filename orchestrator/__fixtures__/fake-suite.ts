@@ -11,9 +11,42 @@ import type { Command } from "../runs/commands";
  * command, and a whole line in it would read as the fake having written it.
  */
 
+/**
+ * The child the fake may leave in its group, outliving it: none, or one ending after a time or on a
+ * file — never both — each writing `childFile` as it ends. A union, so a child without its file, or
+ * two children, does not type-check.
+ */
+export type FakeChild =
+  | {
+      readonly childMs?: undefined;
+      readonly childUntil?: undefined;
+      readonly childFile?: undefined;
+    }
+  | {
+      /** Outlives the fake by this long, in milliseconds. */
+      readonly childMs: number;
+      readonly childUntil?: undefined;
+      /** The file the child writes as it ends. */
+      readonly childFile: string;
+    }
+  | {
+      readonly childMs?: undefined;
+      /**
+       * Outlives the fake until this file exists (looked for every 10 ms; 60 s at most, then it
+       * exits without `childFile`) — so a test decides when the group empties, whatever the
+       * machine's load.
+       */
+      readonly childUntil: string;
+      /** The file the child writes as it ends. */
+      readonly childFile: string;
+    };
+
 /** How the fake behaves. */
-export interface FakeBehaviour {
-  /** Exits at once with this code — before any of {@link FakeBehaviour.appends} is made. */
+export type FakeBehaviour = FakeChild & FakeOptions;
+
+/** How the fake behaves, but for its child ({@link FakeChild}). */
+interface FakeOptions {
+  /** Exits at once with this code — before any of {@link FakeOptions.appends} is made. */
   readonly exitCode?: number;
   /** Otherwise exits `0` after this long, in milliseconds; 60 s by default. */
   readonly runMs?: number;
@@ -21,10 +54,6 @@ export interface FakeBehaviour {
   readonly ignoreSigint?: boolean;
   /** Ignores the drain's stop file, as a scenario that never finishes would. */
   readonly ignoreDrain?: boolean;
-  /** Leaves a child in its group that outlives it by this long, then writes `childFile`. */
-  readonly childMs?: number;
-  /** The file the child writes as it ends. */
-  readonly childFile?: string;
   /** Writes its environment's names, sorted, as JSON, to this file. */
   readonly envFile?: string;
   /**
@@ -35,8 +64,8 @@ export interface FakeBehaviour {
   /**
    * Text appended to files, in order, their folders made — a results stream written as a run goes, a
    * line in two pieces —: each once `afterMs` has passed since it started and the one before it was
-   * made, and, with {@link FakeBehaviour.gateDir}, once its gate is open. Never with `exitCode`,
-   * which exits first: end the fake with `runMs` or {@link FakeBehaviour.exitAfterAppends}.
+   * made, and, with {@link FakeOptions.gateDir}, once its gate is open. Never with `exitCode`,
+   * which exits first: end the fake with `runMs` or {@link FakeOptions.exitAfterAppends}.
    */
   readonly appends?: readonly {
     readonly afterMs: number;
@@ -98,6 +127,12 @@ process.on("SIGINT", () => {
 if (b.childMs !== undefined) {
   const code = "setTimeout(() => require('node:fs').writeFileSync(process.argv[1], 'done'), " + b.childMs + ")";
   spawn(process.execPath, ["-e", code, b.childFile], { stdio: "ignore" }).unref();
+}
+if (b.childUntil !== undefined) {
+  const code = "const fs = require('node:fs'); const [done, until] = process.argv.slice(1);" +
+    "setInterval(() => { if (fs.existsSync(until)) { fs.writeFileSync(done, 'done'); process.exit(0); } }, 10);" +
+    "setTimeout(() => process.exit(1), 60000);";
+  spawn(process.execPath, ["-e", code, b.childFile, b.childUntil], { stdio: "ignore" }).unref();
 }
 const stopFile = process.env.E2E_INTERNAL_STOP_FILE;
 setInterval(() => {

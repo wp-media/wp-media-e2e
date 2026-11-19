@@ -401,11 +401,12 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
   - `src/common/__fixtures__/temp-dir.spec.ts` (2 tests) fails when the checkout itself lives under the OS temp folder (`/tmp/…`).
   - `src/projects/wp-rocket/support/config-edits.php.spec.ts` (9 tests) fails on PHP 7.4: `__fixtures__/wp-rocket-edits-harness.php:136` uses `str_contains()` (PHP ≥ 8); polyfill it, or skip with a reason when the local PHP is older.
   - `src/projects/backwpup/support/content-copy-put-back.spec.ts:474` ("the old put-back … fails while the site writes") once did not reproduce the old failure there: its reproduction is timing-dependent.
-- **Flaky under load** (full Mac runs; each passes alone):
-  - Twin specs: `withTwin`'s 600 s lock wait is exceeded when several workers queue on one twin (`housekeeping.ssh-twins.spec.ts:406` under 6 workers, P6; also P1).
-  - `orchestrator/runs/launch.spec.ts:529` and `:579`.
-  - `src/common/__fixtures__/ssh-server.spec.ts:101`: also fails alone ~1 run in 6, on node-ssh 13.2.1 and 14.0.0 alike: each fake-`sudo` command has a 1 s limit, and a cold connection's first call takes ~0.9–1.1 s.
-  - `src/projects/backwpup/support/job-runs.spec.ts:284`: `expect.poll` abandons an in-flight stub `wp` call, whose write races `afterEach`'s `rmSync` (`ENOTEMPTY`).
+- **Flaky under load:** fixed on `fix/unit-flakes` (load reproduced in a 3-CPU container, 12 busy loops, 12 workers).
+  - `launch.spec.ts:529`/`:579` (36/40 failed): the fake's child lived a fixed time while the group wait counts 20 ms polls, which stretch under load; the child now ends on a file the test writes from `onStuck` (`childUntil`; `:508` too). 60/60 pass.
+  - `ssh-server.spec.ts:101`/`:132` (4/220 on the Mac): not a cold connection; a fake-`sudo` call spawns ~30 processes, 0.2–1.5 s on macOS, against the shared server's 1 s limit. Shared server at the default 20 s; only the time-limit test gets its own 1 s server. 220/220.
+  - `job-runs.spec.ts`: the abandoned stub call's write races `rmSync` (measured: 50/200 `ENOTEMPTY` with a writer); `afterEach` renames the folder aside, then removes it with retries (0/200).
+  - `withTwin`: the 10 min bound now applies to one holding and restarts on each hand-over (polling is not FIFO: a waiter can lose many). Twin specs at 3 workers: holds up to 118 s, a waiter 122 s over 11 hand-overs, so 6 workers queueing ~5 deep could pass 600 s. 124 passed (28.5 min).
+  - `ssh-twins.yml`: "Twin specs" took 21.4–34.8 min over 22 passing runs under the 35 min limit, and one timed out at 35, so its timeout is now 50 min and the job's 85. Possible speed-up: the WP Rocket lifecycle file (~16 min, 16 tests) runs alone at the end on one worker. Parallel mode would need concurrent APVM resolution shown to be safe.
 
 ## Status
 

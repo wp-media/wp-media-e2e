@@ -36,8 +36,8 @@ jobs:
     name: SSH twins (twin specs + healthcheck)
     runs-on: ubuntu-24.04
     # Above every step's budget run back to back (chromium 5 + cold builds ~1 each + start 15 +
-    # specs 35 + healthcheck 10), so a slow step fails on its own timeout, naming itself.
-    timeout-minutes: 70
+    # specs 50 + healthcheck 10), so a slow step fails on its own timeout, naming itself.
+    timeout-minutes: 85
     steps:
       - uses: actions/checkout@v7
       # Chromium: the healthcheck logs in through the browser.
@@ -80,10 +80,11 @@ jobs:
         run: npm run env:cells:up
       - name: Twin specs
         # Every variant on both stacks resets its twin (~6 s) and boots WordPress several times.
-        # ~24 min on 2 workers (the runner's default): ~11 min for the rest, then WP Rocket's
-        # lifecycle file (~12 min: a zip build, 10 installs whose teardowns wait out its background
-        # work) runs alone, one test at a time. 35 leaves ~45 % for slower runners and new tests.
-        timeout-minutes: 35
+        # 21–35 min on 2 workers (the runner's default; 22 passes to 2026-11-19, one timed out at 35):
+        # ~13 min for the rest, then WP Rocket's lifecycle file (~16 min: a zip build, 16 tests whose
+        # teardowns wait out its background work) runs alone, one test at a time. 50 leaves ~45 %
+        # over the slowest for slower runners and new tests.
+        timeout-minutes: 50
         env:
           E2E_SSH_TWINS: "1"
         run: npx playwright test --config playwright.unit.config.ts --project=src ssh-twins

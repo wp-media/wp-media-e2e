@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import {
   chmod,
@@ -507,15 +507,23 @@ test.describe("launchRun", () => {
 
   test("keeps waiting for a lingering group it cannot kill: it still holds the cell", async () => {
     const childFile = join(root, "child-done");
+    const release = join(root, "release-child");
     const kill: KillFn = (pid, signal) => {
       if (signal === "SIGKILL")
         throw Object.assign(new Error("not permitted"), { code: "EPERM" });
       process.kill(pid, signal);
     };
+    // The child ends only once the failed kill was said, however slowly the linger's polls run.
     const opts = options(
       { exitCode: 0 },
-      { runMs: 20, childMs: 600, childFile },
-      { lingerMs: 100, kill },
+      { runMs: 20, childUntil: release, childFile },
+      {
+        lingerMs: 100,
+        kill,
+        onStuck: () => {
+          writeFileSync(release, "");
+        },
+      },
     );
     const run = await launchRun(opts);
     await run.done;
@@ -534,15 +542,18 @@ test.describe("launchRun", () => {
         throw Object.assign(new Error("not permitted"), { code: "EPERM" });
       process.kill(pid, signal);
     };
+    const release = join(root, "release-child");
+    // The child ends once the line was said three times: counted in polls, not wall-clock time.
     const opts = options(
       { exitCode: 0 },
-      { runMs: 20, childMs: 900, childFile },
+      { runMs: 20, childUntil: release, childFile },
       {
         lingerMs: 100,
         stuckRepeatMs: 200,
         kill,
         onStuck: (text) => {
           said.push(text);
+          if (said.length === 3) writeFileSync(release, "");
           throw new Error("a teller that throws is dropped");
         },
       },
@@ -583,14 +594,19 @@ test.describe("launchRun", () => {
     const kill: KillFn = (pid, signal) => {
       if (signal !== "SIGKILL") process.kill(pid, signal);
     };
+    const release = join(root, "release-child");
+    // The child ends once the line was said: counted in polls, not wall-clock time.
     const opts = options(
       { exitCode: 0 },
-      { runMs: 20, childMs: 700, childFile },
+      { runMs: 20, childUntil: release, childFile },
       {
         lingerMs: 100,
         stuckRepeatMs: 200,
         kill,
-        onStuck: (text) => said.push(text),
+        onStuck: (text) => {
+          said.push(text);
+          writeFileSync(release, "");
+        },
       },
     );
     await (

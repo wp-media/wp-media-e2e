@@ -392,6 +392,23 @@ function releaseLock(lock: string): void {
 }
 
 /**
+ * Which holding a lock folder is: its inode and change time. Each take renames a fresh folder onto
+ * the lock's path, so a hand-over changes it, while a lock left in place keeps it.
+ *
+ * @param dir - the lock folder.
+ * @returns the holding's identity; `undefined` when no lock is there.
+ */
+function holdingOf(dir: string): string | undefined {
+  try {
+    const stats = statSync(dir);
+    return `${String(stats.ino)}:${String(stats.ctimeMs)}`;
+  } catch (error) {
+    if (hasCode(error, new Set(["ENOENT"]))) return undefined;
+    throw error;
+  }
+}
+
+/**
  * Adds `ms` to the running Playwright test's timeout; nothing outside one (a child process, a
  * script), nothing for no wait, and nothing to a test with no timeout (`0`, which a sum would set).
  *
@@ -427,13 +444,19 @@ export function extendRunningTest(
  * file-system calls each) add up to a good part of the wait — and the stretches sum to the whole
  * wait, with no per-stretch rounding piling up.
  *
+ * The timeout bounds one holding, not the whole wait: it restarts whenever the lock changes hands. A
+ * queue of waiters (several workers on one twin, each holding it for a test) keeps moving however
+ * long it is — and polling is not first-come-first-served, so one waiter may lose many hand-overs —
+ * while a lock nobody lets go of (a stuck spec, another user's dead one) still fails the wait.
+ *
  * @param stack - which twin.
  * @param work - what to do with it.
- * @param options - `lockDir` (default {@link TWIN_LOCK_DIR}), `timeoutMs` (default 10 min), `pollMs`
- * (how often a waiter looks again; default 200 ms), `onWaited` (given each stretch of waiting in ms,
- * never called when the lock was free; default {@link extendRunningTest}).
+ * @param options - `lockDir` (default {@link TWIN_LOCK_DIR}), `timeoutMs` (how long one holding may
+ * keep it; default 10 min), `pollMs` (how often a waiter looks again; default 200 ms), `onWaited`
+ * (given each stretch of waiting in ms, never called when the lock was free; default
+ * {@link extendRunningTest}).
  * @returns what `work` returned.
- * @throws Error when the lock is not free within the timeout, or what `work` threw.
+ * @throws Error when one holding keeps the lock past the timeout, or what `work` threw.
  */
 export async function withTwin<T>(
   stack: TwinStack,
@@ -449,13 +472,21 @@ export async function withTwin<T>(
   ensureLockBase(base);
   const dir = join(base, `wpme-ssh-twin-${stack}.lock`);
   const onWaited = options.onWaited ?? extendRunningTest;
+  const timeoutMs = options.timeoutMs ?? 600_000;
   let since = Date.now();
-  const deadline = since + (options.timeoutMs ?? 600_000);
+  let holding: string | undefined;
+  let deadline = since + timeoutMs;
   while (!tryLock(dir)) {
-    if (Date.now() > deadline) {
+    const current = holdingOf(dir);
+    if (current !== holding) {
+      // Handed over (or freed and taken by another): a new holding, a new timeout.
+      holding = current;
+      deadline = Date.now() + timeoutMs;
+    } else if (Date.now() > deadline) {
       throw new Error(
-        `the ${stack} twin stayed locked (${dir}): another spec holds it, or a dead one ` +
-          "another user (or a reused pid) left; remove the folder once no twin spec runs.",
+        `the ${stack} twin stayed locked by one holder for ${String(Math.round(timeoutMs / 1000))} s ` +
+          `(${dir}): another spec holds it that long, or a dead one another user (or a reused pid) ` +
+          "left; remove the folder once no twin spec runs.",
       );
     }
     await sleep(options.pollMs ?? LOCK_POLL_MS);
