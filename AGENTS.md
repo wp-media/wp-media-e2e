@@ -17,7 +17,7 @@ End-to-end (E2E) tests for WP Media plugins: WP Rocket (performance), BackWPup (
 
 | Area               | Tech                                                                                                                                                            |
 | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Runtime            | **Node ≥ 24.16** (`engines`; `.nvmrc` pins 24), **ESM** (`"type": "module"`)                                                                                    |
+| Runtime            | **Node ≥ 26.13.1** (`engines`; `.nvmrc` pins 26), **ESM** (`"type": "module"`)                                                                                  |
 | Language           | **TypeScript 6**, strict (`tsc` type-checks only — Playwright transpiles via esbuild)                                                                           |
 | Browser automation | **Playwright ≥ 1.62** (`@playwright/test`), Chromium only — the floor is load-bearing, see [wordpress-automation.md](docs/architecture/wordpress-automation.md) |
 | BDD                | **Cucumber/Gherkin** via **`playwright-bdd`** (`bddgen` generates specs)                                                                                        |
