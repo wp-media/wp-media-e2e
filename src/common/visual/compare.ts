@@ -4,9 +4,11 @@ import { PNG } from "pngjs";
 import { DEFAULT_PIXEL_THRESHOLD } from "../config/visual";
 
 /**
- * Pure PNG pixel comparison — the same engine Playwright uses internally (pngjs decode +
- * pixelmatch). No browser, no Playwright, so it is unit-testable on its own and reusable for any
- * two-image comparison (the A/B check in ./ab.ts builds on it).
+ * Pure PNG pixel comparison: pngjs decode + pixelmatch, whose per-pixel metric is the HyAB
+ * distance in OKLab (0 equal … 1 black vs white). Playwright's `toHaveScreenshot` bundles its own
+ * older pixelmatch (YIQ metric), so the same threshold is not the same sensitivity there. No
+ * browser, no Playwright, so it is unit-testable on its own and reusable for any two-image
+ * comparison (the A/B check in ./ab.ts builds on it).
  */
 
 /** Thrown when two images can't be compared because their pixel dimensions differ. */

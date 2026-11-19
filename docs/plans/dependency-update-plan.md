@@ -336,13 +336,10 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 
 ### P10 — pixelmatch 8 · xs/easy · deps: P1 · independent of: P2–P9
 
-- `npm i -D pixelmatch@8.0.0`.
-- **API:** unchanged, and it ships its own types; `output` is typed `… | null | undefined`.
-- **Metric:** YIQ is replaced by OKLab/HyAB; `threshold` keeps its 0–1 scale.
-- **Docs:** fix the parity claims at `src/common/visual/compare.ts:7-9` and `src/common/config/visual.ts:4-7`.
-- **Open obligation:** re-tune `DEFAULT_PIXEL_THRESHOLD` with the first real `@visual` scenario.
-- **Spec:** add a near-colour pair to `compare.spec.ts` (indistinguishable colours give 0 diff), so the metric's behaviour is pinned.
-- **Done:** gates pass.
+- `pixelmatch` `^8.0.0` (2026-10-06; dep `pngjs ^7.0.0` as before; ships `index.d.ts`, no `@types`). Lock diff: that package only; `npm audit` 0.
+- **API:** call unchanged; `output` `… | void` → `… | null | undefined`; new `windowSize`, `ignoreMask` (unused). `threshold` keeps its 0–1 scale (1 = black vs white), default 0.1.
+- **Metric:** YIQ → toe-corrected OKLab lightness + HyAB (`|ΔL| + √(Δa²+Δb²)`). Playwright 1.65.1 still bundles a YIQ pixelmatch (`third_party/pixelmatch.js`, default 0.2), so our 0.2 equals its number, not its sensitivity. Distances v7/v8: white vs `#f5f5f5` 0.038/0.035; blue vs navy (`0,0,128`) 0.16/0.32 (v8 counts it at 0.2); blue vs `60,60,255` 0.21/0.12 (v8 passes it).
+- **Spec** (`compare.spec.ts`): white vs `#f5f5f5` → 0 (16 at threshold 0); red vs blue → 16; blue vs navy → 16. Mutations: default 0 fails the first; 0.6 or 1 the last two; the v7 engine the navy one.
 
 ### P11 — Docs sync and final audit · s/easy · deps: P1–P10 · independent of: —
 
@@ -384,7 +381,7 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 - **Docker local env images (D5).**
 - **ssh2 native crypto on Node 26** (mscdex/ssh2#1531): once fixed, drop `orchestrator.md`'s install note.
 - **SSH loss wording:** when an `error` event drops the connection before the command started (channel still opening, or exec reply pending), the recorded-loss message still says `lost (…) while "<program>" was running`, though whether it started is unknown (found by reading, not measured; pre-existing wording); a fix would track the start via node-ssh's `onChannel`.
-- **pixelmatch threshold re-tune** with the first `@visual` scenario.
+- **pixelmatch threshold re-tune** (`DEFAULT_PIXEL_THRESHOLD`) with the first `@visual` scenario. `compare.spec.ts`'s colour pairs pin the HyAB metric, not the default (they pass for 0.05–0.32): the re-tune adds a pair just either side of the chosen value.
 - **Plain output:** under `E2E_OUTPUT=plain`, Playwright's own "To open last HTML report run" line still carries ANSI colour when piped through `tee` (seen on `develop` too, not from P4).
 - **Unit-suite robustness** (found on RemoteDesktopQA, Ubuntu 24.04; not dependency issues, same on Node 24):
   - umask 0002 (Ubuntu's default for a user with its own group) fails 23 orchestrator specs (`state/` counter, run-retention, orphans; `runs/launch`): fixture folders come out 775, which the code rightly refuses as group-writable; the specs should set their own umask or modes.
@@ -412,5 +409,5 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 | P7    | done | 2026-11-19 | allure 3.33.0, allure-playwright 3.15.0; 3.18 history continues (same key, measured); glob 14 override, audit 10 → 0; server on 127.0.0.1 (`allurerc.mjs`); no git facts in reports (`GIT_DIR`) |
 | P8    | done | 2026-11-19 | node-ssh 14.0.0, @types/ssh2 1.15.6 (one @types/node); #132 fixed (`Not connected` retried; lost / closed before started / could not run, no argv); `noBuffer`; stand-in types gone; unit 6639, twin specs 123; live pro@nginx 70/70, free@nginx 53/53, twins 4/4 + 4/4 |
 | P9    | done | 2026-11-19 | string-width 9.0.0; regional indicator counts 1 (flag 2, lone 1); keycap row 2 → 1 (= tmux); 6 rows added; gates green (6652 passed, 134 skipped) |
-| P10   | pending |      |         |
+| P10   | done | 2026-11-19 | pixelmatch 8.0.0, HyAB/OKLab metric (Playwright 1.65.1 still bundles YIQ: 0.2 matches its number, not its sensitivity); comments fixed; 3 metric-pinning specs; gates green (6655 passed) |
 | P11   | pending |      |         |
