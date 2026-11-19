@@ -145,13 +145,14 @@ holds one cell whatever `--project` adds, so it is always targeted.
   per-role failure is a **value**, never thrown: `previous` is still resolved and verified when
   `plugin` fails, so one report names every problem.
 
-APVM (`apvm-napi`, pinned to a `cli/vX.Y.Z` tag in `package.json`) ships prebuilt native binaries (no
-Rust toolchain, no build step) and is driven **only** through this Node library, never the `apvm` CLI:
-a CLI-only capability waits for a library release. BackWPup builds from a **private** repo, so it needs
-a GitHub token (`GITHUB_TOKEN`, `GH_TOKEN`, or `gh auth login`), asserted **before** any clone; every
-string APVM emits is scrubbed of tokens and URL userinfo before reaching a console or report
-(`redactBuildText`: invisible format characters dropped first, so none hides a token); a printed
-progress line is one `plain` line, and warm's printed errors go through `printableLines`.
+APVM (`apvm-napi`, pinned to a `vX.Y.Z` tag in `package.json`; `cli/vX.Y.Z` before 3.3.0) ships
+prebuilt native binaries (no Rust toolchain, no build step) and is driven **only** through this Node
+library, never the `apvm` CLI: a CLI-only capability waits for a library release. BackWPup builds from
+a **private** repo, so it needs a GitHub token (`GITHUB_TOKEN`, `GH_TOKEN`, or `gh auth login`),
+asserted **before** any clone; every string APVM emits is scrubbed of tokens and URL userinfo before
+reaching a console or report (`redactBuildText`: invisible format characters dropped first, so none
+hides a token); a printed progress line is one `plain` line, and warm's printed errors go through
+`printableLines`.
 
 ## Identity preflight
 

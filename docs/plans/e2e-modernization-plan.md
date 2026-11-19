@@ -772,7 +772,8 @@ alternatives, limits, open obligations.
 ### 7.1 Verified foundations
 
 APVM, measured at `develop` (npm `3.0.0`); pinned as
-`github:wp-media/automation-plugin-version-manager#cli/v3.0.0`, the `cli/vX.Y.Z` tag pattern:
+`github:wp-media/automation-plugin-version-manager#v3.3.0` (tags `vX.Y.Z` from 3.3.0, `cli/vX.Y.Z`
+before; 3.3.0 re-checked: dependency-update-plan.md P4):
 
 - Install: a plain git dependency with prebuilt `.node` binaries committed for darwin-arm64/x64,
   linux-x64/arm64-gnu and win32-x64-msvc — no musl, no Rust, no postinstall; engines
@@ -793,9 +794,10 @@ APVM, measured at `develop` (npm `3.0.0`); pinned as
 - Output: `result` (`artifacts[{ variantId?, path, filename, size, origin }]`, `version`,
   `variantsBuilt`), `resolvedRef`, `commit`, `commitShort`, `description`, `fromCache`,
   `versionOverride?`; `origin` is `cache`, `built` or `downloaded`.
-- Cache: `~/.apvm/cache` by default; `APVM_CACHE_DIR` overrides it for every instance — never set
-  here. Keyed by resolved commit and version, so keyword refs re-resolve, then hit the cache. Its
-  concurrency and per-variant layout: the orchestrator plan (0A.5, the Free/Pro single build).
+- Cache: `~/.apvm/cache` by default; `APVM_CACHE_DIR`, read at each `create()`, overrides it —
+  never set here. Keyed by resolved commit and version, so keyword refs re-resolve, then hit the
+  cache. Its concurrency and per-variant layout: the orchestrator plan (0A.5, the Free/Pro single
+  build).
 - Errors are typed promise rejections (`ProjectNotFound`, `PrivateRepoNoToken`, `ReleaseNotFound`,
   `NoMatchingReleaseAssets`, …), never crashes. Progress events are a discriminated union
   (`reference_resolved`, `phase_*`, `step_*`, `command_output`, `warning`, `build_succeeded`,

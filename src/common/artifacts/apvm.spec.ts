@@ -86,7 +86,8 @@ test.describe("createBuildReporter", () => {
     expect(context).not.toContain("line-19");
   });
 
-  // The phases as APVM sends them: a const enum's string values, which isolated modules cannot name.
+  // The phases as APVM sends them, as strings: naming the enum's members needs a value import of
+  // apvm-napi, which would load its native addon into this spec.
   const CLONE = "Clone" as JsBuildPhase;
   const BUILD = "Build" as JsBuildPhase;
 
