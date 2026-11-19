@@ -46,7 +46,9 @@ let port: number;
 const teardown: (() => void | Promise<void>)[] = [];
 
 test.beforeAll(async () => {
-  const started = await startSshServer({ commandTimeoutMs: 1_000 });
+  // The default time limit: a fake `sudo` call spawns ~30 processes (each argument hex-encoded),
+  // measured 0.2–1.5 s on macOS, so a tight limit here would kill commands that merely run slowly.
+  const started = await startSshServer();
   server = started;
   port = started.port;
   teardown.push(() => started.close());
@@ -198,10 +200,21 @@ test("a command's background processes are killed once it ends", async () => {
   await expect.poll(() => processGone(pid), { timeout: 2_000 }).toBe(true);
 });
 
+// Its own server, whose time limit (1 s) is far short of the command's 30 s.
 test("a command past its time limit is killed, and reported so", async () => {
-  await expect(exec(server.transport(), "sleep", ["30"])).rejects.toThrow(
-    /terminated by signal SIGKILL/,
-  );
+  const own = await startSshServer({ commandTimeoutMs: 1_000 });
+  try {
+    port = own.port;
+    const started = Date.now();
+    await expect(exec(own.transport(), "sleep", ["30"])).rejects.toThrow(
+      /terminated by signal SIGKILL/,
+    );
+    // Killed by this server's 1 s limit, not the default 20 s one: 10 s leaves a loaded host room
+    // for the connection and the kill, and still fails a limit left unapplied.
+    expect(Date.now() - started).toBeLessThan(10_000);
+  } finally {
+    await own.close();
+  }
 });
 
 // Its own server, whose time limit (20 s) is far past the wait: only the closed channel can kill it.

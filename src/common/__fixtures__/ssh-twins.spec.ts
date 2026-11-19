@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -230,6 +231,46 @@ test.describe("withTwin", () => {
     await expect(
       withTwin("nginx", () => Promise.resolve(), { lockDir, timeoutMs: 500 }),
     ).rejects.toThrow(/stayed locked/);
+  });
+
+  // A queue of holders: each takes the lock for a test, so the wait is long, but the lock moves.
+  test("a lock that keeps changing hands is waited for past the timeout, which bounds one holding", async () => {
+    // A live holder (the runner) whose lock changes hands every 200 ms, without a gap a waiter could
+    // take: each new pid file renamed over the last changes the folder as a new holding's would.
+    mkdirSync(lock());
+    writeFileSync(join(lock(), "pid"), String(process.ppid));
+    let handedOver = 0;
+    let releasedAt = Number.NaN;
+    // Aborted once withTwin settles: a wait that threw must not leave the queue renaming in a lock
+    // folder `afterEach` removes, which would fail the next test with this one's ENOENT.
+    const stop = new AbortController();
+    const queue = (async () => {
+      for (; handedOver < 8; handedOver++) {
+        await sleep(200);
+        if (stop.signal.aborted) break;
+        writeFileSync(join(lock(), "pid.next"), String(process.ppid));
+        renameSync(join(lock(), "pid.next"), join(lock(), "pid"));
+      }
+      if (!stop.signal.aborted) await sleep(200);
+      releasedAt = Date.now();
+      rmSync(lock(), { recursive: true, force: true });
+    })();
+
+    // 1 s bounds each holding (200 ms; room for a loaded host): the whole wait (1.8 s) is past it.
+    let enteredAt: number;
+    try {
+      enteredAt = await withTwin("nginx", () => Promise.resolve(Date.now()), {
+        lockDir,
+        timeoutMs: 1_000,
+        pollMs: 20,
+      });
+    } finally {
+      stop.abort();
+      await queue;
+    }
+
+    expect(handedOver).toBe(8);
+    expect(enteredAt).toBeGreaterThanOrEqual(releasedAt);
   });
 
   test("a takeover judges the lock again: a live holder's is left, a dead one's removed", () => {

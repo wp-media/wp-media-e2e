@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -90,7 +91,13 @@ test.beforeEach(() => {
 
 test.afterEach(() => {
   delete process.env.WP_STUB_DIR;
-  rmSync(stubDir, { recursive: true, force: true });
+  // A wait that timed out leaves its last stub call running (`expect.poll` does not await it), and a
+  // file it writes into the folder mid-removal fails `rmSync` (`ENOTEMPTY`). Moved aside first, the
+  // folder is out of its reach (the stub writes by `$WP_STUB_DIR`, which no longer leads anywhere);
+  // the retries sweep the one write whose path was resolved before the move.
+  const removed = `${stubDir}.removed`;
+  renameSync(stubDir, removed);
+  rmSync(removed, { recursive: true, force: true, maxRetries: 5 });
 });
 
 test.afterAll(() => {
