@@ -328,21 +328,11 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 
 ### P9 — string-width 9 · s/medium · deps: P1 · independent of: P2–P8, P10
 
-- `npm i -D string-width@9.0.0`.
-- **Measured with v9** (official Node 26) against `layout.spec.ts` (`[name, text, columns, columns tmux drew]`):
-  - **Flag:** whole = 2, but the per-code-point sum = 4, so 4.
-  - **Lone regional indicator:** 2. It is a single code point, so `graphemeWidth` (`layout.ts:273`) returns string-width's width early.
-  - **Three indicators:** a flag plus a lone indicator.
-  - **Keycap `1⃣`:** 1.
-  - `cutToWidth`'s flag case (`layout.spec.ts:441`) fails too.
-- **Fix (D2) in `graphemeWidth`:**
-  - A cluster that is a single regional indicator returns 1.
-  - In the per-code-point sum, a regional indicator counts 1.
-  - Result: flag 2, lone 1, three indicators 3, all equal to tmux's column.
-- **Spec change:** the keycap row's measure changes 2 → 1. v9 now matches tmux's measured 1, which still respects the invariant "never below what a terminal draws". State this in the commit message.
-- **Run the whole table on v9** and list any other changed row. Treat it the same way: fix the code if the new width falls below tmux's column; otherwise change the row only to tmux's measured value.
-- **Done:**
-  - Gates pass, including the tmux/pty specs, `live-block.spec.ts`, `orchestrator/line-style.spec.ts` and `orchestrator/status/table.spec.ts`.
+- `string-width` `^9.0.0` (2026-11-11; Node ≥ 22; deps already at its ranges). Lock diff: that package only; only importer `layout.ts`.
+- **What v9 changed** (vs 8.3.0, Node 26 probe): over every code point, only the 26 regional indicators (1 → 2), 12 prepended concatenation marks (U+0600–0605, 06DD, 0890, 0891, 08E2, 110BD, 110CD; 0 → 1) and lone surrogates (0 → 1, read as U+FFFD; `withoutControls` makes text well-formed first). Over ~363k probed clusters the only decreases: the 12 unqualified keycaps `[#*0-9]`+U+20E3 (2 → 1), all drawn 1 in tmux. On `layout.spec.ts`'s 35 rows: 4 changed, regional indicators (flag 4, lone 2, three 6 vs tmux 2, 1, 3; `cutToWidth`'s flag case too) and the keycap (1, tmux 1).
+- **Fix (D2):** `codePointWidth` counts a regional indicator (U+1F1E6–U+1F1FF) 1, alone and in the sum: flag 2, lone 1, three 3.
+- **Basis:** keycap 2 → 1 and lone indicator 1 rest on tmux 3.8's drawn columns (other terminals not measured); accepted per D2 and the invariant "never below what a terminal draws", as measured in tmux.
+- **Rows added** (tmux 3.8, `en_US.UTF-8`, 2026-11-19): flag between letters 4, two flags 4, A and Z indicators 1, U+1F200 2, indicator + VS16 2; `cutToWidth` at 1 column keeps a lone indicator, drops a flag. Mutations of the rule (removed, either path alone, range to U+1F200) each fail the spec.
 
 ### P10 — pixelmatch 8 · xs/easy · deps: P1 · independent of: P2–P9
 
@@ -421,6 +411,6 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 | P6    | done | 2026-11-19 | @playwright/test 1.65.1 (Chromium 159); `screen` override + `presetScreen`, floor 1.64; internals unchanged; live pro@nginx 70/70, free@nginx 53/53, twins 4/4 + 4/4, twin specs 122/123 (a lock-wait flake) |
 | P7    | done | 2026-11-19 | allure 3.33.0, allure-playwright 3.15.0; 3.18 history continues (same key, measured); glob 14 override, audit 10 → 0; server on 127.0.0.1 (`allurerc.mjs`); no git facts in reports (`GIT_DIR`) |
 | P8    | done | 2026-11-19 | node-ssh 14.0.0, @types/ssh2 1.15.6 (one @types/node); #132 fixed (`Not connected` retried; lost / closed before started / could not run, no argv); `noBuffer`; stand-in types gone; unit 6639, twin specs 123; live pro@nginx 70/70, free@nginx 53/53, twins 4/4 + 4/4 |
-| P9    | pending |      |         |
+| P9    | done | 2026-11-19 | string-width 9.0.0; regional indicator counts 1 (flag 2, lone 1); keycap row 2 → 1 (= tmux); 6 rows added; gates green (6652 passed, 134 skipped) |
 | P10   | pending |      |         |
 | P11   | pending |      |         |
