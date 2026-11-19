@@ -513,7 +513,7 @@ project: roles `plugin` (under test) and `previous` (older, for comparisons). Fu
 zip): [configuration.md](docs/guides/configuration.md#plugin-artifacts-build--verify).
 
 - **APVM** ([`apvm-napi`](https://github.com/wp-media/automation-plugin-version-manager), pinned to
-  `…#cli/v3.0.0`, prebuilt binaries) builds a git ref. BackWPup's source is **private**: set
+  `…#v3.3.0`, prebuilt binaries) builds a git ref. BackWPup's source is **private**: set
   `GITHUB_TOKEN` or run `gh auth login`; for public WP Rocket/Imagify a token only raises rate limits.
   **MUST — APVM only through this Node library, never its `apvm` CLI**, anywhere in the repo (suite,
   scripts, orchestrator); a CLI-only capability waits for a library release. Agents may still run the

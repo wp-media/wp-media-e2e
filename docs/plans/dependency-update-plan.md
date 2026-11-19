@@ -255,35 +255,31 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 
 ### P4 — APVM 3.3.0 · s/medium · deps: P1 · independent of: P2, P3, P6–P10
 
-- **Pin** `github:wp-media/automation-plugin-version-manager#v3.3.0`.
-  - The tag scheme changed: no `cli/` prefix.
-  - **Change it with `npm i --allow-git=all`** (one time). A plain `npm i` fails with `EALLOWGIT` under `allow-git=root`.
-  - Then `npm ci` (with `root`) must install it.
-- **API we import** (`apvm.ts`, `resolve.ts`, `warm.ts`): unchanged, and `engines` ≥22.22.1.
-  - The enums (`JsBuildPhase`, …) are now runtime enums, not `const enum`.
-- **Behaviour changes to check against our code:**
-  - **WP Rocket zips:** a build now excludes `php*`/`package*` only at the plugin root, so fresh zips change content and SHA-256. Cached builds are still served.
-  - **Ref parsing:** bare refs are still auto-detected, and `commit:` matches only commits; our pins are full SHAs.
-  - **Build tools get empty stdin.**
-  - **APVM's logs go to stderr:** check `apvm.ts`'s event printing and any test that captures it.
-  - **An empty `NO_COLOR=`** no longer disables colour.
-  - **Tokens:** fine-grained `github_pat_` tokens from `gh auth token` are picked up and validated. Re-run the V257 check that no token appears in errors or events.
-  - **`APVM_CACHE_DIR`** is read at `create()`, so check where warm and resolve set it.
-  - **Only one copy of the addon may load per process:** warm, resolve and the auth setup must never load two.
-- **Docs:** the pin text in `AGENTS.md` (≈ :502) and in the plans, and `pin.ts:7` ("measured on apvm-napi 3.0.0").
-- **Done:**
-  - Gates and `npm run artifacts:warm` pass.
-  - An offline commit-pin cache hit still works (sandbox-exec, no network).
-  - Live: BackWPup (private source) and a freshly built WP Rocket both pass the artifacts setup.
+- **Pin** `github:wp-media/automation-plugin-version-manager#v3.3.0` (tags lost the `cli/` prefix), changed once with `npm i --allow-git=all` (`root` → `EALLOWGIT`); `npm ci` under `root` installs it.
+- **Done:** gates and `npm run artifacts:warm` pass; an offline commit-pin cache hit works; live, a fresh BackWPup (private source) and a fresh WP Rocket build pass the artifacts setup.
+- **Measured** (2026-11-19, official 26.13.1, npm 12.2.3; sources: the `cli/v3.0.0...v3.3.0` commits — the 3.1.0–3.2.0 release notes are compare links only and v3.3.0's cover only `cli/v3.2.0...v3.3.0`; the commits add the CLI-only update checker 55188a2b and the WP Rocket zip fix d04cb20c — plus the tag's `crates/` and the installed package):
+  - **Pin:** lockfile changes only apvm-napi (3.3.0, `#f229113…`, the tag's commit). Clean `npm ci`: no blocked script; `install-scripts ls` none, `prune --dry-run` only the APVM key (3.3.0 still has `prepare: husky`).
+  - **API:** `index.d.ts` 3.0.0 → 3.3.0 only turns the three `const enum`s into runtime `enum`s (same members) and adds cache APIs (`ApvmCache`, `cache()`, `cacheStatus()`, clean/gc/verify); every type we import is unchanged; `engines` still `>=22.22.1`. Specs stay type-only (the `apvm.spec.ts` comment says why).
+  - **WP Rocket zips:** `wpr.rs` now excludes `php*`/`package*` only at the plugin root (`*/php*` had dropped nested vendor trees). A fresh build of `develop` 9f29447 vs the cached 3.0.0 zip: 1938 vs 1935 entries (+ `vendor/cloudflare/cf-ip-rewrite/phpunit.xml.dist`, `vendor/wp-media/plugin-family/package{,-lock}.json`), new SHA-256 (cached `d5ae3d10…`; fresh `2594574d…` in a throwaway cache, `0dba886e…` in the live run), version 3.24.2-alpha1; `verifyArtifact` passes. Cached zips are served as they are.
+  - **Refs:** `commit:` accepts only a SHA (`commit:develop` → `Invalid commit SHA`); bare `develop` still resolves. Our pins (`commit:<40 hex>`) and defaults (`develop`, `tag:latest-stable`) are unaffected.
+  - **Empty stdin** for build tools (`Stdio::null()`): nothing of ours feeds it; composer and npm builds pass.
+  - **Logs to stderr, `NO_COLOR=`:** CLI-only; the addon installs no `tracing` subscriber (`RUST_LOG=trace` warm: stderr empty). Our lines come from `onProgress` through injected printers; our colour rule already treats an empty `NO_COLOR` as unset.
+  - **Tokens:** env tokens taken as given; `gh auth token` output must be one `[A-Za-z0-9_]` value with a known prefix (`github_pat_` accepted; `…@evil`, `Token: gho_…`, unprefixed → no token, so `assertToken`'s message).
+  - **V257 re-run:** 14 failing builds (online and offline; real, fake `ghp_`/`github_pat_` and `gh` tokens; private and public repos): no token value or token/`user@` shape in any error (own properties, stack included) or event.
+  - **`APVM_CACHE_DIR`** is read at each `create()`: an instance keeps its dir. No repo file sets it; `getApvm()` creates lazily after `.env` loads.
+  - **One addon copy per process** (`single_copy.rs`, keyed on `globalThis`; a second `.node` copy is refused): one apvm-napi in the tree and one value import (`apvm.ts`); warm and the artifacts setup never hit it.
+  - **Offline** (sandbox-exec, network denied): commit pins plus versions → cache hits, exit 0; WP Rocket without a version → clone fails; `release:` → GitHub API error. `pin.ts`'s note now names 3.0.0 and 3.3.0.
+  - **Gates:** green; unit 6618 passed, 134 skipped, 2 load flakes passing alone 3× (`ssh-server.spec.ts:101`, `launch.spec.ts:579`; not APVM).
+  - **Live** (official 26.13.1 + npm 12.2.3, fresh APVM cache per run): BackWPup pro@nginx built fresh (`develop` a98abb68, 9.99.99) 70/70, free@nginx built fresh 53/53 (RemoteDesktopQA, concurrent); WP Rocket twin-apache built fresh `develop` 9f294470 (3.24.2-alpha1) and `tag:latest-stable` v3.24.1, 4/4. No token text in logs or reports.
 
 ### P5 — Lint and format toolchain · xs/easy · deps: P4 · independent of: P2, P3, P6–P10
 
 - `npm i -D eslint@10.15.0 typescript-eslint@8.73.0 globals@17.14.0 prettier@3.10.1 lint-staged@17.6.1`.
-- **New strict rule `no-unsafe-enum-assignment`** flags exactly 3 casts: `src/common/artifacts/apvm.spec.ts:90-91` and `warm.spec.ts:558`.
+- **New strict rule `no-unsafe-enum-assignment`** flags exactly 3 casts: `src/common/artifacts/apvm.spec.ts:91-92` and `warm.spec.ts:558`.
   - Use `as unknown as JsBuildPhase`, **not** the enum members.
     - A value import would load the native addon in those specs.
     - It would also break `apvm.ts`'s rule: "the only module that imports `apvm-napi`".
-  - Reword the comment at `apvm.spec.ts:89`: the enum is no longer `const`, but the specs stay type-only to keep the addon out.
+  - The comment above them (`apvm.spec.ts:89`) already says why they stay type-only (reworded in P4).
   - This changes test code only, never what is asserted; say so in the commit message.
 - **Prettier 3.10.1** reformats 0 files (measured).
 - **Done:** gates pass, and `npm audit` drops the eslint `minimatch` chain.
@@ -439,6 +435,7 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 - **ssh2 native crypto on Node 26** (mscdex/ssh2#1531): once fixed, drop `orchestrator.md`'s install note.
 - **Allure's glob/minimatch advisories,** if P7's overrides fail.
 - **pixelmatch threshold re-tune** with the first `@visual` scenario.
+- **Plain output:** under `E2E_OUTPUT=plain`, Playwright's own "To open last HTML report run" line still carries ANSI colour when piped through `tee` (seen on `develop` too, not from P4).
 - **Unit-suite robustness** (found on RemoteDesktopQA, Ubuntu 24.04; not dependency issues, same on Node 24):
   - umask 0002 (Ubuntu's default for a user with its own group) fails 23 orchestrator specs (`state/` counter, run-retention, orphans; `runs/launch`): fixture folders come out 775, which the code rightly refuses as group-writable; the specs should set their own umask or modes.
   - `src/common/__fixtures__/temp-dir.spec.ts` (2 tests) fails when the checkout itself lives under the OS temp folder (`/tmp/…`).
@@ -453,7 +450,7 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 | P1    | done | 2026-11-19 | `.nvmrc` 26, `engines` >=26.13.1, @types/node 26.6.6, setup-node v7; gates green (6511 passed, 130 skipped); live pro@nginx 70/70, free@nginx 53/53, twins 4/4 + 4/4, twin specs 122; no Node-26 warning |
 | P2    | done | 2026-11-19 | npm 12.2.3 (devEngines, onFail error); CI caches ~/.npm itself (setup-node's npm cache runs npm 11); allowScripts: fsevents@2.3.2 dropped, APVM deny key kept; clean `npm ci` ok; `.node-version` 26; hook runs `lint-staged` |
 | P3    | done | 2026-11-19 | execa 10.2.1, commander 15.1.0; maxBuffer re-measured (still-running child now SIGTERM, outcome unchanged), comment + doc fixed, spec added |
-| P4    | pending |      |         |
+| P4    | done | 2026-11-19 | apvm-napi `#v3.3.0` (allow-git=all once); API superset, enums runtime; fresh WP Rocket zips +3 nested vendor files (new SHA); V257 clean; offline commit pins hit; live pro@nginx 70/70, free@nginx 53/53, twin-apache 4/4, all built fresh |
 | P5    | pending |      |         |
 | P6    | pending |      |         |
 | P7    | pending |      |         |

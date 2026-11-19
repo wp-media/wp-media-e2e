@@ -4,9 +4,10 @@
  * derives — a ref (`commit:<sha>` or `release:<tag>`) and, for a commit, the version that was built —
  * which plans to the same APVM cache entry.
  *
- * Measured offline on apvm-napi 3.0.0: a commit pin given its built version is served from the cache
- * with no network (APVM's commit check against GitHub fails and is tolerated); without the version,
- * an embedded-version product (WP Rocket) fetches its version file first, and clones when it cannot.
+ * Measured offline on apvm-napi 3.0.0 and 3.3.0: a commit pin given its built version is served from
+ * the cache with no network (APVM's commit check against GitHub fails and is tolerated); without the
+ * version, an embedded-version product (WP Rocket) fetches its version file first, and clones when it
+ * cannot.
  * A release pin always asks GitHub's API for the release, so it needs network — but names one tag.
  *
  * Pure: it reads only the fields APVM returns, so it is unit-testable without the native binding.

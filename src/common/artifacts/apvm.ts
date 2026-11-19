@@ -43,9 +43,11 @@ let instance: Promise<Apvm> | undefined;
 
 /**
  * Returns the lazily-created, process-wide {@link Apvm}. Token resolution follows APVM's own
- * order (config → `GITHUB_TOKEN` → `GH_TOKEN` → `gh` CLI → gh config); we never set `cacheDir`,
- * leaving APVM's cache at its default `~/.apvm/cache`. Created only on first build —
- * a placeholder-only run that skips resolution never triggers token resolution.
+ * order (config → `GITHUB_TOKEN` → `GH_TOKEN` → `gh` CLI → gh config; a token it finds itself
+ * must look like one); we never set `cacheDir`, leaving APVM's cache at its default
+ * `~/.apvm/cache`, or `APVM_CACHE_DIR` as the environment holds it at creation (`.env` already
+ * loaded): fixed per instance, read again when a failed creation is retried. Created only on
+ * first build — a placeholder-only run that skips resolution never triggers token resolution.
  */
 export function getApvm(): Promise<Apvm> {
   instance ??= Apvm.createWithTokenResolution({}).catch((error: unknown) => {
