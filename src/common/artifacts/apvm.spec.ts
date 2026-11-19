@@ -88,8 +88,8 @@ test.describe("createBuildReporter", () => {
 
   // The phases as APVM sends them, as strings: naming the enum's members needs a value import of
   // apvm-napi, which would load its native addon into this spec.
-  const CLONE = "Clone" as JsBuildPhase;
-  const BUILD = "Build" as JsBuildPhase;
+  const CLONE = "Clone" as unknown as JsBuildPhase;
+  const BUILD = "Build" as unknown as JsBuildPhase;
 
   /** Printers that keep what they are given, on `palette`. */
   function capture(palette: Palette): { printers: Printers; lines: string[] } {

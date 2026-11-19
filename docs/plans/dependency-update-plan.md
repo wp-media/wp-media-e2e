@@ -275,14 +275,14 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 ### P5 — Lint and format toolchain · xs/easy · deps: P4 · independent of: P2, P3, P6–P10
 
 - `npm i -D eslint@10.15.0 typescript-eslint@8.73.0 globals@17.14.0 prettier@3.10.1 lint-staged@17.6.1`.
-- **New strict rule `no-unsafe-enum-assignment`** flags exactly 3 casts: `src/common/artifacts/apvm.spec.ts:91-92` and `warm.spec.ts:558`.
-  - Use `as unknown as JsBuildPhase`, **not** the enum members.
-    - A value import would load the native addon in those specs.
-    - It would also break `apvm.ts`'s rule: "the only module that imports `apvm-napi`".
-  - The comment above them (`apvm.spec.ts:89`) already says why they stay type-only (reworded in P4).
-  - This changes test code only, never what is asserted; say so in the commit message.
-- **Prettier 3.10.1** reformats 0 files (measured).
-- **Done:** gates pass, and `npm audit` drops the eslint `minimatch` chain.
+- **`no-unsafe-enum-assignment`** (new in 8.71.0, `strictTypeChecked`) flagged exactly the 3 casts in `apvm.spec.ts`/`warm.spec.ts`: now `as unknown as JsBuildPhase`, never the enum members (a value import loads the native addon and breaks `apvm.ts`'s "only importer" rule). Test code only, nothing asserted changes.
+- **Measured** (2026-11-19, official 26.13.1, npm 12.2.3; all five still npm's `latest`; sources: GitHub releases, prettier's CHANGELOG and 3.10 blog post):
+  - **Lockfile:** the five plus their own trees only: `@eslint/config-array` 0.23.6, ten `@typescript-eslint/*` 8.73.0, minimatch 11.0.9 nested under eslint, config-array and typescript-estree, `ignore` 7.0.16, `semver` 7.8.6, `string-argv` 0.4.0; no install script. New: `@isaacs/nonrecursive-glob-match` 1.1.0, pulled by minimatch 11.0.9 (SLSA provenance); it has no provenance and no `repository` field (sole maintainer isaacs, no dependencies, no install hooks).
+  - **Lint:** only those 3 errors; 8.73.0's `no-unsafe-class-instance-assignment` (`strictTypeChecked`) flags nothing; a probe file still trips every gate it tried (`waitForTimeout`, `networkidle`, `src/common` → `src/projects`).
+  - **Changelogs vs our config:** no option, default or config-API change in eslint 10.12–10.15 (rule fixes; minimatch floor raised), typescript-eslint 8.71–8.73 (new rules above; lazy rule loading; experimental `tsgo` backend, see Deferred; `typescript` peer still `<6.1.0`), globals 17.13–17.14 (data; `globals.node` identical), prettier 3.9.10–3.10.1 (formatting fixes; 0 files reformat). lint-staged 17.6.0 stages every tracked file a task modifies (ours edit only staged files) and runs nested task arrays in parallel (ours are flat).
+  - **Hook** (real commits in a scratch clone, husky + `lint-staged` 17.6.1): staged `.ts`/`.json` committed formatted; a partially staged file's unstaged hunk and an unrelated unstaged file stayed unstaged; an ESLint error blocked the commit and restored the index.
+  - **Audit:** 18 → 10 (2 low, 6 moderate, 2 high): eslint, `@eslint/config-array`, typescript-eslint and its 5 listed `@typescript-eslint/*` gone; minimatch 10.2.6 stays only under allure's glob (P7).
+  - **Gates:** green; unit 6620 passed, 134 skipped, no flake.
 
 ### P6 — Playwright 1.65.1 · m/medium · deps: P1 · independent of: P2–P5, P7–P10
 
@@ -431,6 +431,7 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 ## Deferred (open obligations)
 
 - **TypeScript 7:** wait for 7.1 stable plus typescript-eslint support (#10940). The three TS-API spec helpers then move to the 7.1 API.
+  - typescript-eslint 8.73.0 adds an experimental `tsgo` backend (optional peer `@typescript/native` ≥ 7.1.0 dev/beta); still experimental.
 - **Docker local env images (D5).**
 - **ssh2 native crypto on Node 26** (mscdex/ssh2#1531): once fixed, drop `orchestrator.md`'s install note.
 - **Allure's glob/minimatch advisories,** if P7's overrides fail.
@@ -451,7 +452,7 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 | P2    | done | 2026-11-19 | npm 12.2.3 (devEngines, onFail error); CI caches ~/.npm itself (setup-node's npm cache runs npm 11); allowScripts: fsevents@2.3.2 dropped, APVM deny key kept; clean `npm ci` ok; `.node-version` 26; hook runs `lint-staged` |
 | P3    | done | 2026-11-19 | execa 10.2.1, commander 15.1.0; maxBuffer re-measured (still-running child now SIGTERM, outcome unchanged), comment + doc fixed, spec added |
 | P4    | done | 2026-11-19 | apvm-napi `#v3.3.0` (allow-git=all once); API superset, enums runtime; fresh WP Rocket zips +3 nested vendor files (new SHA); V257 clean; offline commit pins hit; live pro@nginx 70/70, free@nginx 53/53, twin-apache 4/4, all built fresh |
-| P5    | pending |      |         |
+| P5    | done | 2026-11-19 | eslint 10.15.0, typescript-eslint 8.73.0, globals 17.14.0, prettier 3.10.1 (0 reformats), lint-staged 17.6.1 (hook proven); 3 enum casts `as unknown as`; audit 18 → 10, eslint minimatch chain gone |
 | P6    | pending |      |         |
 | P7    | pending |      |         |
 | P8    | pending |      |         |
