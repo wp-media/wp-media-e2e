@@ -555,7 +555,8 @@ test.describe("createApvmWarmer", () => {
       ): Promise<JsBuildOutput> => {
         onProgress(null, {
           type: "phase_started",
-          phase: "Clone" as JsBuildPhase,
+          // A string, as APVM sends it: naming the member needs a value import of the native addon.
+          phase: "Clone" as unknown as JsBuildPhase,
         });
         onProgress(null, { type: "warning", message: "slow" });
         return Promise.resolve(apvmOutput());
