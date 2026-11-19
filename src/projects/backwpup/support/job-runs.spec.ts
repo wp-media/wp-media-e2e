@@ -352,11 +352,13 @@ test.describe("stopRunningJobs", () => {
   });
 
   // The plugin checks for its marker and rewrites it as two separate steps, so a stop that lands
-  // between them is undone; asking again is what gets through.
+  // between them is undone; asking again is what gets through. Four looks still finding the marker
+  // span four 10 ms polls, past the 20 ms resend, so a second request is due whatever the machine's
+  // speed; each look and request is a process, so a longer script only spends the 5 s stop budget.
   test("asks again when the job's marker comes back", async () => {
     script(0, [state([row("created")], 3)]);
     script(1, [
-      ...Array.from({ length: 20 }, () => state([row("created")], 3)),
+      ...Array.from({ length: 4 }, () => state([row("created")], 3)),
       state([row("aborted")]),
     ]);
 
