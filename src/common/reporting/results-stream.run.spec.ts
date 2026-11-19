@@ -460,54 +460,109 @@ const GLOBAL_TIMEOUTS_MS = [10_000, 20_000, 28_000] as const;
 const GLOBAL_TIMEOUT_RUNS = GLOBAL_TIMEOUTS_MS.length + 1;
 
 /**
- * Whether the run is the case under test: the hanging scenario printed its line, and the runner was
- * told how its attempt ended. On a global timeout Playwright's teardown gets the deadline already
- * spent, so the runner does not wait for the workers it stops: that end comes after the run's own,
- * and only if the worker reports it before the runner exits — a race a slow machine loses. The results stream records every end the runner was told of,
- * so its absence there is the runner's, never the terminal's.
+ * The global-timeout test's own limit: each of its runs may take a whole {@link CHILD_TIMEOUT_MS} for
+ * `bddgen` and another for the runner (each child is killed past it), plus the describe's margin. A
+ * ceiling, never the usual length: a run that ends early hands over at once.
  */
-function caughtTheScenarioRunning(outcome: RunOutcome): boolean {
-  return (
-    outcome.stdout.includes("[probe] the scenario hangs") &&
-    parseResults(outcome.stream ?? "").events.some(
-      (e) => e.type === "scenario.end" && e.scenario.includes("hangs"),
-    )
+const GLOBAL_TIMEOUT_TEST_MS =
+  GLOBAL_TIMEOUT_RUNS * 2 * CHILD_TIMEOUT_MS + 30_000;
+
+/** The line the hanging scenario prints once it is running. */
+const HANGS_LINE = "[probe] the scenario hangs";
+
+/** The terminal's line for the hanging scenario's interrupted end, whatever its symbol set. */
+const HANGS_INTERRUPTED_LINE = /^\S+ interrupted .* A scenario that hangs/;
+
+/**
+ * What one global-timeout run showed:
+ * - `caught` — the scenario printed its line and the results stream holds its `scenario.end`: the
+ *   case under test.
+ * - `stream-lost-end` — the terminal printed the scenario's interrupted end, the stream holds none:
+ *   the stream dropped an end the runner did report.
+ * - `no-end` — the scenario printed its line, and neither the terminal nor the stream got its end.
+ *   On a global timeout Playwright's teardown gets the deadline already spent, so the runner does not
+ *   wait for the workers it stops: that end comes after the run's own, and only if the worker
+ *   reports it before the runner exits — a race a slow machine loses.
+ * - `not-begun` — the run ended before the scenario printed its line: the timeout was too short.
+ */
+type GlobalTimeoutRun = "caught" | "stream-lost-end" | "no-end" | "not-begun";
+
+/**
+ * Classifies a global-timeout run by what its stdout and results stream hold.
+ *
+ * @param outcome - the run.
+ * @returns what it showed ({@link GlobalTimeoutRun}).
+ */
+function classifyGlobalTimeoutRun(outcome: RunOutcome): GlobalTimeoutRun {
+  if (!outcome.stdout.includes(HANGS_LINE)) return "not-begun";
+  const streamEnded = parseResults(outcome.stream ?? "").events.some(
+    (e) => e.type === "scenario.end" && e.scenario.includes("hangs"),
   );
+  if (streamEnded) return "caught";
+  return outcome.stdout.split("\n").some((l) => HANGS_INTERRUPTED_LINE.test(l))
+    ? "stream-lost-end"
+    : "no-end";
 }
 
 /**
- * Runs cell `x`'s hanging scenario until a global timeout ends the run while it is running
- * ({@link caughtTheScenarioRunning}), in at most {@link GLOBAL_TIMEOUT_RUNS} runs. A run that ended
- * before the scenario printed its line moves on to the next, longer timeout; one that lost the
- * scenario's end tries the same timeout again.
+ * What a run that was not {@link GlobalTimeoutRun | caught} showed, for an error.
  *
- * @returns that run, and its global timeout in seconds.
- * @throws {@link Error} when no run caught the scenario running, naming what the last one missed.
+ * @param shown - what it showed.
+ * @param ms - its global timeout.
+ * @returns one observation, naming the timeout.
+ */
+function observed(
+  shown: Exclude<GlobalTimeoutRun, "caught">,
+  ms: number,
+): string {
+  const at = `${String(ms / 1000)}s`;
+  switch (shown) {
+    case "stream-lost-end":
+      return `${at}: the terminal printed the hanging scenario's interrupted end, the results stream has no scenario.end for it`;
+    case "no-end":
+      return `${at}: the scenario printed its line, neither the terminal nor the results stream got its end`;
+    case "not-begun":
+      return `${at}: the run ended before the scenario printed its line`;
+  }
+}
+
+/**
+ * Runs cell `x`'s hanging scenario until a global timeout ends the run while it is running, in at
+ * most {@link GLOBAL_TIMEOUT_RUNS} runs. A run that ended before the scenario printed its line moves
+ * on to the next, longer timeout (the last is kept); one whose end never came tries the same timeout
+ * again; one whose end the terminal printed but the stream lacks fails at once — retrying would hide
+ * the stream's bug.
+ *
+ * @returns the run that caught the scenario running, and its global timeout in seconds.
+ * @throws {@link Error} when the stream lost an end, or no run caught the scenario running: naming
+ * what each run showed.
  */
 async function runUntilGlobalTimeout(): Promise<{
   readonly outcome: RunOutcome;
   readonly seconds: number;
 }> {
-  let step = 0;
-  let missed = "";
+  const [first, ...longer] = GLOBAL_TIMEOUTS_MS;
+  let ms: number = first;
+  const observations: string[] = [];
   for (let run = 0; run < GLOBAL_TIMEOUT_RUNS; run += 1) {
-    const ms = GLOBAL_TIMEOUTS_MS[step] ?? 0;
     const outcome = await runCell("x", `globaltimeout-${String(run)}`, [
       "--grep",
       "@hang",
       `--global-timeout=${String(ms)}`,
     ]);
-    if (caughtTheScenarioRunning(outcome))
-      return { outcome, seconds: ms / 1000 };
-    if (outcome.stdout.includes("[probe] the scenario hangs")) {
-      missed = `the runner was never told how its attempt ended (${String(ms / 1000)}s)`;
-    } else {
-      missed = `the scenario never printed its line (${String(ms / 1000)}s)`;
-      step = Math.min(step + 1, GLOBAL_TIMEOUTS_MS.length - 1);
+    const shown = classifyGlobalTimeoutRun(outcome);
+    if (shown === "caught") return { outcome, seconds: ms / 1000 };
+    observations.push(observed(shown, ms));
+    if (shown === "stream-lost-end") {
+      throw new Error(
+        `the results stream lost an end the terminal printed — ${observations.join("; ")}`,
+      );
     }
+    // Too short: the next, longer timeout, or the last once none is left.
+    if (shown === "not-begun") ms = longer.shift() ?? ms;
   }
   throw new Error(
-    `no global timeout caught the hanging scenario running in ${String(GLOBAL_TIMEOUT_RUNS)} runs; the last: ${missed}`,
+    `no global timeout caught the hanging scenario running in ${String(GLOBAL_TIMEOUT_RUNS)} runs — ${observations.join("; ")}`,
   );
 }
 
@@ -766,6 +821,7 @@ test.describe("the results stream and the summary, through the real runner", () 
   });
 
   test("a global timeout ends the run first: the running scenario's whole line before the error, its open line with its own late end", async () => {
+    test.setTimeout(GLOBAL_TIMEOUT_TEST_MS);
     const { outcome, seconds } = await runUntilGlobalTimeout();
     expect(outcome.exitCode).toBe(1);
     const lines = runLines(outcome.stdout);
