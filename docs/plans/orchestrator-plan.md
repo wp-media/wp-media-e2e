@@ -241,7 +241,7 @@ Stack — decided 2026-10-05.
 | Layer | Choice | Why |
 | --- | --- | --- |
 | Host | A separate runner server, reaching the sites over SSH (the suite's `ssh` transport) | Keeps browsers and builds off the WordPress servers. How many instances share it is Q2. |
-| Language | TypeScript on Node 24, run with `tsx` | The suite's relative imports carry no extension, which Node's own type stripping cannot resolve (V110). |
+| Language | TypeScript on Node 26, run with `tsx` | The suite's relative imports carry no extension, which Node's own type stripping cannot resolve (V110). |
 | State | SQLite through `node:sqlite`, one file in the state directory; plain SQL, numbered migrations, no ORM | Built in, no native addon; "Release candidate" in Node 24.21, no warning (V111). `better-sqlite3` is the fallback behind the same repository layer. |
 | API | Hono + `@hono/node-server`: one app on a Unix socket (command) and on HTTP (dashboard) | Its typed client (`hc`) gives both clients the server's types — parity by construction; SSE and static serving built in (V112). |
 | Validation | zod 4 | One schema per input — task, config, API body — typing server, command and dashboard alike. |

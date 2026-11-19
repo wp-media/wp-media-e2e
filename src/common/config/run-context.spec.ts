@@ -427,3 +427,47 @@ test.describe("RUN_ID — the run's token", () => {
     expect(error).not.toMatch(/[\u007f-\u009f\u2028\u2029]/);
   });
 });
+
+test.describe("INVOCATION_ID — the invocation's token", () => {
+  /**
+   * What importing run-context gives, in a fresh process with `RUN_ID` pinned: its INVOCATION_ID, the
+   * one a direct child given a worker index (as Playwright gives its workers) reads, and the one a
+   * direct child without one — a run the runner started itself — reads.
+   */
+  async function importTwice(): Promise<{
+    own: string;
+    worker: string;
+    child: string;
+  }> {
+    const module = JSON.stringify(
+      `${REPO_ROOT}src/common/config/run-context.ts`,
+    );
+    const result = await runInChildNode(
+      `const { execFileSync } = await import("node:child_process");
+       const { INVOCATION_ID } = await import(${module});
+       const read = (env) => execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
+         'const { INVOCATION_ID } = await import(' + JSON.stringify(${module}) + '); process.stdout.write(INVOCATION_ID);'],
+         { encoding: "utf8", env });
+       const worker = read({ ...process.env, TEST_WORKER_INDEX: "0" });
+       const child = read(process.env);
+       console.log(JSON.stringify({ own: INVOCATION_ID, worker, child }));`,
+      {
+        cwd: REPO_ROOT,
+        env: { E2E_LOAD_DOTENV: "false", RUN_ID: "nightly run" },
+      },
+    );
+    return result as { own: string; worker: string; child: string };
+  }
+
+  // A pinned RUN_ID is shared by every invocation that pins it; the token never is.
+  test("two invocations pinning one RUN_ID get two tokens; each one's workers share its own, nothing else", async () => {
+    const [a, b] = await Promise.all([importTwice(), importTwice()]);
+    expect(a.own).toMatch(/^[0-9a-f]{32}$/);
+    expect(a.worker).toBe(a.own);
+    expect(b.worker).toBe(b.own);
+    expect(a.own).not.toBe(b.own);
+    expect(a.child).toMatch(/^[0-9a-f]{32}$/);
+    expect(a.child).not.toBe(a.own);
+    expect(b.child).not.toBe(b.own);
+  });
+});

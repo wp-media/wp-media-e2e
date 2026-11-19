@@ -18,6 +18,9 @@ import { JobExports } from "./support/job-transfer";
 import { ChangedMarkers, removeMarkers, seedMarkers } from "./support/markers";
 import { CliRestore, contentKeptOut, restoreSite } from "./support/cli-restore";
 import { ContentCopy } from "./support/content-copy";
+import { holderFor } from "./support/content-copy-lease";
+import { restoreDatabaseDefaults } from "./support/database-defaults";
+import { INVOCATION_ID } from "../../common/config/run-context";
 import {
   LEFTOVER_FIXTURE_OPTIONS,
   assertNoContentCopyLeft,
@@ -146,9 +149,10 @@ interface BackWPupWorkerFixtures {
    * Refuses, before the worker's first scenario, a site still holding a copy of `wp-content` an
    * earlier run's restore guard could not put back — that site's `wp-content` may be damaged, so every
    * result on it would be suspect, and the copy may be the only way back — unless it is provably
-   * orphaned (stamped by another boot, used by no process): then it is put back (or, holding none to
-   * put back, removed) and the worker goes on. The auth setup's preflight runs the same first, before
-   * its gates. Automatic.
+   * orphaned (stamped by another boot, or its lease lapsed — at once when this worker's predecessor
+   * in its slot held it —, and used by no process): then it is put back (or, holding none to put
+   * back, removed) and the worker goes on. The auth setup's preflight runs the same first, before its
+   * gates. Automatic.
    */
   // eslint-disable-next-line @typescript-eslint/no-invalid-void-type -- Playwright's type for a fixture that produces no value.
   contentCopyLeftover: void;
@@ -163,8 +167,13 @@ export const test = base.extend<BackWPupFixtures, BackWPupWorkerFixtures>({
     { scope: "worker", auto: true, box: true },
   ],
   contentCopyLeftover: [
-    async ({ boundSite }, use) => {
-      await assertNoContentCopyLeft(boundSite);
+    async ({ boundSite }, use, workerInfo) => {
+      // Named as this worker's slot: a copy its predecessor in the slot left is settled at once.
+      await assertNoContentCopyLeft(
+        boundSite,
+        restoreDatabaseDefaults,
+        holderFor(INVOCATION_ID, workerInfo.parallelIndex),
+      );
       await use();
     },
     LEFTOVER_FIXTURE_OPTIONS,
@@ -238,15 +247,22 @@ export const test = base.extend<BackWPupFixtures, BackWPupWorkerFixtures>({
   // Torn down after the `@plugin` teardown (fixtures outlive `After` hooks), so the content directory
   // is put back once the plugin and its data are gone, and the debug.log it holds after the teardown
   // has read the scenario's.
-  cliRestore: async ({ site, cli, changedMarkers, pluginArtifact }, use) => {
+  cliRestore: async (
+    { site, cli, changedMarkers, pluginArtifact },
+    use,
+    testInfo,
+  ) => {
     const restore = new CliRestore(
       restoreSite(site.transport),
       cli,
-      new ContentCopy(site.transport, async () =>
-        contentKeptOut(
-          pluginArtifact("plugin").slug,
-          await resolveSiteResidue(site.transport, BACKWPUP_SITE_RESIDUE),
-        ),
+      new ContentCopy(
+        site.transport,
+        async () =>
+          contentKeptOut(
+            pluginArtifact("plugin").slug,
+            await resolveSiteResidue(site.transport, BACKWPUP_SITE_RESIDUE),
+          ),
+        { holder: holderFor(INVOCATION_ID, testInfo.parallelIndex) },
       ),
       changedMarkers,
     );

@@ -265,12 +265,19 @@ object (Pro's deep link, Free's upload); the command is
   database, so the command runs only through `cliRestore` (the generic step refuses it). It refuses a
   database holding anything the backup cannot bring back and a relocated `wp-content`; copies
   `wp-content` first (as root, into a root-only `<root>/.e2e_content_copy/`; without passwordless
-  `sudo` it refuses and the command does not run), puts it back exactly after the scenario, resets the
-  database's default collation, and removes the scenario's own `--pre-backup` snapshot. A copy that
-  could not go back stays, and BackWPup runs refuse that site until someone settles it (the message
-  says how) — or, once provably orphaned (used by no process, and holding none to put back or stamped
-  by another boot of the host), the auth setup or a worker settles it itself
-  (`support/content-copy-leftover.ts`).
+  `sudo`, root's `perl`, room and inodes for a second tree, or with a mount at or under `wp-content`
+  — or one on overlayfs that cannot be renamed — it refuses and the command does not run), runs
+  the command fenced on that copy (WP-CLI `--exec`: it starts only while the copy is still the run's),
+  puts it back exactly after the scenario — extracted beside the live site, compared with `tar -d`,
+  then swapped in by rename, so web requests writing meanwhile cannot break it — resets the
+  database's default collation (unless the fence refused the command, which then never started), and removes the scenario's own `--pre-backup` snapshot. While kept,
+  the copy's lease is renewed every minute on the host's boot-time clock (15 min each). A copy that
+  could not go back stays, its lease expired, and BackWPup runs refuse that site until it is
+  provably orphaned — used by no process, **and** holding none to put back, stamped by another boot
+  of the host, or carrying a lapsed lease or one held by the asking worker's own slot (its runner
+  invocation's random token and `parallelIndex`) — when the
+  auth setup or a worker settles it itself (`support/content-copy-leftover.ts`); or until someone
+  settles it (the message says how). An older suite's copy (no lease) waits for a reboot.
 
 ## Tags
 

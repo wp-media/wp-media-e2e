@@ -3,7 +3,7 @@
 ## TLDR
 
 - **Moves the suite to Node 26** (Active LTS since 2026-10-28), **npm 12** and every dependency's latest stable version.
-  - One small phase per package group, done one after another on one branch; nothing is committed until asked.
+  - One small phase per package group, done one after another, each on its own branch merged into `develop` before the next.
 - **Node 26:** every package in the upgraded tree accepts it, and no Node 25/26 removal or deprecation hits our code.
   - Only config and docs change: `.nvmrc`, `engines`, `@types/node` 26, CI.
   - Known side effect: ssh2's optional native crypto no longer compiles, so it falls back to slower pure JS, which is already what CI and local use.
@@ -127,15 +127,15 @@ Node 26.13.1 LTS, npm 12.2.3, TypeScript 6.0.3, Playwright 1.65.1 (Chromium 159)
 - **Start:**
   - Read `AGENTS.md`, this whole plan, and the Status table at the end.
   - Resume at the first phase that is not `done`.
-  - Implement on branch `chore/deps-update`, created from `develop` in P0. Inside Orca, create the worktree with Orca, branch named without the GitHub user.
+  - Each phase gets its own Orca worktree and branch `chore/deps-pN-<slug>`, created from `develop` (branch named without the GitHub user).
+  - Merge it into `develop`, push and wait for CI before the next phase starts.
 - **Per phase:**
   1. Implement exactly that phase.
   2. Run the gates.
   3. Run an isolated audit of the phase's diff (a fresh reviewer on a copy of the tree), and verify every finding before fixing it.
   4. Do the live check if the phase's **Done** asks for one.
   5. Set the phase's Status row (`done`, date, one-line outcome) and remove detail from its section that no longer adds value.
-- **Commits:** only when the user asks.
-  - Conventional Commits, one per phase, never a `Co-Authored-By` line.
+- **Commits:** one Conventional Commit per phase (the user asked for this process), merged into `develop`; never a `Co-Authored-By` line.
   - Any test changed must say why in the commit message (P5 casts, P9 keycap row).
 - **Repo rules that bite here:**
   - Code never references plans: no plan paths, phase names or `§` in code, comments or messages.
@@ -147,7 +147,7 @@ Node 26.13.1 LTS, npm 12.2.3, TypeScript 6.0.3, Playwright 1.65.1 (Chromium 159)
   - Run cells concurrently, never one after the other, and restore any site you change.
   - **BackWPup — preferred: `bwu2` (`free@nginx`) and `bwu3` (`pro@nginx`).** These are pre-approved and need no asking.
     - Their sites file is backed up at `~/.local/share/wp-media-e2e/backups/orchestrator-worktree-2026-10-19/sites.backwpup.json`.
-    - Their cell names clash with the main checkout's `sites.json`, so use them from a separate worktree of `chore/deps-update`, with that file copied to `src/projects/backwpup/config/sites.json` (`chmod 600`).
+    - Their cell names clash with the main checkout's `sites.json`, so use them from that phase's worktree, with that file copied to `src/projects/backwpup/config/sites.json` (`chmod 600`).
   - **BackWPup — main checkout:** `pro@nginx` (simple), `free@nginx` (bwu, the user's QA site) and `pro@apache` (AutoE2E's). Name them and ask the user before using any of these.
   - **WP Rocket:** the SSH twins only (`npm run env:cells:up`, then `E2E_CELL=<apache|nginx> npm run test:wp-rocket`).
     - The twins' unit specs run with `E2E_SSH_TWINS=1`.
@@ -160,9 +160,9 @@ Node 26.13.1 LTS, npm 12.2.3, TypeScript 6.0.3, Playwright 1.65.1 (Chromium 159)
 
 ## Phases
 
-- **Order:** phases run **one after another** on `chore/deps-update`.
+- **Order:** phases run **one after another**, each on its own branch from `develop`, merged and CI-green before the next.
   - Each edits `package.json` and `package-lock.json`, and P3 and P8 both edit `transport-exec.ts`.
-  - "Independent of" means the phase may be reordered or skipped without breaking another; it doesn't mean simultaneous on one branch.
+  - "Independent of" means the phase may be reordered or skipped without breaking another; it doesn't mean simultaneous.
 - **Gates:** run with `PATH=~/.local/share/fnm/node-versions/v26.13.1/installation/bin:$PATH` (official build; from P2 on, with npm 12 installed there).
   - The gates are `npm run typecheck && npm run lint && npm run format && npm run test:unit`.
   - A timing spec failing once under load is re-run alone; it is never ignored.
@@ -184,21 +184,11 @@ Baseline on the untouched tree (6ec1573), official 24.22.3/npm 11.19.1 and 26.13
 
 ### P1 — Node 26 · s/medium · deps: P0 · independent of: —
 
-Later phases are verified on Node 26.
+Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^26.6.6 (lockfile: only it and `undici-types` 8.9.0), `actions/setup-node@v7` (`ci.yml`, `setup-chromium`), `ssh-twins.yml` also triggered by `.nvmrc`; Node 26 in AGENTS.md, README, the orchestrator docs and help text, plus the ssh2 native-crypto note in `orchestrator.md`'s install. CI's ubuntu-24.04 image caches only Node 22/24, so each job downloads 26. Verified on official 26.13.1:
 
-- **Version pins:**
-  - `.nvmrc` becomes `26`.
-  - `engines.node` becomes `>=26.13.1`.
-  - Run `npm i -D @types/node@^26.6.6`.
-- **CI:** `actions/setup-node@v6` becomes `@v7` in `ci.yml` and `.github/actions/setup-chromium/action.yml`.
-  - v7 moves to ESM and adds cache outputs; `node-version-file` and `cache: npm` are unchanged.
-  - The ubuntu-24.04 image caches only Node 22 and 24, so each job downloads 26.
-- **Docs:**
-  - Node version: `AGENTS.md` Runtime row, `README.md` intro, `docs/guides/orchestrator.md` install (Node ≥ 26.13.1).
-  - Add a line to the orchestrator install docs: ssh2's optional native crypto doesn't build on Node 26 (mscdex/ssh2#1531), so ssh2 uses slower pure JS. Drop the line when that issue is fixed.
-- **Done:**
-  - Gates pass on the official 26.13.1, and CI passes: both unit shards, the smoke and the twins workflow.
-  - A live run passes on both products.
+- **Gates:** Mac green, unit 6511 passed, 130 skipped. RemoteDesktopQA (Ubuntu 24.04): typecheck, lint, format:check pass; `test:unit` fails only environmentally, identically on 24.22.3 (Deferred → unit-suite robustness).
+- **Live:** BackWPup pro@nginx 70/70 and free@nginx 53/53, concurrently on RemoteDesktopQA; WP Rocket twin-apache 4/4, twin-nginx 4/4, twin specs 122 passed (Mac). No Node-26 warning in the logs (no `DeprecationWarning`/`ExperimentalWarning`, no ssh2/cpu-features message).
+- An earlier bwu3 interruption was not Node 26: BackWPup's content-copy put-back raced the live site (fixed in `fix/content-copy-put-back`, merged as d603ce1).
 
 ### P2 — npm 12 · s/medium · deps: P1 · independent of: P3–P10
 
@@ -296,6 +286,7 @@ Later phases are verified on Node 26.
   - graceful-fs patch marks;
   - `forceRegExp` and `_grepTitleWithTags`.
   - `secrets.run.spec.ts`, `results-stream.run.spec.ts`, `import-boundary.spec.ts` and the tmux/pty specs exercise them.
+- **Playwright Docker image** (`@visual`; README, authoring-tests.md): ships Node 24 up to 1.63 and Node 26 from 1.65.1 (Dockerfile.noble `ARG NODE_VERSION`), so the container matches `engines` only from here. A mismatch only warns: `.npmrc` has no `engine-strict`.
 - **Comments naming 1.63 to update:**
   - source: `terminal-mode.ts`, `authenticate.ts`, `results.ts`, `cell-pin.ts`, `import-probe.ts`, `__fixtures__/reporter-fakes.ts`;
   - specs: `outcome.spec.ts`, `failure-block.spec.ts`, `results.spec.ts`.
@@ -386,6 +377,7 @@ Later phases are verified on Node 26.
 - **Docs:**
   - AGENTS.md: key technologies (Node 26, npm 12), the APVM pin, the Playwright floor (does `screen` make 1.64 the floor?).
   - `docs/architecture/*` and `docs/guides/*`.
+  - A `CHANGELOG.md` entry for the Node ≥ 26.13.1/npm 12 requirement under the next release.
   - The version-pinned rows in `e2e-modernization-plan.md` and `orchestrator-plan.md`.
 - **Audit:** an isolated full audit of the diff; verify every finding before fixing it.
 - **Final runs**, all on official 26.13.1 + npm 12:
@@ -417,16 +409,21 @@ Later phases are verified on Node 26.
 
 - **TypeScript 7:** wait for 7.1 stable plus typescript-eslint support (#10940). The three TS-API spec helpers then move to the 7.1 API.
 - **Docker local env images (D5).**
-- **ssh2 native crypto on Node 26** (mscdex/ssh2#1531).
+- **ssh2 native crypto on Node 26** (mscdex/ssh2#1531): once fixed, drop `orchestrator.md`'s install note.
 - **Allure's glob/minimatch advisories,** if P7's overrides fail.
 - **pixelmatch threshold re-tune** with the first `@visual` scenario.
+- **Unit-suite robustness** (found on RemoteDesktopQA, Ubuntu 24.04; not dependency issues, same on Node 24):
+  - umask 0002 (Ubuntu's default for a user with its own group) fails 23 orchestrator specs (`state/` counter, run-retention, orphans; `runs/launch`): fixture folders come out 775, which the code rightly refuses as group-writable; the specs should set their own umask or modes.
+  - `src/common/__fixtures__/temp-dir.spec.ts` (2 tests) fails when the checkout itself lives under the OS temp folder (`/tmp/…`).
+  - `src/projects/wp-rocket/support/config-edits.php.spec.ts` (9 tests) fails on PHP 7.4: `__fixtures__/wp-rocket-edits-harness.php:136` uses `str_contains()` (PHP ≥ 8); polyfill it, or skip with a reason when the local PHP is older.
+  - `src/projects/backwpup/support/content-copy-put-back.spec.ts:474` ("the old put-back … fails while the site writes") once did not reproduce the old failure there: its reproduction is timing-dependent.
 
 ## Status
 
 | Phase | State   | Date | Outcome |
 | ----- | ------- | ---- | ------- |
 | P0    | done | 2026-11-18 | 24.22.3 and 26.13.1 green: 6511 passed, 130 skipped, no flake; audit 18 (1 critical, 2 high, 14 moderate, 1 low; picomatch advisory withdrawn); 2 dead allowScripts entries |
-| P1    | pending |      |         |
+| P1    | done | 2026-11-19 | `.nvmrc` 26, `engines` >=26.13.1, @types/node 26.6.6, setup-node v7; gates green (6511 passed, 130 skipped); live pro@nginx 70/70, free@nginx 53/53, twins 4/4 + 4/4, twin specs 122; no Node-26 warning |
 | P2    | pending |      |         |
 | P3    | pending |      |         |
 | P4    | pending |      |         |

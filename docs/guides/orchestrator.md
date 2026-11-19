@@ -14,10 +14,12 @@ Design and the decisions behind it: [`docs/plans/orchestrator-phase-0.5-plan.md`
 
 ## Install on the runner
 
-1. Tools: Node ≥ 24.16 and npm; git; for BackWPup builds composer (PHP CLI) and `gulp-cli`
+1. Tools: Node ≥ 26.13.1 and npm; git; for BackWPup builds composer (PHP CLI) and `gulp-cli`
    (`npm install --global gulp-cli`); `tmux`. Chromium's system libraries, once:
    `npx playwright install-deps chromium` (it asks for `sudo`); `npm ci` installs Chromium itself.
-   No X server: runs are headless.
+   No X server: runs are headless. ssh2's optional native crypto does not build on Node 26
+   ([mscdex/ssh2#1531](https://github.com/mscdex/ssh2/issues/1531)), so SSH uses its slower pure-JS
+   crypto (drop this note once that issue is fixed).
 2. A checkout of `develop`, then `npm ci`. Never `--omit=dev` nor `NODE_ENV=production`: tsx, zod and
    commander are dev dependencies.
 3. The cells' sites files (`src/projects/<product>/config/sites*.json`, `chmod 600`), with SSH keys

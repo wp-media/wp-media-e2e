@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { spawnSync } from "node:child_process";
 
+import { FENCE_EXIT, FENCE_MARK } from "./content-copy-fence";
 import {
   CliRestore,
   RESTORE_PRECONDITIONS_PHP,
@@ -204,6 +205,8 @@ function rig(
     readonly holds?: Record<string, { file: boolean; database: boolean }>;
     readonly putBack?: () => Promise<void>;
     readonly stamp?: () => Promise<void>;
+    /** What the command answers, when not a plain success. */
+    readonly result?: { exitCode: number; stderr: string };
   } = {},
 ): { calls: string[]; restore: CliRestore; site: RestoreSite } {
   const calls: string[] = [];
@@ -258,17 +261,32 @@ function rig(
       calls.push("stamp");
       return options.stamp?.() ?? Promise.resolve();
     },
+    fence: () => (kept ? ["--exec=fence"] : []),
     putBack: async () => {
       calls.push("put back");
       await (options.putBack?.() ?? Promise.resolve());
       kept = false;
     },
+    abandon: () => {
+      calls.push("abandon");
+      return Promise.resolve();
+    },
   };
   const cli = {
-    run: async (argv: readonly string[]) => {
-      calls.push(`run ${argv.join(" ")}`);
+    run: async (
+      argv: readonly string[],
+      _budgetMs?: number,
+      globals: readonly string[] = [],
+    ) => {
+      calls.push(`run ${[...globals, ...argv].join(" ")}`);
       await (options.command?.() ?? Promise.resolve());
-      return { exitCode: 0, stdout: "", stderr: "", notices: [] } as never;
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        notices: [],
+        ...options.result,
+      } as never;
     },
   };
   const changed = {
@@ -295,7 +313,7 @@ test.describe("CliRestore — running", () => {
       "keep defaults utf8mb4_general_ci",
       "list snapshots",
       "stamp",
-      "run restore /a.tar --yes",
+      "run --exec=fence restore /a.tar --yes",
       "list snapshots",
       "restore defaults",
     ]);
@@ -475,5 +493,45 @@ test.describe("CliRestore — release", () => {
       /still running .* after its step ended, so nothing was put back.*The copy of wp-content stays/s,
     );
     expect(calls).not.toContain("put back");
+    // Given up, so a later run settles it once the restore ends, without waiting out its lease.
+    expect(calls.at(-1)).toBe("abandon");
+  });
+});
+
+test.describe("CliRestore — fence", () => {
+  // A run that slept past its lease must not restore over a copy a later run settled.
+  test("runs a files restore fenced on its copy, a database-only one unfenced", async () => {
+    const files = rig();
+    await files.restore.run(["restore", "--type=file"]);
+    expect(files.calls).toContain("run --exec=fence restore --type=file");
+    const db = rig();
+    await db.restore.run(["restore", "--type=db"]);
+    expect(db.calls).toContain("run restore --type=db");
+  });
+
+  // The fence runs before WordPress loads, so the command never started: nothing of it to undo, on a
+  // site another run may hold by now.
+  test("fails, naming why, when the fence refused the restore — putting nothing back and leaving the database's defaults alone", async () => {
+    const { calls, restore } = rig({
+      result: {
+        exitCode: FENCE_EXIT,
+        stderr: `Error: ${FENCE_MARK}: the copy … is no longer this run's`,
+      },
+    });
+    await expect(restore.run(["restore"])).rejects.toThrow(
+      /the restore was not run: the copy of wp-content taken for it is no longer this run's/,
+    );
+    expect(calls).toContain("read defaults");
+    expect(calls).not.toContain("restore defaults");
+    expect(calls).not.toContain("put back");
+    // The snapshots are still looked at after it: reading changes nothing.
+    expect(calls.filter((call) => call === "list snapshots")).toHaveLength(2);
+  });
+
+  test("leaves a restore's own exit 75 to the steps when the fence did not print it", async () => {
+    const { restore } = rig({
+      result: { exitCode: FENCE_EXIT, stderr: "Error: other" },
+    });
+    await expect(restore.run(["restore"])).resolves.toBeUndefined();
   });
 });

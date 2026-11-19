@@ -7,6 +7,7 @@ import { DEFAULT_REPORT_ROOT } from "../reporting/retention";
 import { pinnedCell } from "./cell-pin";
 import { env } from "./env";
 import { formatRunId, isUsableRunId, runReportDir } from "./run-id";
+import { resolveInvocationId } from "./invocation-id";
 
 /**
  * Absolute repo root, derived from this module's own location
@@ -85,6 +86,16 @@ function resolveRunId(): string {
 
 /** One RUN_ID for the whole invocation. Only the report directory is namespaced by it. */
 export const RUN_ID: string = resolveRunId();
+
+/**
+ * One random token per runner invocation, shared with the workers it forks and never pinned — what
+ * tells two invocations apart where a shared `RUN_ID` cannot (`./invocation-id.ts`).
+ */
+export const INVOCATION_ID: string = resolveInvocationId({
+  env: process.env,
+  pid: process.pid,
+  ppid: process.ppid,
+});
 
 /**
  * Internal channel carrying this invocation's `--project` selection to forked worker

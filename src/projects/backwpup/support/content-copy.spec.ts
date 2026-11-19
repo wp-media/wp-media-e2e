@@ -7,6 +7,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -31,6 +32,13 @@ import {
   NOT_THE_COPY_DIR,
   NOT_THIS_RUNS_COPY,
   NO_TOKEN,
+  MOUNT_CHECK_PERL,
+  PUT_BACK_SCRIPT,
+  ProbeStrandedError,
+  RENAME_PROBE,
+  STAGE_FAILED,
+  SWAP_PERL,
+  CONTENT_COPY_SCRATCH,
   RECOVERING_PREFIX,
   benignCopyWarnings,
   copyArgv,
@@ -38,13 +46,23 @@ import {
   discardCopy,
   findLeftovers,
   heldCopy,
+  hostCheckProblem,
   inCopyArgv,
   isLeftoverName,
   leftoverMessage,
   parseCopyRoom,
   putBackArgv,
+  putBackDamage,
   readsBackWhole,
+  removeByHand,
 } from "./content-copy";
+import {
+  CONTENT_COPY_LEASE,
+  LEASE_NEXT,
+  LEASE_TTL_S,
+  parseLease,
+} from "./content-copy-lease";
+import { FENCE_MARK } from "./content-copy-fence";
 import { BOOT, copyHost } from "./__fixtures__/copy-host";
 import type { CopyHost } from "./__fixtures__/copy-host";
 
@@ -81,14 +99,50 @@ test.describe("tar arguments", () => {
     ]);
   });
 
-  test("put back: into the root, owners and modes kept, each directory emptied before it is filled", () => {
-    expect(putBackArgv("/s/c.tar", "/s")).toEqual([
-      "-xpf",
-      "/s/c.tar",
-      "--recursive-unlink",
-      "-C",
+  // Extracted beside the site, never over it: an extraction emptying wp-content fails while the
+  // site writes into it (`Cannot unlink: Directory not empty`, the incident this replaced).
+  test("put back: the swap script, given the root, the lease and the room to keep", () => {
+    expect(putBackArgv("/s", { ttlS: 900, holder: "run#3" })).toEqual([
+      "sh",
+      "-c",
+      PUT_BACK_SCRIPT,
+      "sh",
       "/s",
+      "900",
+      "run#3",
+      String(1024 * 1024),
     ]);
+    expect(PUT_BACK_SCRIPT).not.toMatch(/--recursive-unlink/);
+  });
+
+  // Each travels inside one pair of single quotes in the put-back's `sh` program.
+  test("the perl programs the put-back embeds hold no single quote", () => {
+    expect(SWAP_PERL).not.toContain("'");
+    expect(MOUNT_CHECK_PERL).not.toContain("'");
+    expect(PUT_BACK_SCRIPT).toContain(`perl -e '${MOUNT_CHECK_PERL}' -- `);
+  });
+});
+
+test.describe("what a failed put-back left", () => {
+  test("before the swap, nothing changed; a swap broken off says wp-content may be missing", () => {
+    // 1 is `sudo` refusing the put-back, 90 the in-copy script refusing its directory: neither ran it.
+    for (const exit of [1, 79, 80, 81, 82, 83, 84, 85, 90, 94]) {
+      expect(putBackDamage(exit), String(exit)).toBe(
+        "nothing was put back; wp-content is as the restore left it",
+      );
+    }
+    expect(putBackDamage(86)).toMatch(/may now be missing/);
+    expect(putBackDamage(87)).toMatch(/something replaced wp-content/);
+    expect(putBackDamage(2)).toMatch(/partly as the restore left it/);
+  });
+
+  test("a host the copy could not go back on is named for what it lacks", () => {
+    const result = (exitCode: number) => ({ exitCode, stdout: "", stderr: "" });
+    expect(hostCheckProblem(result(3))).toMatch(/no `perl`/);
+    expect(hostCheckProblem(result(4))).toMatch(/a mount/);
+    expect(hostCheckProblem(result(1))).toMatch(
+      /could not be checked \(exit 1/,
+    );
   });
 });
 
@@ -174,6 +228,23 @@ test.describe("heldCopy", () => {
   });
 
   // The command runs only once the copy is whole; a copy already back is marked so in the same command.
+  // The lease and the put-back's scratch say nothing about what goes back: the archive alone does.
+  test("its lease and the put-back's scratch aside", () => {
+    expect(
+      heldCopy([
+        CONTENT_COPY_STAMP,
+        CONTENT_COPY_LEASE,
+        LEASE_NEXT,
+        CONTENT_COPY_SCRATCH,
+        CONTENT_COPY_FILE,
+      ]),
+    ).toBe("whole");
+    expect(heldCopy([CONTENT_COPY_SCRATCH, CONTENT_COPY_RESTORED])).toBe(
+      "none",
+    );
+    expect(heldCopy([CONTENT_COPY_LEASE, CONTENT_COPY_SCRATCH])).toBe("none");
+  });
+
   test("nothing, the partial copy or the one already back is none to put back", () => {
     for (const entries of [
       [],
@@ -211,13 +282,24 @@ test.describe("leftoverMessage", () => {
         CONTENT_COPY_FILE,
       ]),
     ).toContain(
-      `\`sudo tar -xpf /s/.e2e_content_copy/${CONTENT_COPY_FILE} --recursive-unlink -C /s\``,
+      "`sudo mkdir -m 0700 /s/.e2e_content_copy/manual && " +
+        `sudo tar -xpf /s/.e2e_content_copy/${CONTENT_COPY_FILE} -C /s/.e2e_content_copy/manual && ` +
+        "sudo mv -T /s/wp-content /s/.e2e_content_copy/manual/damaged && " +
+        "sudo mv -T /s/.e2e_content_copy/manual/wp-content /s/wp-content`",
     );
+  });
+
+  // Extracting over a live wp-content is what failed (`Directory not empty`), and with a mount
+  // under it would write through it.
+  test("never tells the operator to extract the copy over wp-content", () => {
+    const message = leftoverMessage("t", place, [CONTENT_COPY_FILE]);
+    expect(message).not.toMatch(/--recursive-unlink|-C \/s`/);
+    expect(message).toMatch(/`findmnt` shows no mount at or under wp-content/);
   });
 
   test("names a copy kept under the old name as the way back", () => {
     expect(leftoverMessage("t", place, [LEGACY_COPY_FILE])).toContain(
-      `sudo tar -xpf /s/.e2e_content_copy/${LEGACY_COPY_FILE} --recursive-unlink`,
+      `sudo tar -xpf /s/.e2e_content_copy/${LEGACY_COPY_FILE} -C /s/.e2e_content_copy/manual`,
     );
   });
 
@@ -237,6 +319,41 @@ test.describe("leftoverMessage", () => {
     );
     expect(message).not.toContain("tar -xpf");
     expect(leftoverMessage("t", place, [])).toContain("(nothing)");
+  });
+
+  // The probe's directory may hold the site's own wp-content: its way back, never a removal.
+  test("gives the probe's way back, never a removal, for a directory holding the probe's", () => {
+    for (const entries of [
+      [RENAME_PROBE, CONTENT_COPY_TOKEN],
+      [RENAME_PROBE, CONTENT_COPY_FILE, CONTENT_COPY_STAMP],
+    ]) {
+      const message = leftoverMessage("site", place, entries);
+      expect(message).toContain(
+        `sudo mv -T /s/wp-content /s/${CONTENT_COPY_DIR}/${RENAME_PROBE}.empty && ` +
+          `sudo mv -T /s/${CONTENT_COPY_DIR}/${RENAME_PROBE} /s/wp-content`,
+      );
+      expect(message).toContain(
+        `sudo rmdir /s/${CONTENT_COPY_DIR}/${RENAME_PROBE}`,
+      );
+      expect(message).not.toMatch(/rm -r/);
+    }
+  });
+
+  test("tells to look for the probe's directory before removing one whose contents are unknown", () => {
+    expect(removeByHand(place, undefined)).toMatch(
+      new RegExp(
+        `look first .*${RENAME_PROBE}.*otherwise remove it by hand: \`sudo rm -r`,
+      ),
+    );
+    expect(removeByHand(place, [RENAME_PROBE])).not.toMatch(/rm -r/);
+    expect(leftoverMessage("t", place)).toMatch(
+      new RegExp(
+        `If \`sudo ls -A /s/${CONTENT_COPY_DIR}\` lists ${RENAME_PROBE}, settle that first`,
+      ),
+    );
+    expect(removeByHand(place, [CONTENT_COPY_TOKEN])).toBe(
+      `remove it by hand: \`sudo rm -r /s/${CONTENT_COPY_DIR}\`.`,
+    );
   });
 
   test("names unknown contents, and points at them when they could not be read", () => {
@@ -419,7 +536,9 @@ test.describe("ContentCopy", () => {
   let host: CopyHost;
   const none = (): Promise<readonly string[]> => Promise.resolve([]);
   const dir = (): string => join(host.root, CONTENT_COPY_DIR);
-  const copy = (): ContentCopy => new ContentCopy(host.transport, none);
+  /** No heartbeat: a spec drives renewals itself, and none outlives the stubbed host. */
+  const quiet = { every: (): (() => void) => () => undefined } as const;
+  const copy = (): ContentCopy => new ContentCopy(host.transport, none, quiet);
   /** The stubbed commands run, but `sudo`'s own lines. */
   const ran = (pattern: RegExp): string[] =>
     host.log().filter((line) => pattern.test(line));
@@ -432,8 +551,10 @@ test.describe("ContentCopy", () => {
   });
 
   test("copies once, as root, into a root-only stamped directory, leaving out what it was told to", async () => {
-    const kept = new ContentCopy(host.transport, () =>
-      Promise.resolve(["plugins/backwpup-pro"]),
+    const kept = new ContentCopy(
+      host.transport,
+      () => Promise.resolve(["plugins/backwpup-pro"]),
+      quiet,
     );
     await kept.keep();
     await kept.keep();
@@ -447,9 +568,14 @@ test.describe("ContentCopy", () => {
     );
     expect(readdirSync(dir()).sort()).toEqual([
       CONTENT_COPY_STAMP,
+      CONTENT_COPY_LEASE,
       CONTENT_COPY_TOKEN,
       CONTENT_COPY_FILE,
     ]);
+    // Leased from the start, on the host's clock, for the full term, nobody named.
+    expect(readFileSync(join(dir(), CONTENT_COPY_LEASE), "utf8")).toBe(
+      `v1 ${BOOT} 1000 ${String(1000 + LEASE_TTL_S)} -\n`,
+    );
     expect(kept.kept).toBe(true);
   });
 
@@ -457,11 +583,13 @@ test.describe("ContentCopy", () => {
   // on disk, says a copy is finished.
   test("reads the partial copy back, puts it on disk, then names it whole", async () => {
     await copy().keep();
-    expect(ran(/^(tar -tf|sync|mv )/)).toEqual([
+    expect(ran(/^(tar -tf|sync|mv -T)/)).toEqual([
       `tar -tf ${CONTENT_COPY_PARTIAL}`,
       `sync -- ${CONTENT_COPY_PARTIAL}`,
       `mv -T -- ${CONTENT_COPY_PARTIAL} ${CONTENT_COPY_FILE}`,
       "sync -- .",
+      // The whole copy measured for its put-back's room.
+      `tar -tf ${CONTENT_COPY_FILE}`,
     ]);
   });
 
@@ -510,8 +638,27 @@ test.describe("ContentCopy", () => {
       console.warn = warn;
     }
     // Its `token` directory is no file `rm -f` removes: the removal is tried, and said to fail.
-    expect(ran(/rmdir/)).toHaveLength(1);
+    expect(ran(/^sudo -n -- rmdir /)).toHaveLength(1);
     expect(warnings.join("\n")).toMatch(/could not remove .*remove it by hand/);
+  });
+
+  // Removing what it can, it must not tell the operator to remove the site's own tree.
+  test("leaves a copy holding the probe's directory, saying how to exchange it back, never to remove it", async () => {
+    mkdirSync(join(dir(), RENAME_PROBE), { recursive: true });
+    writeFileSync(join(dir(), RENAME_PROBE, "index.php"), "");
+    const warnings: string[] = [];
+    const warn = console.warn;
+    console.warn = (message: string) => warnings.push(message);
+    try {
+      expect(
+        await discardCopy(host.transport, copyPlaceIn(host.root, dir())),
+      ).toBe(false);
+    } finally {
+      console.warn = warn;
+    }
+    expect(existsSync(join(dir(), RENAME_PROBE, "index.php"))).toBe(true);
+    expect(warnings.join("\n")).toMatch(/could not remove .*exchange it back/s);
+    expect(warnings.join("\n")).not.toMatch(/rm -r/);
   });
 
   // Made by another run between the look and the `mkdir`: never this run's to remove.
@@ -592,7 +739,7 @@ test.describe("ContentCopy", () => {
   test("refuses when an earlier run's copy is still there, before anything", async () => {
     mkdirSync(dir());
     await expect(copy().keep()).rejects.toThrow(
-      /an earlier run took is still in .*sudo tar -xpf .*--recursive-unlink.*not run/s,
+      /an earlier run took is still in .*sudo tar -xpf .*-C \S+manual && .*not run/s,
     );
     expect(ran(/^(tar -cf|du )/)).toEqual([]);
     expect(existsSync(dir())).toBe(true);
@@ -629,7 +776,7 @@ test.describe("ContentCopy", () => {
     );
     process.env.H_CP_EXIT = "1";
     await expect(kept.stamp()).rejects.toThrow(
-      /could not stamp the copy of wp-content in .*exit 1.*restore was not run/s,
+      /could not stamp the copy of wp-content in .*exit 94.*restore was not run/s,
     );
   });
 
@@ -672,38 +819,57 @@ test.describe("ContentCopy", () => {
     expect(ran(/^tar -xpf/)).toEqual([]);
   });
 
-  test("puts the copy back once — stamped, then extracted, then marked back — then removes it", async () => {
+  test("puts the copy back once — stamped, extracted beside, compared, swapped in, marked back, lease expired — then removes it", async () => {
     const kept = copy();
     await kept.keep();
+    writeFileSync(join(host.root, "wp-content", "left-by-restore"), "x");
     await kept.putBack();
     await kept.putBack();
     expect(
-      ran(/^(cp |tar -xpf|mv -T -- wp-content\.verified)/).slice(1),
+      ran(
+        /^(cp |tar -xpf|tar -df|sync -f|mv -T -- wp-content\.verified)/,
+      ).slice(1),
     ).toEqual([
-      `cp -- /proc/sys/kernel/random/boot_id ${CONTENT_COPY_STAMP}`,
-      `tar -xpf ${CONTENT_COPY_FILE} --recursive-unlink -C ${host.root}`,
+      `cp -f -- /proc/sys/kernel/random/boot_id ${CONTENT_COPY_STAMP}`,
+      `tar -xpf ${CONTENT_COPY_FILE} -C ${CONTENT_COPY_SCRATCH}/new`,
+      `tar -df ${CONTENT_COPY_FILE} -C ${CONTENT_COPY_SCRATCH}/new`,
+      `sync -f -- ${CONTENT_COPY_SCRATCH}/new`,
       `mv -T -- ${CONTENT_COPY_FILE} ${CONTENT_COPY_RESTORED}`,
+      // The lease expired once back.
+      `cp -f -- /proc/sys/kernel/random/boot_id ${CONTENT_COPY_STAMP}`,
     ]);
+    // The tree extracted is the site's now; what the restore left went with the copy.
+    expect(readdirSync(join(host.root, "wp-content"))).toEqual(["from-copy"]);
     expect(existsSync(dir())).toBe(false);
     expect(kept.kept).toBe(false);
   });
 
   // The copy is then the only way back, so it stays — with the way back spelled out.
-  test("keeps the copy, and says how to put it back, when it will not go back", async () => {
+  // The copy is then the only way back, so it stays — with the way back spelled out — and its lease
+  // expired: this run gave up on it, so a later run need not wait the lease out.
+  test("keeps the copy, wp-content untouched, and says how to put it back, when it cannot be extracted beside", async () => {
     process.env.H_PUT_EXIT = "2";
     const kept = copy();
     await kept.keep();
+    writeFileSync(join(host.root, "wp-content", "left-by-restore"), "x");
     await expect(kept.putBack()).rejects.toThrow(
       new RegExp(
-        `could not put wp-content back \\(exit 2.*sudo tar -xpf ${join(dir(), CONTENT_COPY_FILE).replace(/[.]/g, "\\.")} --recursive-unlink -C ${host.root.replace(/[.]/g, "\\.")}\``,
+        `could not put wp-content back \\(exit ${String(STAGE_FAILED)}: tar: .*No space left on device\\); nothing was put back; wp-content is as the restore left it\\..*sudo tar -xpf ${join(dir(), CONTENT_COPY_FILE).replace(/[.]/g, "\\.")} -C ${join(dir(), "manual").replace(/[.]/g, "\\.")} `,
         "s",
       ),
     );
     expect(readdirSync(dir()).sort()).toEqual([
       CONTENT_COPY_STAMP,
+      CONTENT_COPY_LEASE,
       CONTENT_COPY_TOKEN,
       CONTENT_COPY_FILE,
     ]);
+    expect(readdirSync(join(host.root, "wp-content"))).toEqual([
+      "left-by-restore",
+    ]);
+    expect(
+      parseLease(readFileSync(join(dir(), CONTENT_COPY_LEASE), "utf8")),
+    ).toMatchObject({ renewedS: 1000, expiresS: 1000 });
     expect(kept.kept).toBe(true);
   });
 
@@ -728,9 +894,9 @@ test.describe("ContentCopy", () => {
     expect(
       ran(/^(mv -T -- wp-content\.verified|tar -xpf|sync -- \.)/).slice(-3),
     ).toEqual([
-      `tar -xpf ${CONTENT_COPY_FILE} --recursive-unlink -C ${host.root}`,
+      `tar -xpf ${CONTENT_COPY_FILE} -C ${CONTENT_COPY_SCRATCH}/new`,
       `mv -T -- ${CONTENT_COPY_FILE} ${CONTENT_COPY_RESTORED}`,
-      "sync -- .",
+      `sync -- . ${host.root}`,
     ]);
     expect(existsSync(dir())).toBe(false);
   });
@@ -748,7 +914,7 @@ test.describe("ContentCopy", () => {
 
   /** A copy kept by a run that waits `boundMs` for a restore still running, looking often. */
   const waiting = (boundMs: number): ContentCopy =>
-    new ContentCopy(host.transport, none, { boundMs, pollMs: 10 });
+    new ContentCopy(host.transport, none, { ...quiet, boundMs, pollMs: 10 });
 
   // Another run settled this one's copy after a reboot and made its own at the same path.
   test("leaves alone, and says so, a copy at its path that holds another run's token", async () => {
@@ -756,7 +922,7 @@ test.describe("ContentCopy", () => {
     await kept.keep();
     writeFileSync(join(dir(), CONTENT_COPY_TOKEN), "another-run\n");
     await expect(kept.putBack()).rejects.toThrow(
-      /the copy of wp-content at .* is no longer this run's \(it holds another run's token\) — another run settled it, so nothing was put back\.$/,
+      /the copy of wp-content at .* is no longer this run's \(it holds another run's token\) — another run claimed it, after a reboot or past this run's lease, so nothing was put back; that run, or a later one, settles it\.$/,
     );
     expect(ran(/^(cp |tar -xpf|rm )/).slice(1)).toEqual([]);
     expect(existsSync(join(dir(), CONTENT_COPY_FILE))).toBe(true);
@@ -773,10 +939,11 @@ test.describe("ContentCopy", () => {
     ).resolves.toBe(false);
     expect(readdirSync(dir()).sort()).toEqual([
       CONTENT_COPY_STAMP,
+      CONTENT_COPY_LEASE,
       CONTENT_COPY_TOKEN,
       CONTENT_COPY_FILE,
     ]);
-    expect(ran(/rmdir/)).toEqual([]);
+    expect(ran(/^sudo -n -- rmdir /)).toEqual([]);
   });
 
   test("says the copy is gone, putting nothing back, when another run removed it", async () => {
@@ -784,7 +951,7 @@ test.describe("ContentCopy", () => {
     await kept.keep();
     rmSync(dir(), { recursive: true });
     await expect(kept.putBack()).rejects.toThrow(
-      /is no longer this run's \(it is gone\) — another run settled it/,
+      /is no longer this run's \(it is gone\) — another run claimed it/,
     );
     expect(ran(/^tar -xpf/)).toEqual([]);
   });
@@ -794,7 +961,7 @@ test.describe("ContentCopy", () => {
     [
       "copied",
       "H_SWAP_TOKEN",
-      /could not copy wp-content before the restore \(it holds another run's token\)/,
+      /its directory is no longer this run's \(it holds another run's token\)/,
     ],
     [
       "sealed",
@@ -806,11 +973,11 @@ test.describe("ContentCopy", () => {
       process.env[env] = "1";
       await expect(copy().keep()).rejects.toThrow(said);
       // What it runs no further: the copy's tar, or the seal's sync and rename.
-      expect(ran(step === "copied" ? /^tar -cf/ : /^(sync|mv )/)).toEqual([]);
+      expect(ran(step === "copied" ? /^tar -cf/ : /^(sync|mv -T)/)).toEqual([]);
       expect(readFileSync(join(dir(), CONTENT_COPY_TOKEN), "utf8")).toBe(
         "another-run\n",
       );
-      expect(ran(/rmdir/)).toEqual([]);
+      expect(ran(/^sudo -n -- rmdir /)).toEqual([]);
     });
   }
 
@@ -880,6 +1047,10 @@ test.describe("ContentCopy", () => {
     );
     expect(ran(/^tar -xpf/)).toEqual([]);
     expect(kept.kept).toBe(true);
+    // Given up: a later run settles it once the restore ends, without waiting out the lease.
+    expect(
+      parseLease(readFileSync(join(dir(), CONTENT_COPY_LEASE), "utf8")),
+    ).toMatchObject({ renewedS: 1000, expiresS: 1000 });
   });
 
   test("keeps the copy, putting nothing back, when whether a restore runs cannot be told", async () => {
@@ -891,5 +1062,435 @@ test.describe("ContentCopy", () => {
       /whether a restore still runs on the site could not be told, so nothing was put back/,
     );
     expect(ran(/^tar -xpf/)).toEqual([]);
+  });
+});
+
+test.describe("ContentCopy — lease, fence and the swap", () => {
+  let host: CopyHost;
+  const none = (): Promise<readonly string[]> => Promise.resolve([]);
+  const dir = (): string => join(host.root, CONTENT_COPY_DIR);
+  const lease = (): ReturnType<typeof parseLease> =>
+    parseLease(readFileSync(join(dir(), CONTENT_COPY_LEASE), "utf8"));
+  /** A manual heartbeat timer: `tick()` fires a renewal. */
+  let tick: () => void;
+  let ticking: boolean;
+  const copy = (holder?: string): ContentCopy =>
+    new ContentCopy(host.transport, none, {
+      ...(holder === undefined ? {} : { holder }),
+      every: (_ms, fire) => {
+        tick = fire;
+        ticking = true;
+        return () => {
+          ticking = false;
+        };
+      },
+    });
+  /** Waits, up to 20 s, until the lease file says `renewedS`: a renewal the timer started. */
+  const renewedAt = async (renewedS: number): Promise<void> => {
+    for (let i = 0; i < 200 && lease()?.renewedS !== renewedS; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  };
+  /** Waits, up to 20 s, until the heartbeat stopped itself. */
+  const stopped = async (): Promise<void> => {
+    for (let i = 0; i < 200 && ticking; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  };
+  test.beforeEach(() => {
+    host = copyHost();
+    tick = () => undefined;
+    ticking = false;
+  });
+  test.afterEach(() => {
+    host.dispose();
+  });
+
+  test("leases the copy in its holder's name, and renews it on the host's clock while kept", async () => {
+    const kept = copy("r#2");
+    await kept.keep();
+    expect(lease()).toEqual({
+      bootId: BOOT,
+      renewedS: 1000,
+      expiresS: 1000 + LEASE_TTL_S,
+      holder: "r#2",
+    });
+    expect(ticking).toBe(true);
+    process.env.H_UPTIME = "1060.0 1";
+    tick();
+    await renewedAt(1060);
+    expect(lease()).toMatchObject({
+      renewedS: 1060,
+      expiresS: 1060 + LEASE_TTL_S,
+    });
+  });
+
+  test("stops renewing once put back, and expires the lease there", async () => {
+    const kept = copy();
+    await kept.keep();
+    await kept.putBack();
+    expect(ticking).toBe(false);
+  });
+
+  // Gave up on: a later run settles it without waiting the lease out; the copy itself stays.
+  test("given up, stops renewing and expires the lease, keeping the copy", async () => {
+    const kept = copy();
+    await kept.keep();
+    process.env.H_UPTIME = "1200.5 1";
+    await kept.abandon();
+    expect(ticking).toBe(false);
+    expect(lease()).toMatchObject({ renewedS: 1200, expiresS: 1200 });
+    expect(kept.kept).toBe(true);
+    expect(existsSync(join(dir(), CONTENT_COPY_FILE))).toBe(true);
+    await copy().abandon();
+  });
+
+  test("stops renewing by itself once the copy is no longer its run's", async () => {
+    const kept = copy();
+    await kept.keep();
+    writeFileSync(join(dir(), CONTENT_COPY_TOKEN), "another-run\n");
+    tick();
+    await stopped();
+    expect(ticking).toBe(false);
+  });
+
+  // A settler claims a copy by renaming it, and hands it back when it may not settle it: the copy is
+  // still this run's, and a heartbeat that stopped there would let its lease lapse under the run.
+  test("keeps renewing while the copy is claimed away, and renews it again once handed back", async () => {
+    const kept = copy();
+    await kept.keep();
+    const claimed = `${dir()}${RECOVERING_PREFIX.slice(CONTENT_COPY_DIR.length)}abc`;
+    renameSync(dir(), claimed);
+    const warnings: string[] = [];
+    const warn = console.warn;
+    console.warn = (message: string) => warnings.push(message);
+    try {
+      tick();
+      for (let i = 0; i < 200 && warnings.length === 0; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    } finally {
+      console.warn = warn;
+    }
+    expect(warnings.join("\n")).toMatch(
+      /could not renew the lease .*it is gone/s,
+    );
+    expect(ticking).toBe(true);
+    renameSync(claimed, dir());
+    process.env.H_UPTIME = "1060.0 1";
+    // A tick landing while the failed renewal still winds down is skipped: tick until one renews.
+    for (let i = 0; i < 200 && lease()?.renewedS !== 1060; i += 1) {
+      tick();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    expect(lease()?.renewedS).toBe(1060);
+    expect(ticking).toBe(true);
+    await kept.putBack();
+  });
+
+  test("refuses a holder that is not one word, before touching the site", () => {
+    expect(() => copy("two words")).toThrow(/one word/);
+  });
+
+  test("fences the restore on the copy's directory while kept, and only then", async () => {
+    const kept = copy();
+    expect(kept.fence()).toEqual([]);
+    await kept.keep();
+    const inode = statSync(dir()).ino;
+    const [arg = ""] = kept.fence();
+    expect(arg).toMatch(/^--exec=/);
+    expect(arg).toContain(FENCE_MARK);
+    // Embedded as base64 JSON, never as raw text: decode to check what it holds.
+    const literals = [...arg.matchAll(/base64_decode\( '([^']*)' \)/g)].map(
+      (match) =>
+        JSON.parse(Buffer.from(match[1] ?? "", "base64").toString()) as string,
+    );
+    expect(literals).toEqual([dir(), `1:${String(inode)}`]);
+    await kept.putBack();
+    expect(kept.fence()).toEqual([]);
+  });
+
+  test("refuses to take a copy when wp-content is a mount, before anything", async () => {
+    process.env.H_CONTENT_DEV = "2";
+    await expect(copy().keep()).rejects.toThrow(
+      /refusing to copy wp-content as root — wp-content is on another filesystem than the WordPress root \(a mount\).*restore was not run/s,
+    );
+    expect(existsSync(dir())).toBe(false);
+  });
+
+  // Room for the copy alone no longer does: the put-back extracts a second tree beside the site's.
+  test("refuses to take a copy the disk has room for once, not twice", async () => {
+    process.env.COPY_DU_KB = "1000000";
+    process.env.COPY_FREE_KB = String(1_000_000 + 1024 * 1024 + 1);
+    await expect(copy().keep()).rejects.toThrow(
+      /and the tree its put-back extracts beside the site's, need about 1954 MB and 1 GB to spare/,
+    );
+    process.env.COPY_FREE_KB = String(2_000_000 + 1024 * 1024);
+    await expect(copy().keep()).resolves.toBeUndefined();
+  });
+
+  for (const [what, env, value, exit] of [
+    ["the tree extracted differs from the copy", "H_DIFF_EXIT", "1", 84],
+    ["the tree extracted cannot be synced to disk", "H_SYNCFS_EXIT", "1", 83],
+    ["wp-content became a mount meanwhile", "H_CONTENT_DEV", "2", 80],
+  ] as const) {
+    test(`changes nothing, keeping the copy, when ${what}`, async () => {
+      const kept = copy();
+      await kept.keep();
+      writeFileSync(join(host.root, "wp-content", "left-by-restore"), "x");
+      process.env[env] = value;
+      await expect(kept.putBack()).rejects.toThrow(
+        new RegExp(
+          `could not put wp-content back \\(exit ${String(exit)}.*nothing was put back; wp-content is as the restore left it`,
+          "s",
+        ),
+      );
+      expect(readdirSync(join(host.root, "wp-content"))).toEqual([
+        "left-by-restore",
+      ]);
+      expect(existsSync(join(dir(), CONTENT_COPY_FILE))).toBe(true);
+      expect(existsSync(join(dir(), CONTENT_COPY_SCRATCH))).toBe(false);
+      expect(kept.kept).toBe(true);
+    });
+  }
+
+  // The scratch's trees go with the copy: what the restore left, swapped out of wp-content.
+  test("removes the put-back's scratch and the lease with the copy", async () => {
+    const kept = copy();
+    await kept.keep();
+    mkdirSync(join(host.root, "wp-content", "deep", "er"), { recursive: true });
+    await kept.putBack();
+    expect(existsSync(dir())).toBe(false);
+  });
+});
+
+test.describe("ContentCopy — a wp-content no rename could swap back", () => {
+  let host: CopyHost;
+  const none = (): Promise<readonly string[]> => Promise.resolve([]);
+  const dir = (): string => join(host.root, CONTENT_COPY_DIR);
+  const quiet = { every: (): (() => void) => () => undefined } as const;
+  const copy = (): ContentCopy => new ContentCopy(host.transport, none, quiet);
+  const ran = (pattern: RegExp): string[] =>
+    host.log().filter((line) => pattern.test(line));
+  /**
+   * Gives the stubbed host a mount table: `/` plus one mount at `at`, a path under the WordPress
+   * root as the kernel resolves it, written with the table's own escapes.
+   */
+  const mountAt = (at: string): void => {
+    const table = join(host.root, "mountinfo");
+    const escaped = join(realpathSync(host.root), at).replace(/ /g, "\\040");
+    writeFileSync(
+      table,
+      "25 1 8:1 / / rw shared:1 - ext4 /dev/sda1 rw\n" +
+        `90 25 0:50 / ${escaped} rw,relatime shared:9 - tmpfs tmpfs rw\n`,
+    );
+    process.env.H_MOUNTINFO = table;
+  };
+
+  test.beforeEach(() => {
+    host = copyHost();
+  });
+  test.afterEach(() => {
+    host.dispose();
+  });
+
+  // Swapped aside with the tree, its volume would be emptied when the scratch is removed.
+  test("refuses a mount under wp-content before copying, its name decoded, and leaves nothing behind", async () => {
+    mountAt("wp-content/up loads");
+    await expect(copy().keep()).rejects.toThrow(
+      /refusing to copy wp-content as root — a mount is at or under wp-content \(a mount is at \S+\/wp-content\/up loads\).*not run/s,
+    );
+    expect(ran(/^tar -cf/)).toEqual([]);
+    expect(existsSync(dir())).toBe(false);
+  });
+
+  // A rename of a mount point fails (EBUSY), so the put-back could never swap it.
+  test("refuses a mount at wp-content itself", async () => {
+    mountAt("wp-content");
+    await expect(copy().keep()).rejects.toThrow(
+      /a mount is at or under wp-content/,
+    );
+    expect(existsSync(dir())).toBe(false);
+  });
+
+  test("copies beside a mount whose name only starts like wp-content's", async () => {
+    mountAt("wp-content-old");
+    await copy().keep();
+    expect(ran(/^tar -cf/)).toHaveLength(1);
+  });
+
+  test("refuses, telling nothing it cannot read, when the mount table cannot be read", async () => {
+    process.env.H_MOUNTINFO = join(host.root, "no-such-table");
+    await expect(copy().keep()).rejects.toThrow(
+      /whether the put-back could swap the copy in could not be checked \(exit 24: could not read/,
+    );
+    expect(existsSync(dir())).toBe(false);
+  });
+
+  /**
+   * Takes a copy whose rename probe leaves the site's tree in its directory, collecting warnings.
+   *
+   * @returns the error `keep` threw and what was warned.
+   */
+  const strandedKeep = async (): Promise<{
+    error: unknown;
+    warnings: string;
+  }> => {
+    const warnings: string[] = [];
+    const warn = console.warn;
+    console.warn = (message: string) => warnings.push(message);
+    try {
+      const error = await copy()
+        .keep()
+        .then(() => undefined)
+        .catch((caught: unknown) => caught);
+      return { error, warnings: warnings.join("\n") };
+    } finally {
+      console.warn = warn;
+    }
+  };
+
+  // Exit 23 or a signal between the two exchanges: either way the probe's directory holds the site.
+  for (const [how, value] of [
+    ["could not exchange it back", "strand"],
+    ["was killed between the two exchanges", "kill"],
+    ["was reported killed between the two exchanges", "killed"],
+  ] as const) {
+    test(`keeps the copy's directory, and says how to exchange wp-content back, when the probe ${how}`, async () => {
+      process.env.H_PROBE = value;
+      const { error, warnings } = await strandedKeep();
+      expect(error).toBeInstanceOf(ProbeStrandedError);
+      const message = (error as Error).message;
+      expect(message).toContain(
+        `sudo mv -T ${join(host.root, "wp-content")} ${join(dir(), RENAME_PROBE)}.empty`,
+      );
+      expect(message).toMatch(/The restore was not run/);
+      // Neither the error nor a warning ever says to remove what may hold the site's tree.
+      expect(`${message}\n${warnings}`).not.toMatch(/rm -r/);
+      expect(existsSync(join(dir(), RENAME_PROBE, "index.php"))).toBe(true);
+      expect(ran(/^sudo -n -- rmdir /)).toEqual([]);
+      expect(ran(/^tar -cf/)).toEqual([]);
+    });
+  }
+
+  // What the directory holds cannot be read: the probe's own report that it could not exchange back
+  // is then what keeps it.
+  test("keeps the copy's directory when the probe could not exchange wp-content back and the directory cannot be listed", async () => {
+    process.env.H_PROBE = "strand";
+    process.env.H_LS_EXIT = "2";
+    const { error, warnings } = await strandedKeep();
+    expect(error).toBeInstanceOf(ProbeStrandedError);
+    expect((error as Error).message).toMatch(/could not be exchanged back/);
+    expect(`${(error as Error).message}\n${warnings}`).not.toMatch(/rm -r/);
+    expect(existsSync(join(dir(), RENAME_PROBE, "index.php"))).toBe(true);
+    expect(ran(/^sudo -n -- rmdir /)).toEqual([]);
+  });
+
+  // A mount made after the copy: the put-back refuses it too, changing nothing.
+  test("a put-back finding a mount under wp-content changes nothing", async () => {
+    const kept = copy();
+    await kept.keep();
+    mountAt("wp-content/uploads");
+    await expect(kept.putBack()).rejects.toThrow(
+      /could not put wp-content back \(exit 80: a mount is at \S+\/wp-content\/uploads\); nothing was put back/,
+    );
+    expect(ran(/^tar -xpf/)).toEqual([]);
+    expect(existsSync(join(dir(), CONTENT_COPY_FILE))).toBe(true);
+  });
+
+  test("refuses a copy whose second tree would run out of inodes", async () => {
+    process.env.H_FREE_INODES = "10001";
+    await expect(copy().keep()).rejects.toThrow(
+      /its put-back would find no room for the tree it extracts beside the site's \(exit 82: a second tree needs 2 inodes and 10000 to spare; 10001 are free\)\. The restore was not run\./,
+    );
+    expect(existsSync(dir())).toBe(false);
+  });
+
+  // Small files take more room extracted than archived: measured on the whole copy, as the put-back
+  // will, beyond what the size checked before the copy told.
+  test("refuses a copy whose second tree would not fit beside it, though the content's size did", async () => {
+    process.env.COPY_DU_KB = "0";
+    process.env.COPY_FREE_KB = String(1024 * 1024 + 4);
+    await expect(copy().keep()).rejects.toThrow(
+      /its put-back would find no room .*\(exit 82: a second tree needs 9 KB and 1048576 KB to spare; 1048580 KB are free\)/,
+    );
+    expect(existsSync(dir())).toBe(false);
+  });
+
+  // btrfs reports no inode count: nothing to run out of.
+  test("copies on a filesystem that counts no inodes", async () => {
+    process.env.H_INODES = "0";
+    process.env.H_FREE_INODES = "0";
+    await copy().keep();
+    expect(existsSync(join(dir(), CONTENT_COPY_FILE))).toBe(true);
+  });
+
+  test("a put-back short of inodes for the second tree changes nothing", async () => {
+    const kept = copy();
+    await kept.keep();
+    process.env.H_FREE_INODES = "10001";
+    await expect(kept.putBack()).rejects.toThrow(
+      /\(exit 82: a second tree needs 2 inodes and 10000 to spare; 10001 are free\); nothing was put back/,
+    );
+    expect(ran(/^tar -xpf/)).toEqual([]);
+  });
+});
+
+test.describe("ContentCopy — when its lease is renewed", () => {
+  let host: CopyHost;
+  const none = (): Promise<readonly string[]> => Promise.resolve([]);
+  test.beforeEach(() => {
+    host = copyHost();
+  });
+  test.afterEach(() => {
+    host.dispose();
+  });
+
+  // Taking the copy may outlast a lease: renewed from the moment its directory is made.
+  test("starts renewing before the copy is taken", async () => {
+    let startedAt = -1;
+    const kept = new ContentCopy(host.transport, none, {
+      every: () => {
+        startedAt = host.log().length;
+        return () => undefined;
+      },
+    });
+    await kept.keep();
+    const tarAt = host.log().findIndex((line) => line.startsWith("tar -cf"));
+    expect(startedAt).toBeGreaterThan(0);
+    expect(startedAt).toBeLessThanOrEqual(tarAt);
+  });
+
+  test("stops renewing when the copy fails", async () => {
+    process.env.COPY_TAR_EXIT = "2";
+    let running = false;
+    const kept = new ContentCopy(host.transport, none, {
+      every: () => {
+        running = true;
+        return () => {
+          running = false;
+        };
+      },
+    });
+    await expect(kept.keep()).rejects.toThrow(/could not copy wp-content/);
+    expect(running).toBe(false);
+    expect(kept.kept).toBe(false);
+  });
+
+  // A renewal is itself a use of the copy, which the put-back's wait for no users would count.
+  test("stops renewing before it waits for the site's restores to end", async () => {
+    let stoppedAt = -1;
+    const kept = new ContentCopy(host.transport, none, {
+      every: () => () => {
+        stoppedAt = host.log().length;
+      },
+    });
+    await kept.keep();
+    await kept.putBack();
+    const probedAt = host
+      .log()
+      .findIndex((line) => line.includes("e2e-content-copy-in-use-probe"));
+    expect(stoppedAt).toBeGreaterThan(0);
+    expect(probedAt).toBeGreaterThanOrEqual(stoppedAt);
   });
 });
