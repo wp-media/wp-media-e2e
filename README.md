@@ -205,6 +205,11 @@ npm run report:allure -- backwpup pro@nginx 2026-10-22T10-04-03-625Z-26885   # t
 npm run report:allure -- wp-rocket apache --open                         # generate, then serve
 ```
 
+`--open` serves on loopback only (`127.0.0.1`, the `host` in `allurerc.mjs`, as any
+`allure open -c allurerc.mjs`): the report holds traces, session cookies included. From another
+machine, tunnel to the port Allure prints: `ssh -L <port>:127.0.0.1:<port> <runner>`, then open
+`http://127.0.0.1:<port>`.
+
 It lands in `reports/<product>/<cell>/<RUN_ID>/allure/`, named by the run's facts line, one HTML file
 per plugin (traces included) that opens from disk. **Trends accumulate** via a per-cell
 `reports/<product>/<cell>/allure-history.jsonl`, so the trend chart fills from the second run; flaky
@@ -218,7 +223,7 @@ the run and replaces the report and history only once Allure succeeded: a failur
 them as an empty or partial success). A run's end summary prints the command for that very run.
 Allure 3's plugins hard-code a Google Tag Manager loader; generation removes that exact block from
 every page (a page where it is not recognised is left as written, and the command warns).
-Content (categories, widgets, single-file output) is set in [`allurerc.mjs`](allurerc.mjs); the code
+Content (categories, widgets, single-file output, the server's host) is set in [`allurerc.mjs`](allurerc.mjs); the code
 is [`allure-report.ts`](src/common/reporting/allure-report.ts).
 
 A run's **download bundle** ([`report-bundle.ts`](src/common/reporting/report-bundle.ts),

@@ -19,14 +19,15 @@ import { errnoCode } from "./report-tree";
  * is the key, never the report's name: the orchestrator's runs are named by their task, so two runs
  * can share one.
  *
- * Allure (3.18) reads each line with `JSON.parse` and fails the whole generation on one it cannot
- * parse, so a line it cannot read (not a JSON object, or holding a lone CR, where its line reader
- * splits) is dropped and counted; a blank one is dropped silently; an unterminated last line is
- * terminated. Every kept line is written back byte for byte (read and written as `latin1`), Allure's
- * own with the tag spliced into its text. The file is streamed a chunk at a time, never read whole,
- * and cut to {@link HISTORY_BOUNDS}: any file is read, so one an outside edit broke is replaced by
- * the next generation instead of failing every later one. Something else at its path (a FIFO, a
- * device) is not read, which could block past a stop: it is one dropped line, replaced the same way.
+ * Allure (3.18 to 3.33) reads each line with `JSON.parse` and fails the whole generation on one it
+ * cannot parse, so a line it cannot read (not a JSON object, or holding a lone CR, where its line
+ * reader splits) is dropped and counted; a blank one is dropped silently; an unterminated last line
+ * is terminated. Every kept line is written back byte for byte (read and written as `latin1`),
+ * Allure's own with the tag spliced into its text. The file is streamed a chunk at a time, never
+ * read whole, and cut to {@link HISTORY_BOUNDS}: any file is read, so one an outside edit broke is
+ * replaced by the next generation instead of failing every later one. Something else at its path (a
+ * FIFO, a device) is not read, which could block past a stop: it is one dropped line, replaced the
+ * same way.
  */
 
 /** The key a history line carries its run's folder name in. */

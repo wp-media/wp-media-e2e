@@ -18,6 +18,10 @@ const singleFile = process.env.ALLURE_SINGLE_FILE !== "false";
 export default defineConfig({
   name: "WP Media E2E",
   historyPath,
+  // Every server this config starts (`open`, `serve`, `generate --open`; `--host` overrides) listens
+  // on loopback only: Allure's default is every interface, and a report keeps traces (session
+  // cookies, and BackWPup's restore markup holds the database password). Remote: `ssh -L`.
+  host: "127.0.0.1",
   // Triage buckets: surface tests that only passed on retry as flaky (not hidden among passes),
   // and separate assertion failures from unexpected errors.
   categories: [

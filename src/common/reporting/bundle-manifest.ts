@@ -86,6 +86,19 @@ export type AllureOutcome =
 /** The command that serves a Playwright report folder; it serves any static folder. */
 const PLAYWRIGHT_SERVE = "npx playwright show-report";
 
+/**
+ * The Allure the bundle's serve command fetches: the one this checkout installs (a spec keeps them
+ * equal). Exact, so the reader's npx never picks an older Allure without `--host`.
+ */
+export const ALLURE_SERVE_VERSION = "3.33.0";
+
+/**
+ * Serves a folder Allure report from the bundle's folder. On loopback only (Allure's default is every
+ * interface, and the report keeps traces: session cookies, BackWPup's database password); `--yes`
+ * skips npx's install prompt. Run outside the checkout, so `allurerc.mjs`'s `host` does not apply.
+ */
+export const ALLURE_SERVE = `npx --yes allure@${ALLURE_SERVE_VERSION} open --host 127.0.0.1 allure`;
+
 /** Each Allure plugin's page, as the landing page names it. */
 const ALLURE_PLUGINS: Readonly<Record<string, string>> = {
   "awesome/index.html": "Awesome (the full report)",
@@ -263,7 +276,7 @@ export function allureEntry(outcome: AllureOutcome): BundledReport {
       ? {
           serve: {
             why: "Kept with its Playwright traces, it is a folder report: it opens only when served over HTTP.",
-            command: "npx allure open allure",
+            command: ALLURE_SERVE,
           },
         }
       : {}),

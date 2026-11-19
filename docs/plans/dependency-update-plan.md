@@ -13,7 +13,7 @@
   - node-ssh 14: a lost connection now rejects, and our "lost" message is built only on the old path.
   - string-width 9: flag and lone-regional-indicator widths change.
   - typescript-eslint 8.73: 3 casts in specs.
-- **Comments, docs or calibration only:** APVM 3.3.0 (its pin change needs `--allow-git=all` once), pixelmatch 8 (new colour metric) and Allure 3.33 (new history keys).
+- **Comments, docs or calibration only:** APVM 3.3.0 (its pin change needs `--allow-git=all` once), pixelmatch 8 (new colour metric) and Allure 3.33 (history keys unchanged; comments, a glob override, its server on loopback, no git facts in reports).
 - **TypeScript 7.0 is not possible yet:** it ships no compiler API, and no typescript-eslint version supports it. Stay on 6.0.3, the newest 6.x.
 - **Audited adversarially** (2026-11-18). All its findings are folded in. The load-bearing ones (EALLOWGIT, the "lost" message, regional indicators, npm `allowScripts`/npm 12, Node paths) were reproduced by hand. The rest are the auditor's measurements.
 
@@ -299,24 +299,15 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 
 ### P7 — Allure 3.33 · s/medium · deps: P1 · independent of: P2–P6, P8–P10
 
-- `npm i -D allure@3.33.0 allure-playwright@3.15.0`. Allure needs Node ≥22.18.
-- **Unchanged (diffed):**
-  - the analytics block `allure-analytics.ts` removes;
-  - `generate -o -c --name`;
-  - the `awesome/` + `dashboard/` layout and `allurerc.mjs`;
-  - the trace content type and step shape (`allure-results.ts`).
-- **Changed:** history lines are keyed by `retryHash` (since 3.19).
-  - Old lines map through `legacyHistoryId`, for the default environment only.
-  - `allure-history.ts` relies only on the top-level `timestamp` and one line per generation, which still hold.
-  - **Risk:** trend and flaky marks may not continue from 3.18 runs.
-- **Comments:** `allure-analytics.ts` ("through 3.22.1"), `allure-history.ts` ("3.18").
-- **Audit:** Allure 3.33 still pulls `glob@13.0.7` (GHSA-3g3m-2fjr-6pw4) and `minimatch@10.2.6` (GHSA-g3hv-75wg-m249).
-  - Try `overrides` to their fixed versions: glob 14.0.6 (a major) and minimatch ≥ 11.0.1.
-  - Keep them only if the "with the real Allure CLI" specs and `report:allure` pass; otherwise leave them in the deferred list.
-- **Done:**
-  - Gates pass, including the real-Allure-CLI block in `allure-report.spec.ts`.
-  - `npm run report:allure` on a cell with 3.18 history shows its trend; if not, document a one-time reset.
-  - `npm audit` no longer lists dompurify, follow-redirects, markdown-it or fast-xml-parser (measured on the upgraded tree).
+- `npm i -D allure@3.33.0 allure-playwright@3.15.0` (Allure needs Node ≥22.18), plus `overrides: { allure: { glob: "^14.0.6" } }`; comments in `allure-analytics.ts` ("through 3.33.0") and `allure-history.ts` ("3.18 to 3.33") updated.
+- **Measured** (2026-11-19, official 26.13.1, npm 12.2.3; both still npm's `latest`, allure 3.22.1 → 3.33.0 has no release between; sources: GitHub releases allure3 v3.19.0–v3.33.0 and allure-js v3.13.0–v3.15.0, the installed 3.18.0 and 3.33.0 packages diffed, real CLI runs; results from real `@noauth` smoke runs on the placeholder `wp-rocket/apache`, on 3.12.2 and 3.15.0, with and without `--trace on`):
+  - **Lockfile:** `allure` and 28 `@allurereport/*` 3.18.0 → 3.33.0, plus new `plugin-metrics`, `plugin-xray` and `@marcbachmann/cel-js` 8.0.0 (MIT, sole maintainer, no dependencies or install script, no provenance); `allure-playwright`/`allure-js-commons` 3.15.0. No new install script; `allowScripts` unchanged.
+  - **Unchanged, by diff and real output:** the analytics template block (byte-identical in awesome and dashboard; `analyticsEnable: true` still hard-coded; `ALLURE_NO_ANALYTICS` still reaches only allure2); `generate`'s `-o`, `-c`, `--name` (new: `--clean`, `--host`); `open <report>` serves a folder holding a `summary.json` and binds every interface by default, as 3.18 did; the output layout (`awesome/`, `dashboard/`, `index.html`, `test-results.json`; single file: `index.html` + `summary.json`); `allurerc.mjs` loads, with categories and the `currentStatus`/`statusDynamics` layout drawn; a broken history line still fails `generate` (exit 1); a failed append still only logs. allure-playwright 3.15.0's results match 3.12.2's exactly (keys, `historyId`/`testCaseId`, labels, step trees, `application/vnd.allure.playwright-trace` in a `trace` step); `strip` removes all 5 real traces.
+  - **History:** lines are keyed by `retryHash` = `<testCaseHash>.<parametersHash>` (`.<environmentHash>` only with named environments, which we have none of). That is the key 3.18 already used (`historyId` = `<testCase.id>.<md5(params)>`), so 3.33 reads 3.18 lines directly; the `legacyHistoryId` path (allure-playwright's `<testCaseId>:<hash>`) is never needed. Measured: two runs reported with 3.18 (one scenario failed, then passed), then a 3.15.0 run (it failed again) with 3.33 through `report:allure`: 3 trend points, that test's history `[passed, failed]`, flaky (3.33's detector: ≥ 2 status changes), transition `regressed`, in "Flaky tests", no test new — identical to the same three runs reported with 3.33 only. **No reset needed.** New lines add `retries`, `flaky`, `transition`, `retryHash` (no `historyId`); `allure-history.ts` still needs only `timestamp` and one line per generation.
+  - **Audit:** 10 (2 low, 6 moderate, 2 high) → 6 moderate with the bump alone (dompurify, follow-redirects, markdown-it, fast-xml-parser gone) → **0** with the override. glob 14 (minimatch 11, `Matcher` instead of `RegExp`; renames, `debug` removed, `ignore` rooted like patterns) takes every option Allure passes (`nodir`, `dot`, `absolute`, `mark`, `windowsPathsNoEscape`, `cwd`, a relative `ignore`); it pulls minimatch 11.0.9 and path-scurry 3.0.0, deduped with ESLint's (the separate minimatch override is not needed). Kept: the Allure specs (real CLI included), `report:allure` (default newest run; the 3.18-history cell above) and `allure open` pass with it. Drop it once Allure depends on glob ≥ 14.0.2.
+  - **Server on loopback** (audit F1): `open` bound `*:<port>` (lsof; reachable from the LAN), and a report keeps traces (session cookies; BackWPup's restore markup holds the DB password). `allurerc.mjs` sets `host: "127.0.0.1"`, which `open`, `serve` and `generate --open` read (`--host` overrides), so a manual `allure open -c allurerc.mjs` is covered too: now `127.0.0.1:<port>` only, URL `http://127.0.0.1:<port>`, LAN refused. A `keep` bundle is served outside the checkout (no config), so its landing command is now `npx --yes allure@3.33.0 open --host 127.0.0.1 allure` (`ALLURE_SERVE`, `bundle-manifest.ts`; exact version, so npx never takes an older Allure without `--host`; a spec keeps it equal to the installed one): from an empty folder with a fresh npm cache it fetched 3.33.0 and listened on `127.0.0.1` only. README/AGENTS/`orchestrator.md`: remote use via `ssh -L`. Specs: the config's `host`, the command.
+  - **No git facts** (audit F2): with no CI detected, Allure's `local` detector runs `git` from the work folder (inside the checkout) and wrote the origin URL with its credentials, branch and commit into `index.html`, `awesome/index.html` and both `summary.json`. `allureEnv` now sets `GIT_DIR=/dev/null/not-a-repository` (`NO_GIT_DIR`): a scratch repo with a `ghp_FAKE` token origin on `feature/secret-x` leaves none of token, branch, SHA or repository in any file, exit 0, the report renders. Nothing of ours reads Allure's git fields (the facts line comes from `run-facts`). Specs: the env, the path, and a real-CLI generation inside such a repo (fails without the fix). CI detectors (GitHub etc.) still read their env vars: repository, branch, commit, no credentials.
+  - **Gates:** green; unit 6625 passed, 134 skipped, no flake; after the audit fixes the reporting specs (`allure*`, `report-bundle*`, `bundle-*`) plus `orchestrator/runs/bundle`, `notify/slack`: 355 passed.
 
 ### P8 — node-ssh 14 · m/hard · deps: P1 · independent of: P2–P7, P9, P10
 
@@ -402,7 +393,7 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 | node-ssh 14 changes SSH failure messages                             | P8: the two message specs fail without the fix (measured); a new spec for other errors; twins plus a forced drop live |
 | Chromium 159 or `screen` changes layout for `@mobile`/BackWPup        | P6 live `@plugin` on both products; `observedDevice` asserts the screen                                   |
 | APVM 3.3 changes the WP Rocket zip content and SHA, stderr logs, tokens | Expected; the artifacts setup verifies the new zip; P4 checks each behaviour change and re-runs V257  |
-| Allure history discontinuity                                         | P7 checks a cell with 3.18 history; document a one-time reset if needed                                   |
+| Allure history discontinuity                                         | Measured: none (P7: 3.33 keys history as 3.18 did)                                                         |
 | Undici 8 HTTP/2 against Slack/Datator                                | The notify specs plus one real post in P11                                                               |
 | One phase's failure hides another's                                  | Sequential phases, one install each, gates after each; P0 baseline on both runtimes                        |
 | Lockfile drift                                                       | Targeted `npm i` per phase; review the `package-lock.json` diff for unrelated moves                        |
@@ -413,7 +404,6 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
   - typescript-eslint 8.73.0 adds an experimental `tsgo` backend (optional peer `@typescript/native` ≥ 7.1.0 dev/beta); still experimental.
 - **Docker local env images (D5).**
 - **ssh2 native crypto on Node 26** (mscdex/ssh2#1531): once fixed, drop `orchestrator.md`'s install note.
-- **Allure's glob/minimatch advisories,** if P7's overrides fail.
 - **pixelmatch threshold re-tune** with the first `@visual` scenario.
 - **Plain output:** under `E2E_OUTPUT=plain`, Playwright's own "To open last HTML report run" line still carries ANSI colour when piped through `tee` (seen on `develop` too, not from P4).
 - **Unit-suite robustness** (found on RemoteDesktopQA, Ubuntu 24.04; not dependency issues, same on Node 24):
@@ -438,7 +428,7 @@ Based on `develop` d603ce1: `.nvmrc` 26, `engines` `>=26.13.1`, `@types/node` ^2
 | P4    | done | 2026-11-19 | apvm-napi `#v3.3.0` (allow-git=all once); API superset, enums runtime; fresh WP Rocket zips +3 nested vendor files (new SHA); V257 clean; offline commit pins hit; live pro@nginx 70/70, free@nginx 53/53, twin-apache 4/4, all built fresh |
 | P5    | done | 2026-11-19 | eslint 10.15.0, typescript-eslint 8.73.0, globals 17.14.0, prettier 3.10.1 (0 reformats), lint-staged 17.6.1 (hook proven); 3 enum casts `as unknown as`; audit 18 → 10, eslint minimatch chain gone |
 | P6    | done | 2026-11-19 | @playwright/test 1.65.1 (Chromium 159); `screen` override + `presetScreen`, floor 1.64; internals unchanged; live pro@nginx 70/70, free@nginx 53/53, twins 4/4 + 4/4, twin specs 122/123 (a lock-wait flake) |
-| P7    | pending |      |         |
+| P7    | done | 2026-11-19 | allure 3.33.0, allure-playwright 3.15.0; 3.18 history continues (same key, measured); glob 14 override, audit 10 → 0; server on 127.0.0.1 (`allurerc.mjs`); no git facts in reports (`GIT_DIR`) |
 | P8    | pending |      |         |
 | P9    | pending |      |         |
 | P10   | pending |      |         |

@@ -476,11 +476,15 @@ test.describe("buildReportBundle: what goes in", () => {
       bundle.reports.find((report) => report.kind === "allure"),
     ).toMatchObject({
       present: true,
-      serve: { command: "npx allure open allure" },
+      serve: {
+        command: "npx --yes allure@3.33.0 open --host 127.0.0.1 allure",
+      },
     });
     expect(
       readFileSync(join(runDir, BUNDLE_DIR, "index.html"), "utf8"),
-    ).toContain("<code>npx allure open allure</code>");
+    ).toContain(
+      "<code>npx --yes allure@3.33.0 open --host 127.0.0.1 allure</code>",
+    );
   });
 
   test("generates Allure named by the facts line, with the cell's history beside the run", async () => {
@@ -617,7 +621,9 @@ test.describe("buildReportBundle: what goes in", () => {
       bundle.reports.find((report) => report.kind === "allure"),
     ).toMatchObject({
       present: true,
-      serve: { command: "npx allure open allure" },
+      serve: {
+        command: "npx --yes allure@3.33.0 open --host 127.0.0.1 allure",
+      },
     });
   });
 
