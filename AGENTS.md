@@ -33,7 +33,7 @@ End-to-end (E2E) tests for WP Media plugins: WP Rocket (performance), BackWPup (
 ```text
 src/
 ├── common/                 # product-agnostic, shared by every product
-│   ├── config/             # env, sites loading (+ run-as.ts: an ssh site's runAs/umask parsing and defaults), run-context, run-id.ts (RUN_ID, a run's report folder), run-env.ts (run-setting variable names), suite-version.ts (package.json's version, read as text, never throws; `unknown` when unreadable or invalid), cell pin, drain, metadata, devices, file-owner rule, config factory, output.ts (palettes and printers for setup lines and scripts: `E2E_OUTPUT`-aware; a worker's never coloured)
+│   ├── config/             # env, sites loading (+ run-as.ts: an ssh site's runAs/umask parsing and defaults), run-context, run-id.ts (RUN_ID, a run's report folder), invocation-id.ts (INVOCATION_ID: a random token per runner invocation, shared with its workers, never pinned), run-env.ts (run-setting variable names), suite-version.ts (package.json's version, read as text, never throws; `unknown` when unreadable or invalid), cell pin, drain, metadata, devices, file-owner rule, config factory, output.ts (palettes and printers for setup lines and scripts: `E2E_OUTPUT`-aware; a worker's never coloured)
 │   ├── reporting/          # the suite's reporters (cell notice, results stream, terminal + its sink/lines/worker-output/mode/live-block/live-session/failure-block, run facts, summary), their pure parts, report retention (retention, report-tree, run-pruning, prune-command), page-loads.ts (a failed scenario's lost requests), one run's Allure report (allure-report: temp output + rename, traces strip/keep, analytics loader removed by allure-analytics, one history line per run by allure-history; allure-results, allure-errors, allure-command for `report:allure`), one run's download bundle (report-bundle: `report/` and/or `report.tar.gz`, one `<name>/` inside; bundle-manifest, bundle-landing, bundle-errors), child-group.ts (Allure and `tar` in a process group of their own: only the caller's abort stops them — SIGTERM, then SIGKILL after 5 s —, never a Ctrl-C or SIGHUP to its group)
 │   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ends a saved login)
 │   ├── setup/              # the auth setup's preflight (+ cell-plugin.ts: a broken copy of the cell's plugin; login-shell.ts: the POSIX login-shell gate; site-identity-report.ts: the "Site identity" check and banner issues, pure; sudo-listing.ts: `sudo -n -l`'s `log_allowed`, pure; sudo-lookup.ts: what the host's unresolvable name costs each sudo call; identity-verdicts.ts: a worker's read of `site-identity.json`), elevation/ownership/identity banners, site info, check-lines.ts (one ✓/✗/→ check list for preflight, artifacts and healthcheck), healthcheck-lines.ts (the healthcheck's output, pure)
@@ -252,20 +252,33 @@ runs as the SSH user, not the web server` (`cli.runAsSshUser()`, before any Back
   a restore's untouched half must still hold.
 - `cliRestore` is the only way to run `wp backwpup restore` (the generic step refuses it). It
   refuses a database holding what `wp db reset` destroys for good (tables outside the prefix, views,
-  routines, events, triggers) or a relocated `wp-content`. Before a files restore it copies
-  `wp-content` as root into root-only `<root>/.e2e_content_copy/` and puts it back with `tar
---recursive-unlink` once no run is in flight; a copy that cannot go back is kept with its way back
-  spelled out, and every BackWPup worker refuses a site still holding one (`contentCopyLeftover`;
-  the auth setup tries first, before its gates) — unless no process uses it (argv or working
-  directory in it, or a restore in the root) and it holds none to put back, or its whole copy is
-  stamped by another boot (every use is stamped with the host's boot id just before it): it is then
-  claimed (`mv -T` to `.e2e_content_copy.recovering-<hex>`), put back or removed, and the run goes
-  on; a restore that reached the database too also has the database's defaults it saved beside the
-  copy set back (`support/content-copy-leftover.ts`). The restore is refused if the host rebooted
-  since the copy was taken; a put-back first waits for a restore a dropped connection left running,
-  acts only on a copy holding its run's token, and marks it back durably in the same root command.
-  It also restores the default collation and removes the scenario's own snapshots, told from other
-  runs' by either changed marker.
+  routines, events, triggers), a relocated `wp-content`, or one no rename could swap back (a mount
+  at or under it, or — on overlayfs, probed by an atomic exchange — a lower-layer one). Before a files
+  restore it copies `wp-content` as root into root-only `<root>/.e2e_content_copy/` (refused short of
+  room or inodes for a second tree), runs the restore
+  fenced on it (WP-CLI `--exec`: it starts only while that directory is still the one the run made),
+  and once no run is in flight puts it back without extracting over the live site: extracted into a
+  root-only scratch beside it, compared (`tar -d`), swapped in by rename (`perl`, retried when a
+  request recreates `wp-content`), proved by inode, marked back durably in the same root command. A
+  copy that cannot go back is kept with its way back spelled out. While kept, its **lease**
+  (`support/content-copy-lease.ts`: boot id + `/proc/uptime`, 15 min per renewal, renewed every
+  minute from the moment its directory is made; expired when the run gives up) says a run may still
+  use it. Every BackWPup worker refuses
+  a site still holding one (`contentCopyLeftover`; the auth setup tries first, before its gates)
+  unless no process uses it (argv or working directory in it, or a restore in the root) **and** it
+  holds none to put back or is orphaned: stamped by another boot (every use is stamped with the
+  host's boot id just before it), or this boot's with its lease lapsed or held by the asking worker's
+  own slot (`<INVOCATION_ID>#parallelIndex`: a random token per runner invocation, never `RUN_ID`,
+  which invocations may share). It is then claimed (`mv -T` to `.e2e_content_copy.recovering-<hex>`,
+  leased as the claimer's; handed back to its path if a check after the claim refuses it), put back
+  the same way or removed, and the run goes on; an older suite's
+  copy (no lease) waits for a reboot. A copy that reached the database too also has the database's
+  defaults it saved beside the copy set back (`support/content-copy-leftover.ts`). The restore is
+  refused if the host rebooted since the copy was taken; a put-back first waits for a restore a
+  dropped connection left running, and acts only on a copy holding its run's token, so a run that
+  slept past its lease finds its copy settled and touches nothing.
+  It also restores the default collation (not once its fence refused the command, which then never
+  started) and removes the scenario's own snapshots, told from other runs' by either changed marker.
 
 Page-object pattern, locator policy and the locator-contract spec:
 [authoring-tests.md](docs/guides/authoring-tests.md#page-object-model).

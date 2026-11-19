@@ -462,6 +462,13 @@ to ask").
   (the pid, or the orchestrator's run id). A pinned one may be any single folder name — not hidden, no
   `/`, no control character, ≤ 255 bytes, else the run fails naming `RUN_ID`; one the parser cannot read
   is dated by its stream's `run.begin`.
+- `INVOCATION_ID` ([`config/invocation-id.ts`](../../src/common/config/invocation-id.ts)) is what
+  tells two invocations apart where a shared `RUN_ID` cannot: 32 random hex digits made by the runner
+  as it loads `run-context.ts`, carried to its workers as `E2E_INTERNAL_INVOCATION=<pid>:<token>`
+  and believed only by that pid or a direct child carrying `TEST_WORKER_INDEX` (a Playwright worker;
+  set before it loads the config): a run started from a worker, or directly by the runner, makes its
+  own — except one started directly by a runner that itself inherited a worker's index. BackWPup
+  names a copy's lease holder with it.
 - `<product>/<cell>` is **always** appended, so two cells never share a directory whatever the
   `*_ROOT` overrides (`REPORT_ROOT`, `OUTPUT_ROOT`, `AUTH_ROOT`, `ARTIFACTS_ROOT`). Each root is repository-relative or absolute, kept as given by `dirs()` and
   resolved, never joined (`join` would nest an absolute root in the checkout): against `REPO_ROOT` by

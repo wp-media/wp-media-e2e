@@ -1,6 +1,7 @@
 import { evalPhp } from "../../../common/wp/php";
 import { errorMessage, isObject } from "../../../common/guards";
 import { FILE_MARKER_NAME } from "./markers";
+import { fenceTripped } from "./content-copy-fence";
 import {
   readDatabaseDefaults,
   restoreDatabaseDefaults,
@@ -302,7 +303,13 @@ export class CliRestore {
     private readonly cli: Pick<CliSession, "run">,
     private readonly content: Pick<
       ContentCopy,
-      "keep" | "keepDatabaseDefaults" | "stamp" | "putBack" | "kept"
+      | "keep"
+      | "keepDatabaseDefaults"
+      | "stamp"
+      | "fence"
+      | "putBack"
+      | "abandon"
+      | "kept"
     >,
     private readonly changed: Pick<ChangedMarkers, "values">,
     private readonly settleMs = RUN_SETTLE_MS,
@@ -311,8 +318,9 @@ export class CliRestore {
   /**
    * Runs one `wp backwpup restore …`: refused when the site holds what it would destroy beyond
    * repair, the content directory copied first when it will be replaced, the database's defaults
-   * read first when it will be reset — then, however the command ended, the defaults set back and
-   * the snapshots that appeared noted, each regardless of the other. The result is the session's, so
+   * read first when it will be reset — then, however the command ended, the snapshots that appeared
+   * noted and the defaults set back, each regardless of the other; the defaults left alone when the
+   * copy's fence refused the command, which then never started. The result is the session's, so
    * the generic steps judge it.
    *
    * @param argv - the command's argv, without `wp backwpup`; its first word must be the restore.
@@ -347,22 +355,34 @@ export class CliRestore {
     const defaults = reach.database
       ? await this.site.readDatabaseDefaults()
       : undefined;
-    // Beside the copy, for a run settling it after a reboot cut this one off: no-op without a copy.
+    // Beside the copy, for a run settling it should a reboot or a lapsed lease cut this one off:
+    // no-op without a copy.
     if (defaults !== undefined) {
       await this.content.keepDatabaseDefaults(defaults);
     }
     const before = await this.site.listSnapshots();
 
     // Last before the command: a reboot during it then provably orphans the copy — and one since the
-    // copy was taken refuses the command.
+    // copy was taken refuses the command. Fenced too: it starts only while the copy is still this
+    // run's, should a later run have settled it while this one slept.
     await this.content.stamp();
     let failure: Error | undefined;
+    let fenced = false;
     try {
-      await this.cli.run(argv);
+      const result = await this.cli.run(argv, undefined, this.content.fence());
+      if (fenceTripped(result)) {
+        fenced = true;
+        failure = new Error(
+          "[backwpup/cli-restore] the restore was not run: the copy of wp-content taken for it is " +
+            "no longer this run's — a later run claimed it while this one was away (past its lease, or after a reboot).",
+        );
+      }
     } catch (error) {
       failure = toError(error);
     }
-    const problems = await this.afterRun(before, defaults);
+    // Fenced, the command never started (its fence runs before WordPress loads): the database holds
+    // nothing of it to set back, and the site may be another run's by now, mid-scenario.
+    const problems = await this.afterRun(before, fenced ? undefined : defaults);
     if (failure !== undefined) {
       for (const problem of problems) {
         console.warn(
@@ -445,11 +465,18 @@ export class CliRestore {
    * directory put back first — the one that matters — then the scenario's own snapshots removed.
    *
    * @throws {@link Error} if a run is still in flight after {@link RUN_SETTLE_MS} (nothing is then
-   * put back, since doing it under the command would leave neither), or the content directory could
-   * not be put back; snapshot removal only reports.
+   * put back, since doing it under the command would leave neither, and the copy is given up), or the
+   * content directory could not be put back; snapshot removal only reports.
    */
   async release(): Promise<void> {
-    await this.settle();
+    try {
+      await this.settle();
+    } catch (error) {
+      // Its restore never ended: the copy stays, its lease expired, so a later run settles it once
+      // nothing uses it rather than waiting the lease out.
+      await this.content.abandon();
+      throw error;
+    }
     try {
       await this.content.putBack();
     } finally {
@@ -485,7 +512,7 @@ export class CliRestore {
           `${String(this.settleMs / 60_000)} min after its step ended, so nothing was put back — doing ` +
           "it under a command still rewriting the site would leave neither as found. " +
           (this.content.kept
-            ? "The copy of wp-content stays, so the next BackWPup run on this site says how to settle it."
+            ? "The copy of wp-content stays, given up: a later BackWPup run on this site puts it back once the restore has ended."
             : ""),
       );
     }
