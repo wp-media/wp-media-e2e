@@ -156,6 +156,11 @@ Docs synced to the locked versions (floors raised to them); final live runs, soa
     the site writes") is timing-dependent: once did not reproduce the old failure.
 - **Twin CI speed-up** (optional; "Twin specs" 21–35 min, limit 50): the WP Rocket lifecycle file (~16
   min) runs alone on one worker at the end; parallel mode needs concurrent APVM resolution shown safe.
+- **twin-apache Site Health 503:** the auth setup's site-versions read sometimes gets HTTP 503 from
+  Site Health's Info tab (2 of ~15 runs, 2026-11-19; never on twin-nginx), so the report says
+  "versions unknown". A warning only; scenarios unaffected. Cause unconfirmed (PHP-FPM briefly
+  unreachable after a reset is a guess): reproduce, read the twin's Apache and PHP-FPM logs, then fix
+  the twin or retry the read once.
 
 ## Status
 
