@@ -64,11 +64,11 @@ measured failed run. Traces stay in the Playwright report. `reports.bundle.mode`
 
 `<name>` is `<product>-<cell>-<RUN_ID>` (e.g. `backwpup-pro@nginx-2026-10-06T02-47-17-617Z-36442`):
 unique per run, so unpacking several runs side by side never mixes or overwrites them. Slack's
-`Report:` line, pasted in a POSIX shell (macOS, Linux, WSL), leaves `./<name>/index.html` and no
-archive:
+`Report:` line, pasted in a POSIX shell (macOS, Linux, WSL; not fish, csh/tcsh), leaves
+`./<name>/index.html`, no archive, and the shell in `./<name>/`:
 
 ```sh
-scp auto-e2e:/path/to/wp-media-e2e/reports/backwpup/pro@nginx/2026-10-06T02-47-17-617Z-36442/report.tar.gz backwpup-pro@nginx-2026-10-06T02-47-17-617Z-36442.tar.gz && tar -xzf backwpup-pro@nginx-2026-10-06T02-47-17-617Z-36442.tar.gz && rm backwpup-pro@nginx-2026-10-06T02-47-17-617Z-36442.tar.gz
+R=backwpup-pro@nginx-2026-10-06T02-47-17-617Z-36442 && scp auto-e2e:/path/to/wp-media-e2e/reports/backwpup/pro@nginx/2026-10-06T02-47-17-617Z-36442/report.tar.gz "$R.tar.gz" && tar -xzf "$R.tar.gz" && rm "$R.tar.gz" && cd "./$R"
 ```
 
 `folder` keeps `report/` only; `both` keeps both; `none` builds neither. The archive contains no
@@ -109,16 +109,20 @@ scp auto-e2e:/path/to/wp-media-e2e/reports/backwpup/pro@nginx/2026-10-06T02-47-1
   The dry run names both choices. `run.finished`'s existing `report.dir` and `report.log` stay as
   they are.
 - Slack, `Report:` line — one command, built by a pure `bundleCommand(sshHost, archivePath, name)`:
-  `scp <host>:<archive> <name>.tar.gz && tar -xzf <name>.tar.gz && rm <name>.tar.gz`.
+  `R=<name> && scp <host>:<archive> "$R.tar.gz" && tar -xzf "$R.tar.gz" && rm "$R.tar.gz" && cd
+  "./$R"` — the name once (2026-11-22: it was repeated in three words), and the shell left in the
+  unpacked folder. `"$R"` always quoted (any `IFS`), the `cd` `./`-anchored (any `CDPATH`).
   - `&&` chains it: a failed download or unpack stops there and keeps the archive; `rm` runs only
-    after a complete unpack. Plain `rm`, never `-f`/`-r`. Re-running it overwrites the same run's
-    folder with the same content.
+    after a complete unpack. Plain `rm`, never `-f`/`-r`. Re-running it from the same folder (not
+    from inside the unpacked one, where the `cd` left the shell) overwrites the same run's folder
+    with the same content.
   - Every word goes through `shellWord` (the remote path as today; `<name>` too, though its
     characters need no quoting). Never cut: `escapeCut` would leave a broken or partial command, so
     a command over `MAX_SHOWN` falls back to the archive's path alone. Slack's escaping turns `&&`
     into `&amp;&amp;` in the payload, which Slack shows as `&&`; a spec asserts the payload.
-  - No `sshHost`: the archive's absolute path, as today. `folder` mode: `scp -r <host>:<run>/report
-    <name>`. `none`, or a missing or failed bundle: today's raw-folder hint.
+  - No `sshHost`: the archive's absolute path, as today. `folder` mode: `R=<name> && scp -r
+    <host>:<run>/report "$R" && cd "./$R"`. `none`, or a missing or failed bundle: today's
+    raw-folder hint.
   - The command's end summary prints the same command, the archive and the raw folder.
 - Retention: the bundle lives in the run folder, so 0F's per-run prune removes it; the cell-level
   `allure-history.jsonl` is outside and survives. Log the bundle's size; a heavy run is dominated

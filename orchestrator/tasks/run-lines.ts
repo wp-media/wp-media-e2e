@@ -141,7 +141,7 @@ export interface BundleLine {
  *
  * ```text
  * bpng-12 report: reports/backwpup/pro@nginx/<RUN_ID>/report.tar.gz · raw: reports/backwpup/pro@nginx/<RUN_ID>
- * bpng-12 fetch: scp auto-e2e:/srv/e2e/reports/…/report.tar.gz backwpup-pro@nginx-<RUN_ID>.tar.gz && tar -xzf … && rm …
+ * bpng-12 fetch: R=backwpup-pro@nginx-<RUN_ID> && scp auto-e2e:/srv/e2e/reports/…/report.tar.gz "$R.tar.gz" && … && cd "./$R"
  * ```
  *
  * @param event - the run's `run.finished`.

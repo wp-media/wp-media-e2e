@@ -294,23 +294,28 @@ folder: Playwright's trace viewer (`npx playwright show-report playwright`), ric
 (`REPORT_MODE=rich`: `npx playwright show-report cucumber`), a `keep` Allure. Measured on three real
 failed runs (6–7 MB raw, 1–23 traces): archive 5.7–6.6 MB, 16 MB unpacked (Allure 12 MB of it),
 1.3–1.7 s (`keep`: 4.8–6.7 MB, ~3 s); a run with 54 MB of traces: 75 MB archive, 2.7 s. Slack's
-`Report:` line, pasted in a POSIX shell (macOS, Linux, WSL), leaves `./<name>/index.html` and no
-archive — `<name>` is `<product>-<cell>-<RUN_ID>`, so runs unpacked side by side never mix:
+`Report:` line, pasted in a POSIX shell (`sh`, `bash`, `zsh` on macOS, Linux, WSL; not fish nor
+csh/tcsh, where it stops at `R=` having done nothing), leaves `./<name>/index.html`, no archive, and
+the shell in `./<name>/` — `<name>` is `<product>-<cell>-<RUN_ID>`, so runs unpacked side by side
+never mix:
 
 ```sh
-scp auto-e2e:/…/reports/backwpup/pro@nginx/<RUN_ID>/report.tar.gz backwpup-pro@nginx-<RUN_ID>.tar.gz && tar -xzf backwpup-pro@nginx-<RUN_ID>.tar.gz && rm backwpup-pro@nginx-<RUN_ID>.tar.gz
+R=backwpup-pro@nginx-<RUN_ID> && scp auto-e2e:/…/reports/backwpup/pro@nginx/<RUN_ID>/report.tar.gz "$R.tar.gz" && tar -xzf "$R.tar.gz" && rm "$R.tar.gz" && cd "./$R"
 ```
 
-`&&` stops at a failed download or unpack, keeping the archive; re-running it rewrites the same
-folder. Pasted unchanged in macOS `zsh`/`bash`/`sh` (bsdtar) and Ubuntu 24.04 `bash`/`sh` (GNU tar
-1.35), as root or not, it leaves only `./<name>/`, nothing on stderr (checked by hand: CI runs Linux
-only). `folder`: `scp -r <host>:<run>/report <name>` (into an existing `./<name>/` it nests as
-`<name>/report/`: remove it first). A command Slack would not show whole (over 600 characters once
-escaped, `&&` being `&amp;&amp;`) is never cut: the bundle's path instead. The terminal follows the
-same rule under the run's end (`report: <bundle> · raw: <folder>`, then `fetch: <command>`), after
-the build's own line with its sizes; `fetch:` is never wrapped (the terminal soft-wraps it, so a copy
-is one command), and it is left out when the log would change it (a secret masked, a run of spaces
-made one).
+The name is written once, in the shell variable `R` (left set in the reader's shell); `"$R"` is
+always quoted (any `IFS`) and the `cd` `./`-anchored (any `CDPATH`). `&&` stops at a failed download
+or unpack, keeping the archive. It ends inside `./<name>/`, so paste the next one from the parent
+folder (`cd ..` first): pasted from inside, it unpacks within this one. Re-run from the same folder,
+it rewrites the same folder. Pasted unchanged in macOS `zsh`/`bash`/`sh` (bsdtar) and Ubuntu 24.04
+`bash`/`sh` (GNU tar 1.35), as root or not, it leaves only `./<name>/`, nothing on stderr (checked
+by hand: CI runs Linux only). `folder`: `R=<name> && scp -r <host>:<run>/report "$R" && cd "./$R"`
+(into an existing `./<name>/` it nests as `<name>/report/`: remove it first). A command Slack would
+not show whole (over 600 characters once escaped, `&&` being `&amp;&amp;`) is never cut: the
+bundle's path instead. The terminal follows the same rule under the run's end (`report: <bundle> ·
+raw: <folder>`, then `fetch: <command>`), after the build's own line with its sizes; `fetch:` is
+never wrapped (the terminal soft-wraps it, so a copy is one command), and it is left out when the
+log would change it (a secret masked, a run of spaces made one).
 
 - **Checkout path:** the command quotes the remote path for the local shell only; `scp` then hands it
   to SFTP's glob (or, with `scp -O`, the remote shell), which reads it again. Keep the checkout

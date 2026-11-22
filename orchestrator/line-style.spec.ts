@@ -90,7 +90,7 @@ test.describe("styleLine", () => {
 
   test("never wraps a verbatim line at any width: one line, the command whole, its spacing kept", () => {
     const command =
-      "scp auto-e2e:'/srv/my  e2e/R/report.tar.gz' b-c-R.tar.gz && tar -xzf b-c-R.tar.gz && rm b-c-R.tar.gz";
+      'R=b-c-R && scp auto-e2e:\'/srv/my  e2e/R/report.tar.gz\' "$R.tar.gz" && tar -xzf "$R.tar.gz" && rm "$R.tar.gz" && cd "./$R"';
     const text = `bpng-12 fetch: ${command}`;
     const plain = createPalette({ tty: true, color: false, unicode: true });
     for (const width of [20, 40, 80, 120]) {

@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
+  realpathSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
@@ -136,29 +137,34 @@ test.describe("settings, name and the event's bundle", () => {
 });
 
 test.describe("bundleCommand and folderCommand", () => {
-  test("is exactly: download, unpack, then a plain rm — chained, so a failure keeps the archive", () => {
+  test("is exactly: the name once in R, download, unpack, a plain rm, then cd — chained, so a failure keeps the archive", () => {
     expect(bundleCommand("auto-e2e", "/srv/e2e/R/report.tar.gz", NAME)).toBe(
-      `scp auto-e2e:/srv/e2e/R/report.tar.gz ${NAME}.tar.gz && tar -xzf ${NAME}.tar.gz && rm ${NAME}.tar.gz`,
+      `R=${NAME} && scp auto-e2e:/srv/e2e/R/report.tar.gz "$R.tar.gz" && tar -xzf "$R.tar.gz" && rm "$R.tar.gz" && cd "./$R"`,
     );
   });
 
-  test("quotes a path with a space or a quote, as one shell word", () => {
+  test("quotes a path or a name with a space or a quote, as one shell word", () => {
     expect(bundleCommand("u@h", "/srv/my e2e/it's/report.tar.gz", "n")).toBe(
-      `scp u@h:'/srv/my e2e/it'\\''s/report.tar.gz' n.tar.gz && tar -xzf n.tar.gz && rm n.tar.gz`,
+      `R=n && scp u@h:'/srv/my e2e/it'\\''s/report.tar.gz' "$R.tar.gz" && tar -xzf "$R.tar.gz" && rm "$R.tar.gz" && cd "./$R"`,
     );
-    // A name the bundle accepts with a space is quoted too, in every word it appears.
+    // A name the bundle accepts with a space is quoted once, where R is set; "$R" carries it whole.
     expect(bundleCommand("h", "/a", "my run")).toBe(
-      `scp h:/a 'my run.tar.gz' && tar -xzf 'my run.tar.gz' && rm 'my run.tar.gz'`,
+      `R='my run' && scp h:/a "$R.tar.gz" && tar -xzf "$R.tar.gz" && rm "$R.tar.gz" && cd "./$R"`,
     );
   });
 
-  test("a folder is one scp -r into ./<name>", () => {
+  test("a folder is one scp -r into ./<name>, then cd", () => {
     expect(folderCommand("h", "/srv/R/report", NAME)).toBe(
-      `scp -r h:/srv/R/report ${NAME}`,
+      `R=${NAME} && scp -r h:/srv/R/report "$R" && cd "./$R"`,
     );
     expect(folderCommand("h", "/s p/report", "a b")).toBe(
-      `scp -r h:'/s p/report' 'a b'`,
+      `R='a b' && scp -r h:'/s p/report' "$R" && cd "./$R"`,
     );
+  });
+
+  test("writes the bundle's name once, in R, never again in a later word", () => {
+    const command = bundleCommand("auto-e2e", "/srv/R/report.tar.gz", NAME);
+    expect(command.split(NAME)).toHaveLength(2);
   });
 
   test("downloadCommand picks the command for the bundle's kind", () => {
@@ -202,26 +208,38 @@ function hasShell(shell: string): boolean {
 }
 
 /**
- * Runs a command as a person pasting it would, in a fresh folder.
+ * Runs a command as a person pasting it would, in a fresh folder, then prints the folder the shell
+ * ends in (`pwd -P`) when it succeeded.
  *
  * @param shell - `sh`, `bash` or `zsh`.
  * @param command - the command.
  * @param bin - the stub `scp`'s folder, first on `PATH`.
- * @returns the folder's entries after it, and the command's status.
+ * @param env - more environment for the shell (`CDPATH`, say).
+ * @param before - shell code run before the command, in the same shell (an `IFS`, say).
+ * @returns the folder's entries after it, the command's status, and the folder the shell ended in
+ *   (resolved; `""` when the command failed).
  */
 function paste(
   shell: string,
   command: string,
   bin: string,
-): { entries: string[]; status: number | null; local: string } {
+  env: NodeJS.ProcessEnv = {},
+  before = "",
+): { entries: string[]; status: number | null; local: string; cwd: string } {
   const local = join(root, `local ${shell}`);
   mkdirSync(local);
-  const ran = spawnSync(shell, ["-c", command], {
+  const ran = spawnSync(shell, ["-c", `${before}${command} && pwd -P`], {
     cwd: local,
-    env: { ...process.env, PATH: `${bin}:${String(process.env.PATH)}` },
+    env: { ...process.env, ...env, PATH: `${bin}:${String(process.env.PATH)}` },
+    encoding: "utf8",
     timeout: 30_000,
   });
-  return { entries: readdirSync(local).sort(), status: ran.status, local };
+  return {
+    entries: readdirSync(local).sort(),
+    status: ran.status,
+    local,
+    cwd: ran.stdout.trim(),
+  };
 }
 
 /** Builds this run's real archive, with a stub Allure. */
@@ -241,7 +259,7 @@ for (const shell of ["sh", "bash", "zsh"]) {
   test.describe(`the command, pasted in ${shell}`, () => {
     test.skip(!hasShell(shell), `${shell} is not installed`);
 
-    test("leaves ./<name>/index.html and no archive", async () => {
+    test("leaves ./<name>/index.html, no archive, and the shell in ./<name>/", async () => {
       const archive = await realArchive();
       // The run folder's path holds a space and a quote: the command must quote it.
       expect(archive).toContain("'q ");
@@ -252,10 +270,29 @@ for (const shell of ["sh", "bash", "zsh"]) {
       );
       expect(pasted.status).toBe(0);
       expect(pasted.entries).toEqual([NAME]);
+      expect(pasted.cwd).toBe(realpathSync(join(pasted.local, NAME)));
       expect(existsSync(join(pasted.local, NAME, "index.html"))).toBe(true);
       expect(
         existsSync(join(pasted.local, NAME, "playwright", "index.html")),
       ).toBe(true);
+    });
+
+    test("ends in ./<name>/ whatever CDPATH and IFS the reader's shell has", async () => {
+      const archive = await realArchive();
+      // A same-named folder a CDPATH reaches: a bare `cd <name>` would go there.
+      const decoy = join(root, "decoy");
+      mkdirSync(join(decoy, NAME), { recursive: true });
+      // An IFS splitting the name at its dashes: an unquoted $R would be several words.
+      const pasted = paste(
+        shell,
+        bundleCommand("auto-e2e", archive, NAME),
+        scpStub("ok"),
+        { CDPATH: decoy },
+        "IFS=-; ",
+      );
+      expect(pasted.status).toBe(0);
+      expect(pasted.entries).toEqual([NAME]);
+      expect(pasted.cwd).toBe(realpathSync(join(pasted.local, NAME)));
     });
 
     test("a failed download stops there: nothing unpacked, nothing removed", async () => {
@@ -291,7 +328,7 @@ for (const shell of ["sh", "bash", "zsh"]) {
       expect(none.entries).toEqual([]);
     });
 
-    test("folder mode leaves ./<name>/index.html", async () => {
+    test("folder mode leaves ./<name>/index.html and the shell in it, whatever CDPATH and IFS", async () => {
       const built = await buildReportBundle({
         runDir,
         name: NAME,
@@ -300,14 +337,21 @@ for (const shell of ["sh", "bash", "zsh"]) {
         allureBin: writeAllureStub(stubDir, "ok"),
       });
       if (built.folder === null) throw new Error("no folder");
+      // The same traps as the archive's command: a CDPATH reaching a same-named folder, an IFS
+      // splitting the name at its dashes.
+      const decoy = join(root, "decoy");
+      mkdirSync(join(decoy, NAME), { recursive: true });
       const pasted = paste(
         shell,
         folderCommand("auto-e2e", built.folder.path, NAME),
         scpStub("ok"),
+        { CDPATH: decoy },
+        "IFS=-; ",
       );
       expect(pasted.status).toBe(0);
       expect(pasted.entries).toEqual([NAME]);
       expect(existsSync(join(pasted.local, NAME, "index.html"))).toBe(true);
+      expect(pasted.cwd).toBe(realpathSync(join(pasted.local, NAME)));
     });
   });
 }

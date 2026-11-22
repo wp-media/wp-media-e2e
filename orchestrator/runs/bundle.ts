@@ -89,10 +89,15 @@ export function eventBundle(
 }
 
 /**
- * The command that fetches a run's archive and leaves `./<name>/`, pasted in a POSIX shell: the
- * download, the unpack, then the archive's removal — chained by `&&`, so a failed download or unpack
- * stops there and keeps the archive. Plain `rm`, never `-f`/`-r`. Every word is quoted for the shell
- * ({@link shellWord}); re-running it rewrites the same folder with the same content.
+ * The command that fetches a run's archive and leaves the shell in `./<name>/`, pasted in a POSIX
+ * shell: the bundle's name set once in `R` (so it is written once, not four times), then the
+ * download, the unpack, the archive's removal and the `cd` — chained by `&&`, so a failed download
+ * or unpack stops there and keeps the archive. Plain `rm`, never `-f`/`-r`. `$R` is always
+ * double-quoted (whatever `IFS` the reader's shell has), the paths and the name go through
+ * {@link shellWord}, and the `cd` is `./`-anchored so a `CDPATH` cannot send it elsewhere.
+ * Re-run from the same folder, it rewrites the same folder with the same content; pasted from inside
+ * `./<name>/` (where the `cd` left the shell), it unpacks a second copy within it. It sets `R` in the
+ * reader's shell; a shell without `R=` assignments (fish, csh) stops there, having done nothing.
  *
  * @param sshHost - the host `scp` reaches the orchestrator's machine by.
  * @param archivePath - the archive, absolute.
@@ -101,7 +106,7 @@ export function eventBundle(
  * @example
  * ```ts
  * bundleCommand("auto-e2e", "/srv/e2e/reports/b/c/R/report.tar.gz", "b-c-R");
- * // "scp auto-e2e:/srv/e2e/reports/b/c/R/report.tar.gz b-c-R.tar.gz && tar -xzf b-c-R.tar.gz && rm b-c-R.tar.gz"
+ * // 'R=b-c-R && scp auto-e2e:/srv/e2e/reports/b/c/R/report.tar.gz "$R.tar.gz" && tar -xzf "$R.tar.gz" && rm "$R.tar.gz" && cd "./$R"'
  * ```
  */
 export function bundleCommand(
@@ -109,12 +114,12 @@ export function bundleCommand(
   archivePath: string,
   name: string,
 ): string {
-  const local = shellWord(`${name}.tar.gz`);
-  return `scp ${sshHost}:${shellWord(archivePath)} ${local} && tar -xzf ${local} && rm ${local}`;
+  return `R=${shellWord(name)} && scp ${sshHost}:${shellWord(archivePath)} "$R.tar.gz" && tar -xzf "$R.tar.gz" && rm "$R.tar.gz" && cd "./$R"`;
 }
 
 /**
- * The command that fetches a run's unpacked bundle folder as `./<name>/`.
+ * The command that fetches a run's unpacked bundle folder as `./<name>/` and leaves the shell in
+ * it; `R` set and quoted as {@link bundleCommand} does.
  *
  * @param sshHost - the host `scp` reaches the orchestrator's machine by.
  * @param folderPath - the run's `report/`, absolute.
@@ -126,7 +131,7 @@ export function folderCommand(
   folderPath: string,
   name: string,
 ): string {
-  return `scp -r ${sshHost}:${shellWord(folderPath)} ${shellWord(name)}`;
+  return `R=${shellWord(name)} && scp -r ${sshHost}:${shellWord(folderPath)} "$R" && cd "./$R"`;
 }
 
 /**

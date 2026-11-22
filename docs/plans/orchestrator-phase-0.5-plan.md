@@ -653,8 +653,9 @@ results. `bddgen` exiting changes nothing: its group's kill still keeps the runn
   shell would split them — quoting for the local shell only: scp's default SFTP mode globs `*`, `?`
   and `[` at the far end, and legacy `-O` hands the path to a remote shell unquoted (V390). The
   paths are the checkout's and the state directory's. A run with a bundle (report-delivery R3):
-  `Report:` is `bundleCommand` — `scp <host>:<archive> <name>.tar.gz && tar -xzf <name>.tar.gz && rm
-  <name>.tar.gz` (`scp -r <host>:<run>/report <name>` for `folder`) —, never cut: over 600
+  `Report:` is `bundleCommand` — `R=<name> && scp <host>:<archive> "$R.tar.gz" && tar -xzf
+  "$R.tar.gz" && rm "$R.tar.gz" && cd "./$R"` (`R=<name> && scp -r <host>:<run>/report "$R" && cd
+  "./$R"` for `folder`) —, never cut: over 600
   characters escaped, or without `sshHost`, the bundle's path; no bundle, the raw folder as above.
 - **Next run in the message — the user's idea, 2026-10-22, not a decision.** Append, at the end of
   every Slack notification, when the next run starts — e.g. `Next Run in 60 minutes @ 19:53:23 UTC`

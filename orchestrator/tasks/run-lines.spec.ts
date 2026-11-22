@@ -322,7 +322,7 @@ test.describe("bundleLines", () => {
     expect(bundleLines(withBundle(ARCHIVE), show, "auto-e2e", [])).toEqual([
       REPORT_LINE,
       {
-        text: `bpng-12 fetch: scp auto-e2e:${DIR}/report.tar.gz backwpup-pro@nginx-R.tar.gz && tar -xzf backwpup-pro@nginx-R.tar.gz && rm backwpup-pro@nginx-R.tar.gz`,
+        text: `bpng-12 fetch: R=backwpup-pro@nginx-R && scp auto-e2e:${DIR}/report.tar.gz "$R.tar.gz" && tar -xzf "$R.tar.gz" && rm "$R.tar.gz" && cd "./$R"`,
         verbatim: true,
       },
     ]);
@@ -345,9 +345,12 @@ test.describe("bundleLines", () => {
       ...ARCHIVE,
       path: `/${"p".repeat(n)}/report.tar.gz`,
     });
-    // The command's raw length is n + a fixed part; its escaped length 16 more (each `&` of the two `&&` is `&amp;`).
-    const fixed = downloadCommand(under(0), "auto-e2e").length;
-    const fitsEscaped = MAX_SHOWN - 16 - fixed;
+    // The command's raw length is n + a fixed part; escaped, each of its `&` (the `&&`s) is `&amp;`: 4 more.
+    const bare = downloadCommand(under(0), "auto-e2e");
+    const fixed = bare.length;
+    const escapes = 4 * bare.split("&").length - 4;
+    expect(escapes).toBe(32);
+    const fitsEscaped = MAX_SHOWN - escapes - fixed;
     for (const [n, shown] of [
       [fitsEscaped, true],
       // Fits raw (≤ 600), not escaped (> 600): the terminal follows Slack.
