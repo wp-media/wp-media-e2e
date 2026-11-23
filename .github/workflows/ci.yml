@@ -26,13 +26,14 @@ jobs:
         with:
           node-version-file: .nvmrc
           package-manager-cache: false
-      # The same version and check as setup-chromium/action.yml's.
+      # The same major and check as setup-chromium/action.yml's.
       - name: Install npm
         env:
-          NPM_VERSION: 12.2.3
+          NPM_MAJOR: 12
         run: |
-          npm install --global "npm@$NPM_VERSION"
-          test "$(npm --version)" = "$NPM_VERSION" || { echo "::error::npm is $(npm --version), not $NPM_VERSION"; exit 1; }
+          npm install --global "npm@$NPM_MAJOR"
+          v="$(npm --version)"
+          case "$v" in "$NPM_MAJOR".*) ;; *) echo "::error::npm is $v, not $NPM_MAJOR.x"; exit 1 ;; esac
       - uses: actions/cache@v6
         with:
           path: ~/.npm
