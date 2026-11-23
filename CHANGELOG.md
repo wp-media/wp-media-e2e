@@ -24,6 +24,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ### Changed
 
+- **Orchestrator:** Slack's `Report:` command names the bundle once (`R=<name> && scp … "$R.tar.gz"
+…`) and ends in the unpacked folder (`cd "./$R"`): paste the next one from the parent folder.
+  POSIX shells only (`sh`, `bash`, `zsh`); fish and csh/tcsh stop at `R=` having done nothing.
 - No file ownership handover when commands already run as the site's user.
 - CI: unit tests in two shards; SSH twins in CI.
 - **Requires Node ≥ 26.13.1 and npm ≥ 12.2.3** (`engines`, `devEngines`: npm 11 fails every npm
