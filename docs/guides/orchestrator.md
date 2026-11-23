@@ -5,12 +5,11 @@ a cooldown, the next run) and reports each run to Slack and Datator, replacing A
 instances. Each run is the suite's own (`bddgen`, then Playwright, pinned to one cell), building its
 plugin through the suite (`artifacts:<cell>`, APVM).
 
-Not yet (later phases): run as a service (systemd), take commands while running
-(`status`, `stop`, a dashboard), schedules or on-demand runs, back off after failures, build or pin
-plugins itself, warn about disk space, clean a site after a killed run (the cell's next run does).
-The config is read once: a change needs a restart.
-
-Design and the decisions behind it: [`docs/plans/orchestrator-phase-0.5-plan.md`](../plans/orchestrator-phase-0.5-plan.md).
+Not yet (later phases): a service (systemd), commands while running (`status`, `stop`, a dashboard),
+schedules or on-demand runs, backing off after failures, building or pinning plugins itself, disk-space
+warnings, cleaning a site after a killed run (the cell's next run does). The config is read once: a
+change needs a restart. Design and decisions:
+[`orchestrator-phase-0.5-plan.md`](../plans/orchestrator-phase-0.5-plan.md).
 
 ## Install on the runner
 
@@ -39,60 +38,39 @@ chmod 600 .orchestrator/config.json
 ```
 
 The config's folder is the **state directory** (runs, logs, the lock); `--config <file>` picks another
-file, and with it another state directory. It must be yours and closed to other writers: Ubuntu's default umask
-(`002`) makes a `mkdir`'d folder `0775`, which the start refuses, naming `chmod go-w`.
+file, and with it another state directory. It must be yours and closed to other writers: Ubuntu's
+default umask (`002`) makes a `mkdir`'d folder `0775`, which the start refuses, naming `chmod go-w`.
+[`config.example.json`](../../orchestrator/config.example.json) shows every field; the rules
+(`orchestrator/config/schema.ts`):
 
-```json
-{
-  "instance": "E2E Orchestrator",
-  "tasks": [
-    {
-      "id": "bpng",
-      "name": "BackWPup Pro on nginx",
-      "type": "loop",
-      "product": "backwpup",
-      "cell": "pro@nginx",
-      "plugin": { "ref": "develop", "version": "9.99.99" },
-      "cooldownMinutes": 5
-    }
-  ],
-  "runs": { "retries": 2, "reportsKeep": 20 },
-  "secrets": { "GITHUB_TOKEN": "…", "BWP_S3_ACCESS_KEY_ID": "…" },
-  "notifications": {
-    "slack": { "webhookUrl": "https://hooks.slack.com/services/…" },
-    "datator": {
-      "url": "https://datator.wp-media.me/e2e_tests/results/",
-      "apiKey": "…"
-    }
-  },
-  "reports": {
-    "sshHost": "auto-e2e",
-    "bundle": { "mode": "archive", "traces": "strip" }
-  },
-  "serverWarningThreshold": 5
-}
-```
-
-| Field                            | Rule                                                                                                                                                                         |
-| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `instance`                       | Optional, ≤ 100 characters. Prefixes Slack messages (`*[E2E Orchestrator]*`)                                                                                                  |
-| `tasks[]`                        | At least one; every task loops at once                                                                                                                                       |
-| `.id`                            | 4 characters: a lowercase letter, then lowercase letters or digits, never `0 o 1 l i`. Unique                                                                                |
-| `.name`                          | Optional, ≤ 100. The run's name in its reports                                                                                                                               |
-| `.type`                          | `"loop"`, required (the only type)                                                                                                                                           |
-| `.product`, `.cell`              | A product and one of its cells (from its sites files), every site real — no placeholder. A product × cell once                                                               |
-| `.plugin`                        | Optional `ref` (an APVM ref: a branch, tag, commit, PR or `release:*`) and `version`; else the product's defaults. A `version` beside a `release:` ref is ignored (a warning) |
-| `.cooldownMinutes`               | 1–1440, default 5. Counted from the run's end                                                                                                                                |
-| `.grep`                          | Optional, ≤ 500. Playwright's `--grep` (`@smoke`, `/backup/i`)                                                                                                               |
-| `runs.retries`                   | 0–10. Unset: the suite's default                                                                                                                                             |
-| `runs.reportsKeep`               | 0–10,000. Reports and run folders kept per cell. Unset: 20. `0` lifts the cap only (see [Retention](#retention))                                                             |
-| `secrets`                        | `GITHUB_TOKEN`, `GH_TOKEN`, `BWP_*` only: what each run receives. Nothing else from your environment reaches a run                                                           |
-| `notifications.slack.webhookUrl` | An incoming webhook, `https://hooks.slack.com/services/…`. Omit `slack` to turn it off                                                                                       |
-| `notifications.datator`          | `url`: HTTPS, ending with `/` (Datator answers `301` without it). `apiKey`. Omit `datator` to turn it off                                                                    |
-| `reports.sshHost`                | Optional host or `user@host`: Slack's report paths become `scp` commands from it                                                                                             |
-| `reports.bundle.mode`            | `archive` (default): `report.tar.gz`; `folder`: `report/`; `both`; `none`: no bundle, no Allure ([Report bundle](#report-bundle))                                           |
-| `reports.bundle.traces`          | `strip` (default): Allure without Playwright traces, one file per page; `keep`: with them, a folder report served with the landing page's `npx allure open` command (loopback only)                                       |
-| `serverWarningThreshold`         | 1–1000, default 5: warns when that many tasks share one server                                                                                                               |
+- `instance`: Optional, ≤ 100 characters. Prefixes Slack messages (`*[E2E Orchestrator]*`)
+- `tasks[]`: at least one; every task loops at once. Each task:
+  - `.id`: 4 characters: a lowercase letter, then lowercase letters or digits, never `0 o 1 l i`. Unique
+  - `.name`: Optional, ≤ 100 characters. The run's name in its reports
+  - `.type`: `"loop"`, required (the only type)
+  - `.product`, `.cell`: A product and one of its cells (from its sites files), every site real — no
+    placeholder. A product × cell once
+  - `.plugin`: Optional `ref` (an APVM ref: a branch, tag, commit, PR or `release:*`) and `version`;
+    else the product's defaults. A `version` beside a `release:` ref is ignored (a warning)
+  - `.cooldownMinutes`: 1–1440, default 5. Counted from the run's end
+  - `.grep`: Optional, ≤ 500, a regular expression Playwright's `--grep` accepts (`@smoke`,
+    `/backup/i`)
+- `runs.retries`: 0–10. Unset: the suite's default
+- `runs.reportsKeep`: 0–10,000. Reports and run folders kept per cell. Unset: 20. `0` lifts the cap
+  only (see [Retention](#retention))
+- `secrets`: `GITHUB_TOKEN`, `GH_TOKEN`, `BWP_*` only: what each run receives. Nothing else from your
+  environment reaches a run
+- `notifications.slack.webhookUrl`: An incoming webhook, `https://hooks.slack.com/services/…`. Omit
+  `slack` to turn it off
+- `notifications.datator`: `url`: plain HTTPS (no user, password, port, query or fragment), ending
+  with `/` (Datator answers `301` without it). `apiKey`. Omit `datator` to turn it off
+- `reports.sshHost`: Optional host or `user@host`: Slack's report paths become `scp` commands from it
+- `reports.bundle.mode`: `archive` (default): `report.tar.gz`; `folder`: `report/`; `both`; `none`: no
+  bundle, no Allure ([Report bundle](#report-bundle))
+- `reports.bundle.traces`: `strip` (default): Allure without Playwright traces, one file per page;
+  `keep`: with them, a folder report served with the landing page's `npx allure open` command
+  (loopback only)
+- `serverWarningThreshold`: 1–1000, default 5: warns when that many tasks share one server
 
 Checked at start and by `--dry-run`: a misspelt key, a value out of bounds, an unknown product or
 cell, a placeholder site, two selected tasks on one site, or a site whose `baseURL` is no http(s) URL,
@@ -109,7 +87,8 @@ npm run orchestrator -- start --task bpng --once # one real run of one task, the
 
 The dry run runs, locks and writes nothing (safe beside a running orchestrator). It names each task's
 cell, plugin (as the run will build it), sites and servers, settings, the notifications and secrets
-**by name**, then every warning, what a start would refuse included:
+**by name**, then every warning, what a start would refuse included. For a config holding only task
+`bpng` (the example file has two):
 
 ```text
 dry run · nothing is run · suite 1.1.0 · config .orchestrator/config.json · state .orchestrator/
@@ -140,7 +119,7 @@ Use `tmux`, never `nohup` or `… &`: it stops when its terminal closes (SIGHUP)
 anything that backgrounds it and exits stops it at once. In a container, only with `--pid=host`:
 a container restarting into a new PID namespace reads its own lock as another's and refuses to start.
 
-One line per event; a run's own output goes to its `run.log`:
+One line per event, `HH:MM:SS <scope>  <text>`; a run's own output goes to its `run.log`:
 
 ```text
 10:15:30 orchestrator  started · suite 1.1.0 · 1 task (bpng) · .orchestrator/ · pid 4242
@@ -160,14 +139,10 @@ reason and log. A failing run never stops its loop: it fails, and says so, every
 
 Piped or redirected (`… > out.log`, `| tee`), stdout is exactly these lines: no table, no colour
 (even under `FORCE_COLOR`), Unicode kept. `orchestrator.log` always holds them plain, each with its
-ISO date, time and offset.
-
-On a terminal the same words are styled: the time dim, the scope in its task's colour; a line wider
-than the terminal wraps at its spaces, continuation lines under the message (a path or a command is
-never broken); an empty line opens each run's end and each stop's escalation. `NO_COLOR` drops the
-colour only; a C/POSIX or non-UTF-8 locale draws the table's symbols in ASCII (the lines keep their
-words). It reads no `E2E_OUTPUT` (`plain`/`fancy` change nothing here). The rules, the per-program
-table and what the runs it starts print into their `run.log`:
+ISO date, time and offset. On a terminal the same words are styled: the time dim, the scope in its
+task's colour; a line wider than the terminal wraps at its spaces, continuation lines under the
+message (a path or a command is never broken); an empty line opens each run's end and each stop's
+escalation. Colour, locale and `E2E_OUTPUT` (ignored here), and what its runs print into `run.log`:
 [configuration.md → Terminal output](configuration.md#terminal-output).
 
 Where the terminal redraws in place (a TTY with a size, `TERM` set and not `dumb`, no `CI`), a
@@ -194,10 +169,9 @@ bfap  —        free@nginx  ✔ passed · 52 scenarios      54m 10s  next 11:14
   Node warning, a dependency's `console.*`) prints above it, masked; not into `orchestrator.log`.
   While the terminal is paused (Ctrl-S) or behind by over 1 MiB, draws are skipped and lines counted
   (`N lines not shown`; the log keeps them).
-- Left on the screen, for good: by a SIGKILL (the whole table); by Enter or other keys typed
-  meanwhile (the terminal echoes them, moving the cursor below the table: one stale header or row);
-  by a narrowing below the table's width (the terminal rewraps its rows and the erase from its last
-  row leaves the parts above — the live region's accepted residue, `resetBytes` in
+- Left on the screen for good, by: a SIGKILL (the whole table); keys typed meanwhile (echoed, they move
+  the cursor below the table: one stale header or row); a narrowing below the table's width (the
+  terminal rewraps rows the erase cannot reach — the live region's accepted residue, `resetBytes` in
   [`terminal/live.ts`](../../src/common/terminal/live.ts)). No log line is lost or doubled; `clear`
   or `reset` tidies the terminal.
 
@@ -210,8 +184,8 @@ npm run orchestrator -- start --help
 
 - **Every option goes after `--`.** Before it npm takes `--dry-run` for itself and the orchestrator
   would start every task for real. It notices and refuses (exit 1), naming the `--` form. npm 12
-  rejects `--once`, `--task=…`, `--config=…` there itself (`EUNKNOWNCONFIG`); npm 11, past
-  `devEngines` only with `--force`, took those too, and they are refused the same way.
+  rejects `--once`, `--task=…`, `--config=…` there itself (`EUNKNOWNCONFIG`); an npm that takes them
+  (npm 11 with `--force`) is refused the same way.
 - `--task a b --task c` selects tasks; an unknown id is refused. Without it, every task runs.
 - A relative `--config` is from the folder you ran npm in.
 - `--version`, the dry run's first line and the `started` line (`suite <v>`, read once as it starts)
@@ -220,20 +194,20 @@ npm run orchestrator -- start --help
 - Run it only through `npm run orchestrator`, never `npx`, `npm exec` or the `tsx` CLI: they put a
   process between you and it, and signals then go astray.
 
-| Exit  | When                                                                                                                                                                                                   |
-| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `0`   | `--once`: every run passed or was flaky. `--dry-run`: the report printed, warnings or not. `--help`, `--version`                                                                                      |
-| `1`   | `--once`: a run did not pass. Without `--once`: every loop broke. A refused start (the config, `--task`, the lock, a run still running or whose record cannot be read, a site held elsewhere) or dry run. A usage error              |
-| `130` | Stopped: Ctrl-C, SIGTERM or SIGHUP to it or its process group, SIGINT or SIGTERM to npm's PID, or its parent ending                                                                                  |
+| Exit | When |
+| --- | --- |
+| `0` | `--once`: every run passed or was flaky. `--dry-run`: the report printed, warnings or not. `--help`, `--version` |
+| `1` | `--once`: a run did not pass. Without `--once`: every loop broke. A refused start (the config, `--task`, the lock, a run still running or whose record cannot be read, a site held elsewhere) or dry run. A usage error |
+| `130` | Stopped: Ctrl-C, SIGTERM or SIGHUP to it or its process group, SIGINT or SIGTERM to npm's PID, or its parent ending |
 
 ## Stopping
 
-| Signal to the orchestrator                  | Effect                                                                                     |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| Ctrl-C (SIGINT), first                      | No new run; cooldowns end; each run finishes the scenario in progress. After 15 min: interrupt |
-| Ctrl-C, second                              | Interrupt every run now (Playwright stops, reports written). After 4 min: kill             |
-| Ctrl-C, third                               | Kill every run now (SIGKILL of its process group)                                          |
-| SIGTERM, SIGHUP, its parent ending          | As the first Ctrl-C when nothing is stopping yet; otherwise nothing                        |
+| Signal to the orchestrator | Effect |
+| --- | --- |
+| Ctrl-C (SIGINT), first | No new run; cooldowns end; each run finishes the scenario in progress. After 15 min: interrupt |
+| Ctrl-C, second | Interrupt every run now (Playwright stops, reports written). After 4 min: kill |
+| Ctrl-C, third | Kill every run now (SIGKILL of its process group) |
+| SIGTERM, SIGHUP, its parent ending | As the first Ctrl-C when nothing is stopping yet; otherwise nothing |
 
 - Only Ctrl-C escalates, so an SSH session closing after a Ctrl-C cannot cut the drain short.
   Ctrl-Cs less than 1 s apart count as one (npm delivers one Ctrl-C twice).
@@ -280,31 +254,29 @@ landing page (`index.html`), `playwright/` and `cucumber/` as the run wrote them
 included), a fresh `allure/` (named by the run's facts line, with the cell's `allure-history.jsonl`) and
 `run-facts.json` — never `allure-results/`, `results.jsonl`, logs or work folders.
 
-| `reports.bundle` | What lands in `<run>/`                                                                 |
-| ---------------- | -------------------------------------------------------------------------------------- |
-| `mode: archive`  | Default. `report.tar.gz` (0600), one top-level folder `<name>/`; no `report/` kept      |
-| `mode: folder`   | `report/` (0700); Slack gives `scp -r`                                                 |
-| `mode: both`     | Both; Slack gives the archive's command                                                |
-| `mode: none`     | Nothing, no Allure                                                                     |
-| `traces: strip`  | Default. Allure without Playwright traces, one HTML file per page: opens from disk     |
-| `traces: keep`   | Allure with them, a folder report: served on loopback with `npx --yes allure@3.33.0 open --host 127.0.0.1 allure` (the landing page gives it; remote: `ssh -L`) |
+| `reports.bundle` | What lands in `<run>/` |
+| --- | --- |
+| `mode: archive` | Default. `report.tar.gz` (0600), one top-level folder `<name>/`; no `report/` kept |
+| `mode: folder` | `report/` (0700); Slack gives `scp -r` |
+| `mode: both` | Both; Slack gives the archive's command |
+| `mode: none` | Nothing, no Allure |
+| `traces: strip` | Default. Allure without Playwright traces, one HTML file per page: opens from disk |
+| `traces: keep` | Allure with them, a folder report: served on loopback with `npx --yes allure@3.33.0 open --host 127.0.0.1 allure` (the landing page gives it; remote: `ssh -L`) |
 
 The landing page opens from disk and names what needs HTTP, with the command to run from the unpacked
 folder: Playwright's trace viewer (`npx playwright show-report playwright`), rich Cucumber
-(`REPORT_MODE=rich`: `npx playwright show-report cucumber`), a `keep` Allure. Measured on three real
-failed runs (6–7 MB raw, 1–23 traces): archive 5.7–6.6 MB, 16 MB unpacked (Allure 12 MB of it),
-1.3–1.7 s (`keep`: 4.8–6.7 MB, ~3 s); a run with 54 MB of traces: 75 MB archive, 2.7 s. Slack's
-`Report:` line, pasted in a POSIX shell (macOS, Linux, WSL), leaves `./<name>/index.html` and no
-archive — `<name>` is `<product>-<cell>-<RUN_ID>`, so runs unpacked side by side never mix:
+(`REPORT_MODE=rich`: `npx playwright show-report cucumber`), a `keep` Allure. Slack's `Report:` line,
+pasted in a POSIX shell (checked: macOS `zsh`/`bash`/`sh` with bsdtar, Ubuntu 24.04 `bash`/`sh` with
+GNU tar 1.35; as root or not), leaves only
+`./<name>/` (`index.html` inside), no archive, nothing on stderr — `<name>` is
+`<product>-<cell>-<RUN_ID>`, so runs unpacked side by side never mix:
 
 ```sh
 scp auto-e2e:/…/reports/backwpup/pro@nginx/<RUN_ID>/report.tar.gz backwpup-pro@nginx-<RUN_ID>.tar.gz && tar -xzf backwpup-pro@nginx-<RUN_ID>.tar.gz && rm backwpup-pro@nginx-<RUN_ID>.tar.gz
 ```
 
 `&&` stops at a failed download or unpack, keeping the archive; re-running it rewrites the same
-folder. Pasted unchanged in macOS `zsh`/`bash`/`sh` (bsdtar) and Ubuntu 24.04 `bash`/`sh` (GNU tar
-1.35), as root or not, it leaves only `./<name>/`, nothing on stderr (checked by hand: CI runs Linux
-only). `folder`: `scp -r <host>:<run>/report <name>` (into an existing `./<name>/` it nests as
+folder. `folder`: `scp -r <host>:<run>/report <name>` (into an existing `./<name>/` it nests as
 `<name>/report/`: remove it first). A command Slack would not show whole (over 600 characters once
 escaped, `&&` being `&amp;&amp;`) is never cut: the bundle's path instead. The terminal follows the
 same rule under the run's end (`report: <bundle> · raw: <folder>`, then `fetch: <command>`), after
@@ -312,6 +284,9 @@ the build's own line with its sizes; `fetch:` is never wrapped (the terminal sof
 is one command), and it is left out when the log would change it (a secret masked, a run of spaces
 made one).
 
+- Only folders and regular files are copied from the reports: links, FIFOs and sockets are left out
+  and logged. `<name>` is refused when it starts with `-`, `.` or `@`, or holds `/`, `\`, `:` or a
+  control character (tar or scp would read it as an option, archive or host).
 - **Checkout path:** the command quotes the remote path for the local shell only; `scp` then hands it
   to SFTP's glob (or, with `scp -O`, the remote shell), which reads it again. Keep the checkout
   under letters, digits and `_ @ % + = : , . / -`: a space, a quote, `$`, a backtick or `\` can make
@@ -320,7 +295,8 @@ made one).
 - Best-effort: a failure is a `no report bundle: …` line, the event's `report.bundle` is `null` and
   Slack points at the raw folder; the run keeps its status. None for a run that never ran (refused, or
   could not start), or with `none`.
-- Bounded by 4 min (a measured trace-heavy run took 2.7 s), from before the cell's sweep (below) to
+- Bounded by 4 min (measured: 1.3–1.7 s for a failed run, ~3 s with `keep`, 2.7 s for a trace-heavy
+  one), from before the cell's sweep (below) to
   the archive; the stop and the budget are checked between steps. A filesystem call that stalls (a
   hung mount) cannot be interrupted, so the build returns once it does, past its budget; a shutdown
   still gives up `KILL_SETTLE_MS` (60 s) after its kill.
@@ -336,13 +312,13 @@ made one).
   what keeps another host's live build from looking dead.
 - Disk: Allure's pages weigh about the same whatever the run (~9–12 MB unpacked), so small runs grow
   most. Measured: passing runs of 1.6–2.3 MB → archive 3.6–4.5 MB (1.6–2.7×), `folder` 8.9–11.3 MB
-  (4.3–6.6×); failed runs of 6–7 MB → archive 0.78–0.95×, `folder` 2.2–2.6×; a trace-heavy run
-  (135 MB raw, 54 MB of traces) → archive 75 MB (0.56×, `strip`). `both` = archive + `folder`.
-  Bounded by [retention](#retention): the bundle is pruned with its run. The cell's
-  `allure-history.jsonl` stays, one line per run (~110–180 KB each), the newest 100 runs only (under
-  ~20 MB; at most 64 MiB, a line over 8 MiB dropped unread), its mode kept (a new one `0600`): older
-  lines go as each report is made, and a line Allure could not read, or a FIFO or device at its path
-  (only an edit by hand makes one), is dropped and replaced (`report:allure` warns).
+  (4.3–6.6×); failed runs of 6–7 MB → archive 0.78–0.95× (`keep`: 4.8–6.7 MB), `folder` 2.2–2.6× (16
+  MB unpacked, 12 MB of it Allure); a trace-heavy run (135 MB raw, 54 MB of traces) → archive 75 MB
+  (0.56×, `strip`). `both` = archive + `folder`. Bounded by [retention](#retention): the bundle is
+  pruned with its run. The cell's `allure-history.jsonl` stays, one line per run (~110–180 KB each),
+  the newest 100 runs only (trimmed as each report is made; under ~20 MB; at most 64 MiB, a line
+  over 8 MiB dropped unread), its mode kept (a new one `0600`); a line Allure cannot read, or a
+  non-file at its path, is dropped and replaced (`report:allure` warns).
 - As sensitive as the raw folder: traces hold session cookies. A `keep` Allure's trace button opens
   `https://trace.playwright.dev/` in a new tab and hands it the trace there (`postMessage`): it needs
   the internet, and the trace goes to that site's code in the viewer's browser — Playwright documents
@@ -392,8 +368,9 @@ made one).
 ### Retention
 
 At each run's end the suite prunes the cell's reports, and the orchestrator the task's run folders,
-by one policy: keep at most `runs.reportsKeep` (20), none older than 30 days except the newest
-complete one (up to 182 days). At ~55 min a cycle, 20 runs cover ~18 h; raise it for more history.
+by one policy ([the rules](../architecture/execution-model.md#report-retention)): keep at most
+`runs.reportsKeep` (20), none older than 30 days except the newest complete one (up to 182 days). At
+~55 min a cycle, 20 runs cover ~18 h; raise it for more history.
 `0` removes the cap, not the 30-day rule — and each run's end, and each start, reads every run
 folder kept (about 0.3–0.5 ms each: 8,000 folders take seconds). Keep a cap.
 
@@ -436,15 +413,15 @@ the checkout under a running orchestrator: a run reads its files as it goes.
 
 ## When it refuses
 
-| Message names                                         | Do                                                                                     |
-| ----------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `chmod go-w` / `chown`                                | The state directory (or `runs/`) is open to others or not yours: run what it names     |
-| `chmod 600`                                           | A warning: the config is readable by others                                            |
-| a lock held by a live orchestrator                    | One already runs on this state directory: attach to its `tmux`                         |
-| a lock written in another PID space (`--pid=host`)    | A container restarted, or another host wrote it: remove the lock once sure none runs   |
-| `still has run …`, `may still … — unconfirmed`        | See [After a crash](#after-a-crash-runs-left-behind)                                   |
-| a site held elsewhere                                 | Another orchestrator of yours runs that site: stop it, or drop the task                |
-| `npm took --… as its own setting`                     | Put every option after `--`; if you did, remove it from `.npmrc` or the environment    |
+| Message names | Do |
+| --- | --- |
+| `chmod go-w` / `chown` | The state directory (or `runs/`) is open to others or not yours: run what it names |
+| `chmod 600` | A warning: the config is readable by others |
+| a lock held by a live orchestrator | One already runs on this state directory: attach to its `tmux` |
+| a lock written in another PID space (`--pid=host`) | A container restarted, or another host wrote it: remove the lock once sure none runs |
+| `still has run …`, `may still … — unconfirmed` | See [After a crash](#after-a-crash-runs-left-behind) |
+| a site held elsewhere | Another orchestrator of yours runs that site: stop it, or drop the task |
+| `npm took --… as its own setting` | Put every option after `--`; if you did, remove it from `.npmrc` or the environment |
 
 ## Testing the orchestrator
 

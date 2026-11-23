@@ -54,13 +54,13 @@ path segment (it names folders) and a Playwright project (whose `--project` filt
 
 ### Site fields ([`SiteInput`](../../src/common/config/types.ts))
 
-| Field       | Required | Notes                                                                                      |
-| ----------- | -------- | ------------------------------------------------------------------------------------------ |
-| `baseURL`   | yes      | The site's URL; each pooled worker navigates relative to its own.                          |
-| `username`  | yes      | WordPress admin login; no surrounding whitespace (WP-CLI's `--user` matches it exactly).   |
-| `password`  | yes      | WordPress admin password.                                                                  |
-| `transport` | yes      | How WP-CLI reaches the site (below).                                                       |
-| `overrides` | no       | Per-site service-credential overrides. Validated only: not merged or read yet (phase-6 6H). |
+| Field | Required | Notes |
+| --- | --- | --- |
+| `baseURL` | yes | The site's URL; each pooled worker navigates relative to its own. |
+| `username` | yes | WordPress admin login; no surrounding whitespace (WP-CLI's `--user` matches it exactly). |
+| `password` | yes | WordPress admin password. |
+| `transport` | yes | How WP-CLI reaches the site (below). |
+| `overrides` | no | Per-site service-credential overrides. Validated only, not merged yet (phase-6 6H); the orchestrator masks its credentials. |
 
 Any other key, on a site or a transport, fails the load naming it and the fields allowed there (a
 misspelt `"runas": false` must not leave the default on). The resolved
@@ -71,11 +71,11 @@ saved login).
 
 Discriminated on `mode`; dispatch in [wordpress-automation.md](../architecture/wordpress-automation.md).
 
-| `mode`   | Required fields                                 | Optional fields                                                   |
-| -------- | ----------------------------------------------- | ----------------------------------------------------------------- |
-| `local`  | `rootDir`                                       | `stagingDir`, `elevate`, `fileOwner`                              |
-| `docker` | `container`                                     | `rootDir`, `stagingDir`, `elevate`, `fileOwner`                   |
-| `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir` | `port`, `stagingDir`, `elevate`, `fileOwner`, `runAs`, `umask`    |
+| `mode` | Required fields | Optional fields |
+| --- | --- | --- |
+| `local` | `rootDir` | `stagingDir`, `elevate`, `fileOwner` |
+| `docker` | `container` | `rootDir`, `stagingDir`, `elevate`, `fileOwner` |
+| `ssh` | `host`, `username`, `privateKeyPath`, `rootDir` | `port`, `stagingDir`, `elevate`, `fileOwner`, `runAs`, `umask` |
 
 The loader adds `wpUser` to every transport, copied from the site's `username` (the WordPress login
 `wpCli` acts as, `--user`, once checked to name an administrator; else dropped with a warning,
@@ -118,13 +118,12 @@ alias is never run) ([the ssh command line](../architecture/wordpress-automation
   user, which the web server is not, so the suite restores the ownership the install already uses, read
   from `wp-content`. That detection is right wherever a site is consistently owned (a deployment
   account as owner included), so this exists only for one that is not.
-  - **Both halves are required**, checked **at load** like every site field: `"www-data"` (no group),
-    `"a:b:c"` or a value with spaces fail naming the field, the rule and the value's length, never
-    the value (the file holds credentials); a non-string (`5`, `true`) by its kind. The group is never guessed: where the docroot owner is not the web server, the
-    shared group is the web server's only write access. Checked at load because normalisation never fails a run, so
-    a bad value checked later would be warned about once and then ignored on exactly the site being
-    fixed. The same rule is enforced again before any privileged command, so the two never
-    disagree.
+  - **Both halves are required** (the group is never guessed: where the docroot owner is not the web
+    server, the shared group is its only write access), checked **at load**: `"www-data"`, `"a:b:c"`
+    or a value with spaces fail naming the field, the rule and the value's length, never the value
+    (the file holds credentials); a non-string (`5`, `true`) by its kind. At load because
+    normalisation never fails a run: checked later, a bad value would be warned once, then ignored on
+    exactly the site being fixed. The same rule runs again before any privileged command.
   - Either half may be a **bare numeric id** (`"33:33"`, `"www-data:33"`) for a host whose passwd
     database cannot map the name. It is compared as an id: `stat` reports the _name_ for a mappable id,
     so treating `33` as a name would read every successful `chown` back as a failure, and would make
@@ -208,31 +207,31 @@ accessors in [`env.ts`](../../src/common/config/env.ts) (`env`, `requireEnv`, `i
 
 ### Runtime flags
 
-| Var                      | Default                    | Purpose                                                                         |
-| ------------------------ | -------------------------- | ------------------------------------------------------------------------------- |
-| `E2E_CELL`               | _(unset)_ → no pin         | Pins the run to one cell (below).                                               |
-| `E2E_LOAD_DOTENV`        | `true`                     | `false`/`0` in the environment skips `.env` (below).                            |
-| `E2E_RETRIES`            | `2`                        | Retries per failed scenario (0–10; below).                                      |
-| `E2E_REPORTS_KEEP`       | `20`                       | Reports a cell keeps (0–10000; below).                                          |
-| `E2E_OUTPUT`             | `auto`                     | Terminal output: `auto`, `plain` or `fancy` ([below](#terminal-output)); else fails. |
-| `CI`                     | _(unset)_                  | Non-empty enables `forbidOnly`.                                                 |
-| `PRODUCT`                | `wp-rocket`                | Product for the bare `playwright.config.ts` (below).                            |
-| `REPORT_MODE`            | _(unset)_ → self-contained | `rich` → external attachments + embedded trace viewer (serve over http).        |
-| `RUN_ID`                 | auto-stamped               | Per-run report token; pin it to share one across a batch (below).               |
-| `E2E_RUN_NAME`           | _(unset)_ → the `RUN_ID`   | **Display only**, never acted on: the run's name in the reports (below).        |
-| `E2E_REQUESTED_REF`      | _(unset)_                  | **Display only**, never acted on: the plugin ref asked for (below).             |
-| `REPORT_ROOT`            | `reports`                  | Report root (accumulates; pruned as each run ends).                             |
-| `OUTPUT_ROOT`            | `test-results`             | Ephemeral Playwright output (below).                                            |
-| `AUTH_ROOT`              | `.auth`                    | Ephemeral `storageState` root.                                                  |
-| `ARTIFACTS_ROOT`         | `.artifacts`               | Resolved plugin-zip root, **wiped & rebuilt each run** ([below](#plugin-artifacts-build--verify)). |
-| `E2E_SITE_STAGING_DIR`   | `.e2e_temp`                | Staging folder **on each site** (absolute, or relative to its WP root); a site's `transport.stagingDir` wins. |
-| `E2E_INTERNAL_STOP_FILE` | _(unset)_ → no drain       | **Internal**, set by the orchestrator: the drain's stop file (below).           |
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `E2E_CELL` | _(unset)_ → no pin | Pins the run to one cell (below). |
+| `E2E_LOAD_DOTENV` | `true` | `false`/`0` in the environment skips `.env` (below). |
+| `E2E_RETRIES` | `2` | Retries per failed scenario (0–10; below). |
+| `E2E_REPORTS_KEEP` | `20` | Reports a cell keeps (0–10000; below). |
+| `E2E_OUTPUT` | `auto` | Terminal output: `auto`, `plain` or `fancy` ([below](#terminal-output)); else fails. |
+| `CI` | _(unset)_ | Non-empty enables `forbidOnly`. |
+| `PRODUCT` | `wp-rocket` | Product for the bare `playwright.config.ts` (below). |
+| `REPORT_MODE` | _(unset)_ → self-contained | `rich` → external attachments + embedded trace viewer (serve over http). |
+| `RUN_ID` | auto-stamped | Per-run report token; pin it to share one across a batch (below). |
+| `E2E_RUN_NAME` | _(unset)_ → the `RUN_ID` | **Display only**, never acted on: the run's name in the reports (below). |
+| `E2E_REQUESTED_REF` | _(unset)_ | **Display only**, never acted on: the plugin ref asked for (below). |
+| `REPORT_ROOT` | `reports` | Report root (accumulates; pruned as each run ends). |
+| `OUTPUT_ROOT` | `test-results` | Ephemeral Playwright output (below). |
+| `AUTH_ROOT` | `.auth` | Ephemeral `storageState` root. |
+| `ARTIFACTS_ROOT` | `.artifacts` | Resolved plugin-zip root, **wiped & rebuilt each run** ([below](#plugin-artifacts-build--verify)). |
+| `E2E_SITE_STAGING_DIR` | `.e2e_temp` | Staging folder **on each site** (absolute, or relative to its WP root); a site's `transport.stagingDir` wins. |
+| `E2E_INTERNAL_STOP_FILE` | _(unset)_ → no drain | **Internal**, set by the orchestrator: the drain's stop file (below). |
 
-- **`E2E_CELL`** pins `bddgen`, the runner and its workers to one cell: the config holds it alone, so
-  `bddgen` regenerates only its specs and cells run side by side. Exact name; blank = unset. An unknown
-  name, or a `--project` selecting none of its projects, fails naming the variable. **Pass it per
-  command, never in `.env`** (it would pin every run from that folder). Ignored by the healthcheck and
-  the artifact warm, which span cells.
+- **`E2E_CELL`** pins `bddgen`, the runner and its workers to one cell, so cells run side by side
+  ([the cell pin](../architecture/execution-model.md#the-cell-pin-e2e_cell)). Exact name; blank =
+  unset. An unknown name, or a `--project` selecting none of its projects, fails naming the variable.
+  **Pass it per command, never in `.env`** (it would pin every run from that folder). Ignored by the
+  healthcheck and the artifact warm, which span cells.
 - **`E2E_LOAD_DOTENV`**: `false`/`0` **in the environment** skips `.env` in every process of the run,
   for a caller handing the run its whole environment (the orchestrator). Any value but
   `true`/`1`/blank fails naming it. Set inside `.env` it has no effect (the file is already being read)
@@ -240,10 +239,9 @@ accessors in [`env.ts`](../../src/common/config/env.ts) (`env`, `requireEnv`, `i
   runner).
 - **`E2E_RETRIES`**: every run, CI or local, scenario projects only (the auth and artifact setups never retry). `2` = three attempts; a scenario passing only on a retry is reported flaky; `0` fails fast
   while debugging. Unit tests never retry.
-- **`E2E_REPORTS_KEEP`**: each run prunes its own cell beyond the newest this many, and anything older
-  than 30 days but the newest complete report (kept up to 182 days). `0` = no cap (the age rules still
-  apply; nothing turns pruning off). Outside 0–10000 the run fails at start naming it. Also
-  `report:prune`'s default `--keep` ([retention](../architecture/execution-model.md#report-retention)).
+- **`E2E_REPORTS_KEEP`**: the cap of each run's pruning of its own cell, and `report:prune`'s default
+  `--keep` ([retention](../architecture/execution-model.md#report-retention): age rules apply too).
+  `0` = no cap, never no pruning. Outside 0–10000 the run fails at start naming it.
 - **`E2E_OUTPUT`** ([Terminal output](#terminal-output)): read by the suite and its scripts
   (healthcheck, artifact warm, fixture capture), never by the orchestrator. Case-insensitive, blank =
   `auto`; anything else fails the run as its config loads, naming the variable.
@@ -285,16 +283,16 @@ What a terminal shows is decided once per stream, from `E2E_OUTPUT` and the stan
   `LC_CTYPE`, `LANG`) without a UTF-8 codeset (`C`, `POSIX`, `en_US`, `*.ISO-8859-1`); unset is UTF-8.
 - **Width**: the terminal's columns, else `COLUMNS` (digits only, > 0), else 80; clamped 20–120.
 
-| Sink / env                    | Colour                                                  | Live                | Symbols   | Width            |
-| ----------------------------- | ------------------------------------------------------- | ------------------- | --------- | ---------------- |
-| TTY, UTF-8, no `CI`           | unless `NO_COLOR`/`NODE_DISABLE_COLORS`/`FORCE_COLOR=0` | yes                 | Unicode   | its columns      |
-| TTY, `CI`                     | as above                                                | no (`fancy`: yes)   | Unicode   | its columns      |
-| TTY, `NO_COLOR`               | no, unless `FORCE_COLOR`                                | yes                 | Unicode   | its columns      |
-| TTY, `TERM=dumb`              | no, unless `FORCE_COLOR`                                | no                  | ASCII     | its columns      |
-| TTY, `TERM` unset or empty    | no, unless `FORCE_COLOR`                                | no                  | by locale | its columns      |
-| TTY, C/POSIX/non-UTF-8 locale | as the precedence says                                  | by `TERM` and `CI`  | ASCII     | its columns      |
-| Pipe/file (`fancy` too)       | no, unless `FORCE_COLOR` (never for the orchestrator)   | no                  | by locale | `COLUMNS`, or 80 |
-| `plain`                       | no                                                      | no                  | ASCII     | as its sink      |
+| Sink / env | Colour | Live | Symbols | Width |
+| --- | --- | --- | --- | --- |
+| TTY, UTF-8, no `CI` | unless `NO_COLOR`/`NODE_DISABLE_COLORS`/`FORCE_COLOR=0` | yes | Unicode | its columns |
+| TTY, `CI` | as above | no (`fancy`: yes) | Unicode | its columns |
+| TTY, `NO_COLOR` | no, unless `FORCE_COLOR` | yes | Unicode | its columns |
+| TTY, `TERM=dumb` | no, unless `FORCE_COLOR` | no | ASCII | its columns |
+| TTY, `TERM` unset or empty | no, unless `FORCE_COLOR` | no | by locale | its columns |
+| TTY, C/POSIX/non-UTF-8 locale | as the precedence says | by `TERM` and `CI` | ASCII | its columns |
+| Pipe/file (`fancy` too) | no, unless `FORCE_COLOR` (never for the orchestrator) | no | by locale | `COLUMNS`, or 80 |
+| `plain` | no | no | ASCII | as its sink |
 
 A locale changes only the symbols, never colour or live. Per program: the suite's reporters and the
 scripts follow the table; the scripts' rules stay 72 columns. The orchestrator reads no `E2E_*` (so
@@ -311,14 +309,14 @@ Which zips a run resolves, builds (via [APVM](https://github.com/wp-media/automa
 and verifies, per **role**: `plugin` (under test) and `previous` (an older one some tests compare
 against, e.g. an update path). Model and rationale: [plugin-artifacts.md](../architecture/plugin-artifacts.md).
 
-| Var                    | Applies            | Purpose                                                                        |
-| ---------------------- | ------------------ | ------------------------------------------------------------------------------ |
-| `E2E_PLUGIN_REF`       | `plugin` (a ref)   | APVM ref to build the artifact under test (branch/tag/commit/PR/`release:*`).  |
-| `E2E_PLUGIN_ZIP`       | `plugin` (a zip)   | Path to a prebuilt zip of the artifact under test (absolute or repo-relative). |
-| `E2E_PREVIOUS_REF`     | `previous` (a ref) | APVM ref to build the previous-version artifact.                               |
-| `E2E_PREVIOUS_ZIP`     | `previous` (a zip) | Path to a prebuilt previous-version zip.                                       |
-| `E2E_PLUGIN_VERSION`   | `plugin` build     | Version to build with (policy below).                                          |
-| `E2E_PREVIOUS_VERSION` | `previous` build   | Version to build the previous-version artifact with.                           |
+| Var | Applies | Purpose |
+| --- | --- | --- |
+| `E2E_PLUGIN_REF` | `plugin` (a ref) | APVM ref to build the artifact under test (branch/tag/commit/PR/`release:*`). |
+| `E2E_PLUGIN_ZIP` | `plugin` (a zip) | Path to a prebuilt zip of the artifact under test (absolute or repo-relative). |
+| `E2E_PREVIOUS_REF` | `previous` (a ref) | APVM ref to build the previous-version artifact. |
+| `E2E_PREVIOUS_ZIP` | `previous` (a zip) | Path to a prebuilt previous-version zip. |
+| `E2E_PLUGIN_VERSION` | `plugin` build | Version to build with (policy below). |
+| `E2E_PREVIOUS_VERSION` | `previous` build | Version to build the previous-version artifact with. |
 
 Rules ([`request.ts`](../../src/common/artifacts/request.ts); all unset → per-product defaults):
 
@@ -348,25 +346,26 @@ Rules ([`request.ts`](../../src/common/artifacts/request.ts); all unset → per-
 
 ### Fleet health check (`npm run healthcheck`)
 
-| Var                            | Default | Purpose                                                                      |
-| ------------------------------ | ------- | ---------------------------------------------------------------------------- |
-| `HEALTHCHECK_CONCURRENCY`      | `4`     | Max sites checked at once within a product (1–32).                           |
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `HEALTHCHECK_CONCURRENCY` | `4` | Max sites checked at once within a product (1–32). |
 | `HEALTHCHECK_LOGIN_TIMEOUT_MS` | `30000` | Per-site UI-login settle budget in ms (1000–300000); raise for slow remotes. |
-| `HEALTHCHECK_HEADED`           | `false` | Headed (visible) browser; `npm run healthcheck:ui` sets it.                  |
+| `HEALTHCHECK_HEADED` | `false` | Headed (visible) browser; `npm run healthcheck:ui` sets it. |
 
 ### BackWPup storage credentials
 
 Read by [`backwpup.config.ts`](../../src/projects/backwpup/config/backwpup.config.ts) into the product's
-`services` (ignored by WP Rocket); a site's `overrides` block can override any. From the environment or
-`.env`; with `E2E_LOAD_DOTENV=false`, the environment only.
+`services` (WP Rocket has none), for storage scenarios not written yet (phase-6 6H): no step reads
+them, and a site's `overrides` is not merged over them yet. From the environment or `.env`; with
+`E2E_LOAD_DOTENV=false`, the environment only.
 
-| Var                                                                   | Default     |
-| --------------------------------------------------------------------- | ----------- |
-| `BWP_FTP_HOST` / `BWP_FTP_USERNAME` / `BWP_FTP_PASSWORD`              | _(blank)_   |
-| `BWP_FTP_PORT`                                                        | `21`        |
-| `BWP_FTP_SECURE`                                                      | `true`      |
-| `BWP_S3_ACCESS_KEY_ID` / `BWP_S3_SECRET_ACCESS_KEY` / `BWP_S3_BUCKET` | _(blank)_   |
-| `BWP_S3_REGION`                                                       | `us-east-1` |
+| Var | Default |
+| --- | --- |
+| `BWP_FTP_HOST` / `BWP_FTP_USERNAME` / `BWP_FTP_PASSWORD` | _(blank)_ |
+| `BWP_FTP_PORT` | `21` |
+| `BWP_FTP_SECURE` | `true` |
+| `BWP_S3_ACCESS_KEY_ID` / `BWP_S3_SECRET_ACCESS_KEY` / `BWP_S3_BUCKET` | _(blank)_ |
+| `BWP_S3_REGION` | `us-east-1` |
 
 ## Local WordPress via Docker
 
@@ -382,11 +381,17 @@ site-identity work runs against real hosts' rules without touching a cell. Its o
 (`wpme-ssh`, `docker/ssh-cells/docker-compose.yml`), apart from the `docker` sites above: `env:down`
 never removes a twin, and no port is shared.
 
-| Command | Does |
-| --- | --- |
-| `npm run env:cells:up` | Removes this checkout's overlays, makes the shared key if absent, builds both images (cached; `TWIN_SKIP_BUILD=1` skips; never from another checkout than the twins' owner), refuses ports another program holds on `127.0.0.1` or `::1`, waits until both verified their site, proves each published port from the host (an `SSH-` banner; WordPress's `blank.gif` at `localhost` and `127.0.0.1`), writes and loads the overlays (a failed load removes them) |
-| `npm run env:cells:reset -- <apache\|nginx> <variant>` | Resets one running twin to a variant and proves it (`check.sh`); refuses others, listing the variants |
-| `npm run env:cells:down [-- --force] [-- --purge-key]` | Removes this checkout's overlays, then the containers and volumes (`--force`: even another checkout's); `--purge-key` also the shared key, its marker and (if then empty) its folder. With Docker stopped, the files still go (exit 1). The images stay |
+- `npm run env:cells:up`: Removes this checkout's overlays, makes the shared key if absent, builds
+  both images (cached; `TWIN_SKIP_BUILD=1` skips; never from another checkout than the twins' owner),
+  refuses ports another program holds on `127.0.0.1` or `::1`, waits until both verified their site,
+  proves each published port from the host (an `SSH-` banner; WordPress's `blank.gif` at `localhost`
+  and `127.0.0.1`), writes and loads the overlays (a failed load removes them)
+- `npm run env:cells:reset -- <apache|nginx> <variant>`: Resets one running twin to a variant and
+  proves it (`check.sh`); refuses others, listing the variants
+- `npm run env:cells:down [-- --force] [-- --purge-key]`: Removes this checkout's overlays, then the
+  containers and volumes (`--force`: even another checkout's); `--purge-key` also the shared key, its
+  marker and (if then empty) its folder. With Docker stopped, the files still go (exit 1). The images
+  stay
 
 - **Containers** `wpme-ssh-apache` / `wpme-ssh-nginx`, published on `127.0.0.1` only: SSH
   `TWIN_APACHE_SSH_PORT` / `TWIN_NGINX_SSH_PORT` (`2210` / `2211`), site `http://localhost:<port>` on
@@ -415,15 +420,15 @@ never removes a twin, and no port is shared.
   real cell declares one). **Without a `sites.json` the overlays are all that loads, never the
   example**: every run, `@noauth` included, and the healthcheck see only the twins' cells, and their
   setup needs the twins up — so `env:cells:down` removes the overlays with the twins.
-- **Twin specs**: `*.spec.ts` gated on `E2E_SSH_TWINS=1` (skipped by `npm run test:unit`); twin cells
-  and sites through [`__fixtures__/ssh-twins.ts`](../../src/common/__fixtures__/ssh-twins.ts). A spec
-  touching a twin holds it with `withTwin(stack, …)` (a lock across workers); one needing a variant
-  resets with `resetTwin(stack, variant)` inside it and puts `legacy-777` (`RESTING_VARIANT`) back. With
-  the twins up: `E2E_SSH_TWINS=1 npx playwright test --config playwright.unit.config.ts ssh-twins`.
-  CI: [`ssh-twins.yml`](../../.github/workflows/ssh-twins.yml) (manual, or a branch push touching
-  `src/common/{wp,setup,config,auth}/`, the twin fixtures, `healthcheck.ts`, `package*.json`,
-  `playwright.unit.config.ts`, `docker/ssh-cells/`, the Chromium action or the workflow) builds both
-  images with GitHub's layer cache (written only by `develop` and manual runs), then runs the twin
-  specs and `npm run healthcheck`.
+- **Twin specs**: `*.spec.ts` gated on `E2E_SSH_TWINS=1` (skipped by `npm run test:unit`); twin
+  cells and sites through [`__fixtures__/ssh-twins.ts`](../../src/common/__fixtures__/ssh-twins.ts).
+  A spec touching a twin holds it with `withTwin(stack, …)` (a lock across workers); one needing a
+  variant resets with `resetTwin(stack, variant)` inside it and puts `legacy-777`
+  (`RESTING_VARIANT`) back. With the twins up: `E2E_SSH_TWINS=1 npx playwright test --config
+  playwright.unit.config.ts ssh-twins`. CI: [`ssh-twins.yml`](../../.github/workflows/ssh-twins.yml)
+  (manual, or a branch push touching `src/common/{wp,setup,config,auth}/`, the twin fixtures,
+  `healthcheck.ts`, `package*.json`, `.nvmrc`, `playwright.unit.config.ts`, `docker/ssh-cells/`, the
+  Chromium action or the workflow) builds both images with GitHub's layer cache (written only by
+  `develop` and manual runs), then runs the twin specs and `npm run healthcheck`.
 - What each variant models and must produce:
   [Phase 12 plan → Twin variants](../plans/phase-12-site-identity-plan.md#twin-variants-120a-and-what-each-must-produce).

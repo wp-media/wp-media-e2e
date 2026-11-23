@@ -66,18 +66,31 @@ Import `Given`, `When`, `Then`, `Before`, `After`, … from a `fixtures.ts`, **n
 (BackWPup and WP Rocket do), giving steps its page objects; `common/fixtures.ts` only for product-agnostic steps and
 hooks.
 
-| Fixture            | Scope      | What it gives you                                                                                                                                                                                                                                                       |
-| ------------------ | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `site`             | test       | The [`SiteConfig`](../../src/common/config/types.ts) bound to this worker. Throws if no pool.                                                                                                                                                                           |
-| `edition`          | test       | The cell's `Edition` (`free`/`pro`). **Throws** in an editionless cell.                                                                                                                                                                                                 |
-| `boundSite`        | worker     | The site pinned to this worker (by `parallelIndex`), or `undefined` with no pool. Underpins `site`.                                                                                                                                                                     |
-| `pluginArtifact`   | test       | `pluginArtifact(role)` → the cell's resolved zip (`"plugin"` under test, `"previous"` to compare against). `.slug` is its plugin directory (no edition branching); `.zipPath` feeds `stageAndInstallPlugin`. **Throws** for an unsupported role or when the artifacts setup did not run ([plugin-artifacts.md](../architecture/plugin-artifacts.md)). |
-| `releaseBoundSite` | worker     | Automatic: after the worker's last scenario, removes the site's staging area and closes SSH connections, best-effort ([teardown](../architecture/wordpress-automation.md#worker-teardown-wpteardownts)).                                                              |
-| `drainGate`        | test       | Automatic: once the run's stop file (`E2E_INTERNAL_STOP_FILE`) exists, skips each scenario's first attempt as `stopped` ([the drain](../architecture/execution-model.md#stopping-a-run-the-drain)).                                                                                               |
-| `context`          | (override) | The browser context, watched for the **site's own** requests that never arrived (`requestfailed` but `net::ERR_ABORTED`; a 5xx document, script or stylesheet). A failed scenario that lost any prints one `[page-loads]` warning and attaches `page-load-failures`, grouped by page, at most 50 listed, URLs as paths (query cut to `page`/`step`/`tab`/`action`, hex runs of 16+ masked). Never fails a run ([`reporting/page-loads.ts`](../../src/common/reporting/page-loads.ts)). |
-| `baseURL`          | (override) | The bound site, so relative navigations target it.                                                                                                                                                                                                                      |
-| `storageState`     | (override) | The bound site's saved login, **or** an empty session for `@noauth`.                                                                                                                                                                                                    |
-| device options     | (override) | `viewport` / `screen` / `userAgent` / `isMobile` / `hasTouch` / `deviceScaleFactor`: the `@mobile` profile, else the desktop default.                                                                                                                                              |
+- `site` (test): The [`SiteConfig`](../../src/common/config/types.ts) bound to this worker. Throws if
+  no pool.
+- `edition` (test): The cell's `Edition` (`free`/`pro`). **Throws** in an editionless cell.
+- `boundSite` (worker): The site pinned to this worker (by `parallelIndex`), or `undefined` with no
+  pool. Underpins `site`.
+- `pluginArtifact` (test): `pluginArtifact(role)` → the cell's resolved zip (`"plugin"` under test,
+  `"previous"` to compare against). `.slug` is its plugin directory (no edition branching); `.zipPath`
+  feeds `stageAndInstallPlugin`. **Throws** for an unsupported role or when the artifacts setup did
+  not run ([plugin-artifacts.md](../architecture/plugin-artifacts.md)).
+- `releaseBoundSite` (worker): Automatic: after the worker's last scenario, removes the site's staging
+  area and closes SSH connections, best-effort
+  ([teardown](../architecture/wordpress-automation.md#worker-teardown-wpteardownts)).
+- `drainGate` (test): Automatic: once the run's stop file (`E2E_INTERNAL_STOP_FILE`) exists, skips
+  each scenario's first attempt as `stopped` ([the
+  drain](../architecture/execution-model.md#stopping-a-run-the-drain)).
+- `context` (override): The browser context, watched for the **site's own** requests that never
+  arrived (`requestfailed` but `net::ERR_ABORTED`; a 5xx document, script or stylesheet). A failed
+  scenario that lost any prints one `[page-loads]` warning and attaches `page-load-failures`, grouped
+  by page, at most 50 listed, URLs as paths (query cut to `page`/`step`/`tab`/`action`, hex runs of
+  16+ masked). Never fails a run
+  ([`reporting/page-loads.ts`](../../src/common/reporting/page-loads.ts)).
+- `baseURL` (override): The bound site, so relative navigations target it.
+- `storageState` (override): The bound site's saved login, **or** an empty session for `@noauth`.
+- device options (override): `viewport` / `screen` / `userAgent` / `isMobile` / `hasTouch` /
+  `deviceScaleFactor`: the `@mobile` profile, else the desktop default.
 
 Use `site.transport` for the WordPress automation layer and `page` for the browser. Install the zip
 under test (already built and verified by the artifacts setup) with
@@ -154,16 +167,16 @@ parameter — is one message). Step text rules, each refused rather than run:
 **Placeholders** ([`support/placeholders.ts`](../../src/projects/backwpup/support/placeholders.ts)): what
 the plugin allocates or names is written in braces and read when the command runs:
 
-| Placeholder                                                    | Value                                                                                           |
-| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `{job}`                                                        | the scheduled job's id                                                                          |
-| `{oldest backup}` / `{newest backup}`                          | the archive of the scenario's first / latest backup, fixed as made                              |
-| `{oldest log}` / `{newest log}`                                | the log of the first / latest run in the backup history                                         |
-| `{path to the oldest backup}` / `{path to the newest backup}`  | that archive as a path from WP-CLI's working directory (the WP root) — how `backup-encrypt` / `backup-decrypt` take one |
-| `{private folder}`                                             | the scenario's own folder on the site, relative to WP-CLI's working directory                               |
-| `{encryption key}` / `{another encryption key}`                | two hex keys drawn for the scenario                                                             |
-| `{public key file}` / `{private key file}`                     | an RSA pair drawn for it, placed in the private folder                                          |
-| `{path from the log folder to the marker file}`                | a path out of BackWPup's log folder to the `markers` file, proved on the site to lead there      |
+| Placeholder | Value |
+| --- | --- |
+| `{job}` | the scheduled job's id |
+| `{oldest backup}` / `{newest backup}` | the archive of the scenario's first / latest backup, fixed as made |
+| `{oldest log}` / `{newest log}` | the log of the first / latest run in the backup history |
+| `{path to the oldest backup}` / `{path to the newest backup}` | that archive as a path from WP-CLI's working directory (the WP root) — how `backup-encrypt` / `backup-decrypt` take one |
+| `{private folder}` | the scenario's own folder on the site, relative to WP-CLI's working directory |
+| `{encryption key}` / `{another encryption key}` | two hex keys drawn for the scenario |
+| `{public key file}` / `{private key file}` | an RSA pair drawn for it, placed in the private folder |
+| `{path from the log folder to the marker file}` | a path out of BackWPup's log folder to the `markers` file, proved on the site to lead there |
 
 So `When I run the BackWPup command "backup-delete {oldest backup} --yes"` sends one real file name.
 Each value is read only when used and must fit one argument. Anything in braces is read as a placeholder name, so an unknown one
@@ -189,8 +202,8 @@ prompt nobody answers and exits 0 having done nothing (`Then it asks "…"` asse
 reverse too: after one refused `backup-delete`, the next deletes its archive and still exits 1 with the
 earlier error. So always pair either step with a second source (history row, log, marker, file on disk), and
 assert a refusal as the command makes it (`Then it reports the warning "…"` where it only warns). The
-cases, and which are measured live: §2.16–§2.19 of the
-[feature-porting plan](../plans/phase-6-feature-porting-plan.md).
+cases, and which are measured live: §2.7 of the
+[feature-porting plan](../plans/phase-6-feature-porting-plan.md#27-the-wp-cli-surface-and-where-exit-0-is-not-success).
 
 **A job still running when the next command arrives needs arranging.** A database backup of the cells
 takes about a second, under one WP-CLI round trip, so
@@ -256,44 +269,75 @@ object (Pro's deep link, Free's upload); the command is
 `When I run the BackWPup restore command "restore {path to the newest backup} --yes --type=…"`, through
 **`cliRestore`**. What the steps handle on a shared cell, and a new restore step must too:
 
+- The wizard (six steps: `strategiesOffered`, `restoreWith`) fails each wait at once on its own error
+  line, the decryption prompt, the login screen, or what `WizardWatch`
+  ([`pages/wizard-watch.ts`](../../src/projects/backwpup/pages/wizard-watch.ts)) saw: a stream
+  reconnecting or answered with something else, a failed `controller=job` call, an uncaught plugin
+  script error.
 - A files restore puts back the archive's `debug.log`, so the log so far is judged first by the
   `@plugin` gate's rule (`checkDebugLog`): before the command, and in the wizard again just before
   "Start" (`restoreWith`'s `beforeStart`).
 - The restore working directory must be writable by the web server: `handRestoreWorkingDirToSite`
   before driving the wizard (WP-CLI may have written there while arranging the backup).
-- `wp backwpup restore --type=file|full` replaces `wp-content` wholesale and `--type=db|full` drops and recreates the
-  database, so the command runs only through `cliRestore` (the generic step refuses it). It refuses a
-  database holding anything the backup cannot bring back and a relocated `wp-content`; copies
-  `wp-content` first (as root, into a root-only `<root>/.e2e_content_copy/`; without passwordless
-  `sudo`, root's `perl`, room and inodes for a second tree, or with a mount at or under `wp-content`
-  — or one on overlayfs that cannot be renamed — it refuses and the command does not run), runs
-  the command fenced on that copy (WP-CLI `--exec`: it starts only while the copy is still the run's),
-  puts it back exactly after the scenario — extracted beside the live site, compared with `tar -d`,
-  then swapped in by rename, so web requests writing meanwhile cannot break it — resets the
-  database's default collation (unless the fence refused the command, which then never started), and removes the scenario's own `--pre-backup` snapshot. While kept,
-  the copy's lease is renewed every minute on the host's boot-time clock (15 min each). A copy that
-  could not go back stays, its lease expired, and BackWPup runs refuse that site until it is
-  provably orphaned — used by no process, **and** holding none to put back, stamped by another boot
-  of the host, or carrying a lapsed lease or one held by the asking worker's own slot (its runner
-  invocation's random token and `parallelIndex`) — when the
-  auth setup or a worker settles it itself (`support/content-copy-leftover.ts`); or until someone
-  settles it (the message says how). An older suite's copy (no lease) waits for a reboot.
+- `wp backwpup restore --type=file|full` replaces `wp-content` wholesale and `--type=db|full` drops and
+  recreates the database, so the command runs only through `cliRestore` (the generic step refuses it).
+  - **Refused, the command never run**: a database holding what `wp db reset` destroys for good (tables
+    outside the prefix, views, routines, events, triggers); a relocated `wp-content`; one no rename
+    could swap back (a mount at or under it, or — on overlayfs, probed by an atomic exchange — a
+    lower-layer one); no passwordless `sudo`, root's `perl`, or room and inodes for a second tree; a
+    host rebooted since the copy was taken.
+  - **The copy**: before a files restore, `wp-content` is copied as root into root-only
+    `<root>/.e2e_content_copy/`; the restore runs fenced on it (WP-CLI `--exec`: it starts only while
+    that directory is still the one the run made). Once no run is in flight it goes back without
+    extracting over the live site: extracted into a root-only scratch beside it, compared (`tar -d`),
+    swapped in by rename (`perl`, retried when a request recreates `wp-content`), proved by inode,
+    marked back durably in the same root command. A put-back first waits for a restore a dropped
+    connection left running, and acts only on a copy holding its run's token, so a run that slept past
+    its lease touches nothing. A copy that cannot go back is kept, its way back spelled out.
+  - **Its lease** (`support/content-copy-lease.ts`: boot id + `/proc/uptime`, 15 min per renewal,
+    renewed every minute from the moment its directory is made; expired when the run gives up) says a
+    run may still use it.
+  - **A leftover copy**: every BackWPup worker refuses its site (`contentCopyLeftover`; the auth
+    setup tries first, before its gates) unless no process uses it (argv or working directory in it,
+    or a restore in the root) **and** it holds none to put back or is orphaned — stamped by another
+    boot (every use is stamped with the boot id just before it), or this boot's with its lease
+    lapsed or held by the asking worker's own slot (`<INVOCATION_ID>#parallelIndex`: a random token
+    per runner invocation, never `RUN_ID`, which invocations may share). It is then claimed (`mv -T`
+    to `.e2e_content_copy.recovering-<hex>`, leased as the claimer's; handed back if a check after
+    the claim refuses it), put back the same way or removed, and the run goes on; a copy that
+    reached the database too has the database defaults it saved beside it set back
+    (`support/content-copy-leftover.ts`). Otherwise someone settles it (the message says how). An
+    older suite's copy (no lease) waits for a reboot.
+  - **Afterwards** it resets the database's default collation (not once its fence refused the
+    command, which then never started) and removes the scenario's own `--pre-backup` snapshots, told
+    from other runs' by either changed marker.
 
 ## Tags
 
-| Tag              | Effect                                                                                                                                                                                                                                                                                                                                                                                               |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@noauth`        | Starts unauthenticated with an empty session (login/logout flows). The only tag that runs on placeholder sites, so CI's smoke job greps it.                                                                                                                                                                                                                                                         |
-| `@plugin` | Before: clears `debug.log`, stops work a killed run left the plugin doing, removes any existing copy, sweeps leftover database rows, then freshly installs + activates the plugin under test; a product with `settleAfterInstall` (WP Rocket) then gets one wp-admin and one front-page request with the scenario's session (a login page, i.e. `@noauth`, is warned). After: leftover work is stopped first (`ProductConfig.stopRunningWork`; WP Rocket is deactivated and its Action Scheduler runner, preload and cron work waited for), so what it logs is judged; **a PHP fatal anywhere in `debug.log` fails it**; then the plugin and the files and rows it left are removed. Needs a real site. A scenario the drain skipped gets neither hook. |
-| `@mobile`        | The mobile device profile (viewport + screen + `isMobile` + `hasTouch` + mobile UA + DPR). Untagged stays desktop.                                                                                                                                                                                                                                                                        |
-| `@smoke`         | Scaffolding/smoke scenarios; `--grep @smoke`.                                                                                                                                                                                                                                                                                                                                                       |
-| `@free` / `@pro` | Edition scoping, automatic in an edition-ful cell: a `pro` cell skips `@free` and vice versa.                                                                                                                                                                                                                                                                                                                                         |
-| `@visual`        | Visual-regression scenarios; `--grep @visual`, run in the Playwright container ([README → Visual regression](../../README.md#visual-regression)).                                                                                                                                                                                                                                                                                                                   |
-| `@slow`          | Takes minutes by nature (a real restore), so CI can split fast from slow; playwright-bdd triples its timeout (`test.slow()`).                                                                                                                                                                                                                                                                       |
+- `@noauth`: Starts unauthenticated with an empty session (login/logout flows). The only tag that runs
+  on placeholder sites, so CI's smoke job greps it.
+- `@plugin`: Before: clears `debug.log`, stops work a killed run left the plugin doing, removes any
+  existing copy, sweeps leftover database rows, then freshly installs + activates the plugin under
+  test; a product with `settleAfterInstall` (WP Rocket) then gets one wp-admin and one front-page
+  request with the scenario's session (a login page, i.e. `@noauth`, is warned). After: leftover work
+  is stopped first (WP Rocket: deactivated, its Action Scheduler runner, preload and cron work waited
+  for), so what it logs is judged; **a PHP fatal anywhere in `debug.log` fails it**; then the plugin
+  and the files and rows it left are removed. Needs a real site. A drained scenario gets neither hook.
+- `@mobile`: The mobile device profile (viewport + screen + `isMobile` + `hasTouch` + mobile UA +
+  DPR). Untagged stays desktop.
+- `@smoke`: Scaffolding/smoke scenarios; `--grep @smoke`.
+- `@free` / `@pro`: Edition scoping, automatic in an edition-ful cell: a `pro` cell skips `@free` and
+  vice versa.
+- `@visual`: Visual-regression scenarios; `--grep @visual`, run in the Playwright container ([README →
+  Visual regression](../../README.md#visual-regression)).
+- `@slow`: Takes minutes by nature (a real restore), so CI can split fast from slow; playwright-bdd
+  triples its timeout (`test.slow()`).
 
-`@plugin` and `@mobile` live in shared code: see
-[AGENTS.md → Shared scenario hooks](../../AGENTS.md#shared-scenario-hooks) and
-[Device profiles](../../AGENTS.md#device-profiles-desktop--mobile).
+`@plugin` and `@mobile` live in shared code: see [AGENTS.md → Shared scenario
+hooks](../../AGENTS.md#shared-scenario-hooks) and [Device
+profiles](../../AGENTS.md#device-profiles-desktop--mobile). The `@plugin` hooks' full order and
+verdicts:
+[wordpress-automation.md](../architecture/wordpress-automation.md#the-plugin-scenario-hooks-hookspluginhooksts).
 
 ```gherkin
 @plugin
@@ -456,12 +500,29 @@ under a given `--project`):
   `products.spec.ts`).
 - [`probeImports`](../../src/common/__fixtures__/import-probe.ts) uses that child to import files one
   after another, from a folder whose `.env` sets a sentinel, and reports what each import changed
-  (variables, process listeners, working directory, exit code, and more — see AGENTS.md), then what changed once idle — read from
-  a file, not stdout, so nothing a module prints can forge or garble it. It proves a module leaves the process as
-  it was (`products.spec.ts`, `orchestrator/import-boundary.spec.ts`).
+  ([what it compares](../architecture/execution-model.md#the-product-list)), then what changed once
+  idle — read from a file, not stdout, so nothing a module prints can forge or garble it. It proves a
+  module leaves the process as it was (`products.spec.ts`, `orchestrator/import-boundary.spec.ts`).
 - [`import-scan.ts`](../../src/common/__fixtures__/import-scan.ts) checks import boundaries: `importsIn`
   reads every module a file loads from TypeScript's syntax tree (dynamic `import()` and
   `typeof import()` included, which ESLint misses; a computed path reported as such), `createResolver`
   resolves as the repository's TypeScript does, `localClosure` walks all a module can load.
 
 Unit runs write to `<OUTPUT_ROOT>/_unit`, so they never empty a cell run's output.
+
+Reusable spec helpers live in [`src/common/__fixtures__/`](../../src/common/__fixtures__/) (look
+there before writing one; the orchestrator's in `orchestrator/__fixtures__/`): temp dirs, fake
+report trees, drain and page-loads scenarios, the live and failure blocks' synthetic products
+(`live-block/`, `failures/`), mock WordPress and a stub `wp`'s plugin-folder inspection, the
+in-place cleanup engine on local PHP (`config-edits-engine.ts` + harness), fake terminal/exit/clock
+(`terminal-fakes.ts`), a command on a real pty (`pty.ts`), a pty nobody reads (`paused-pty.ts`), a
+slowly-read child (`slow-reader.ts`), the live block's tmux driver (`live-tmux*.ts`), raw Allure
+results, a stub Allure CLI and a stop at a chosen check (`allure.ts`), the identity probe's web
+server (`probe-web-server.ts`), FIFO taps (`fifo.ts`), a `dd` with `conv=excl` where BSD's lacks it
+(`excl-dd.ts`), `.tar.gz` listing from raw headers (`tar-listing.ts`), an in-process SSH server with
+a recording fake `sudo` (`ssh-server.ts`: `denySudo`, `sudoNoise`, `refuseExec`, `dropOnExec`;
+option parsing shared in `fake-sudo.ts`), arguments that must survive every command line
+(`hostile-arguments.ts`), a shell command that dies with its spawner even on SIGKILL (`tether.ts`),
+a search of run output for a secret, zips and base64 included (`secret-scan.ts`; the canary setup in
+`secrets/`), the compatibility matrix's probes (`compat/`), and the SSH twins' gate, sites,
+variants, `resetTwin` and cross-worker lock `withTwin` (`ssh-twins.ts`, `E2E_SSH_TWINS=1`).

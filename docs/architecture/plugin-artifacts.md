@@ -1,22 +1,19 @@
 # Plugin artifacts — the zips under test
 
-Every run resolves **and verifies** the plugin zips it tests before any scenario runs
-(`src/common/artifacts/`). The operator's env-var table is in
-[configuration.md](../guides/configuration.md#plugin-artifacts-build--verify).
-
-The problem: a run unit `(product × cell)` needs one or two zips, chosen per execution — `develop` by
-default, any branch/PR/tag on demand, or a hand-built zip — with no one copying files into place and no
-run silently testing the wrong plugin or edition.
+Every run resolves **and verifies** the zips it tests before any scenario (`src/common/artifacts/`):
+one or two per run unit `(product × cell)`, chosen per execution — `develop` by default, any
+branch/PR/tag on demand, or a hand-built zip — with no one copying files into place and no run silently
+testing the wrong plugin or edition. The env vars: [configuration.md](../guides/configuration.md#plugin-artifacts-build--verify).
 
 ## Roles
 
 Each product declares up to two **roles**, a word used verbatim by the env vars, the directories and
 the fixture:
 
-| Role       | Meaning                                                     | Declared by                               |
-| ---------- | ----------------------------------------------------------- | ----------------------------------------- |
-| `plugin`   | The artifact under test. Every product has it.              | `artifacts.defaultRef.plugin` (mandatory) |
-| `previous` | An older artifact some tests compare against (update path). | `artifacts.defaultRef.previous` (opt-in)  |
+| Role | Meaning | Declared by |
+| --- | --- | --- |
+| `plugin` | The artifact under test. Every product has it. | `artifacts.defaultRef.plugin` (mandatory) |
+| `previous` | An older artifact some tests compare against (update path). | `artifacts.defaultRef.previous` (opt-in) |
 
 Declaring `defaultRef.previous` is the **single** signal a product supports the role: resolution, the
 preflight and the fixture are manifest-driven, so it enables the second artifact everywhere. WP Rocket
@@ -24,20 +21,21 @@ has it; BackWPup deliberately not yet ([Deferred obligations](#deferred-obligati
 
 ## Module map (`src/common/artifacts/`)
 
-| Module               | Responsibility                                                                                     |
-| -------------------- | -------------------------------------------------------------------------------------------------- |
-| `types.ts`           | The domain's types (roles, manifest, requests, resolution). Types only.                            |
-| `manifest.ts`        | Pure accessors over a manifest (roles, default ref, edition → variant).                            |
-| `request.ts`         | Reads the six `E2E_*` vars; **pure** `buildArtifactPlan` → one request per role.                   |
-| `apvm.ts`            | Lazy `Apvm` singleton, token diagnostics, progress → console, masked (`redactSecrets`, `text.ts`). |
-| `resolve.ts`         | Wipe → build/copy per role → hash → `resolution.json`.                                             |
-| `digest.ts`          | A zip's SHA-256 (`sha256File`, streamed) and its format check (`isSha256`).                        |
-| `pin.ts`             | **Pure**: the full commit (`fullCommit`) and the pin that rebuilds a build (`pinOf`, `requirePin`). |
-| `verify.ts`          | Static identity preflight (`adm-zip`) + aggregated report formatting.                              |
-| `consume.ts`         | Reads a role back for a test (memo → `resolution.json`), with the role guards.                     |
-| `registry.ts`        | Per-process manifest + resolution registries (the `metadata.ts` idiom).                            |
-| `warm.ts`            | Pre-warm: dedupe requests, prime APVM's cache serially, return each pinned build.                  |
-| `artifacts.setup.ts` | The `artifacts:<cell>` setup project — thin orchestration of the above.                            |
+| Module | Responsibility |
+| --- | --- |
+| `types.ts` | The domain's types (roles, manifest, requests, resolution). Types only. |
+| `manifest.ts` | Pure accessors over a manifest (roles, default ref, edition → variant). |
+| `request.ts` | Reads the six `E2E_*` vars; **pure** `buildArtifactPlan` → one request per role. |
+| `apvm.ts` | Lazy `Apvm` singleton, token diagnostics, progress → console, masked (`redactSecrets`, `text.ts`). |
+| `resolve.ts` | Wipe → build/copy per role → hash → `resolution.json`. |
+| `digest.ts` | A zip's SHA-256 (`sha256File`, streamed) and its format check (`isSha256`). |
+| `pin.ts` | **Pure**: the full commit (`fullCommit`) and the pin that rebuilds a build (`pinOf`, `requirePin`). |
+| `verify.ts` | Static identity preflight (`adm-zip`) + aggregated report formatting. |
+| `consume.ts` | Reads a role back for a test (memo → `resolution.json`), with the role guards. |
+| `registry.ts` | Per-process manifest + resolution registries (the `metadata.ts` idiom). |
+| `warm.ts` | Pre-warm: dedupe requests, prime APVM's cache serially, return each pinned build. |
+| `warm-lines.ts` | **Pure**: `artifacts:warm`'s output lines (others' text printed via `printableLines`). |
+| `artifacts.setup.ts` | The `artifacts:<cell>` setup project — thin orchestration of the above. |
 
 ## The product manifest
 
@@ -46,11 +44,11 @@ so no product ships without a build source. Authored in
 `src/projects/<product>/config/<product>.config.ts`: the APVM `project` id, per-role default refs, the
 version policy, and the edition policy (holding the identity expectations).
 
-| Product     | `plugin` default | `previous` default  | Version policy                                   | Edition → APVM variant            |
-| ----------- | ---------------- | ------------------- | ------------------------------------------------ | --------------------------------- |
-| `wp-rocket` | `develop`        | `tag:latest-stable` | `embedded` — no default; an override rewrites it | — (editionless)                   |
-| `backwpup`  | `develop`        | _none yet_          | `required` — `plugin` → `9.99.99`                | `free` → `free`, `pro` → `pro-en` |
-| `imagify`   | _(not wired)_    | _(not wired)_       | _(verify from its build definition)_             | — (expected)                      |
+| Product | `plugin` default | `previous` default | Version policy | Edition → APVM variant |
+| --- | --- | --- | --- | --- |
+| `wp-rocket` | `develop` | `tag:latest-stable` | `embedded` — no default; an override rewrites it | — (editionless) |
+| `backwpup` | `develop` | _none yet_ | `required` — `plugin` → `9.99.99` | `free` → `free`, `pro` → `pro-en` |
+| `imagify` | _(not wired)_ | _(not wired)_ | _(verify from its build definition)_ | — (expected) |
 
 - **`embedded`** — the version lives in source; nothing goes to APVM unless an operator pins one, which
   APVM then writes into the source (reported as `versionOverride`).
@@ -83,14 +81,14 @@ plain inputs.
 Precedence per role: `E2E_<ROLE>_ZIP` > `E2E_<ROLE>_REF` > the manifest default; ref and zip are
 **mutually exclusive**.
 
-| Situation                                                  | Behaviour                         |
-| ---------------------------------------------------------- | --------------------------------- |
-| A role's `_REF` and `_ZIP` both set, on a targeted cell run | **Throws** (naming both vars)     |
-| Any override on a serial (cell-less) run                   | Warn + use defaults               |
-| `_VERSION` beside that role's `_ZIP`, or a `release:*` ref | Warn + ignore                     |
-| `E2E_PREVIOUS_*` on a product with no `previous` role      | Warn + ignore                     |
-| `plugin` and `previous` resolving to the identical request | Warn (degenerate comparison)      |
-| An edition-ful product whose cell declares no edition      | Throws (a config/programming bug) |
+| Situation | Behaviour |
+| --- | --- |
+| A role's `_REF` and `_ZIP` both set, on a targeted cell run | **Throws** (naming both vars) |
+| Any override on a serial (cell-less) run | Warn + use defaults |
+| `_VERSION` beside that role's `_ZIP`, or a `release:*` ref | Warn + ignore |
+| `E2E_PREVIOUS_*` on a product with no `previous` role | Warn + ignore |
+| `plugin` and `previous` resolving to the identical request | Warn (degenerate comparison) |
+| An edition-ful product whose cell declares no edition | Throws (a config/programming bug) |
 
 Only a misconfiguration that would silently do the wrong thing throws. The rest warns: several
 products' cells can share one shell or CI environment, and a leftover variable must never abort a broad
@@ -145,9 +143,9 @@ holds one cell whatever `--project` adds, so it is always targeted.
   per-role failure is a **value**, never thrown: `previous` is still resolved and verified when
   `plugin` fails, so one report names every problem.
 
-APVM (`apvm-napi`, pinned to a `vX.Y.Z` tag in `package.json`; `cli/vX.Y.Z` before 3.3.0) ships
-prebuilt native binaries (no Rust toolchain, no build step) and is driven **only** through this Node
-library, never the `apvm` CLI: a CLI-only capability waits for a library release. BackWPup builds from
+APVM (`apvm-napi`, pinned to `#v3.3.0` in `package.json`) ships prebuilt native binaries (no Rust
+toolchain, no build step) and is driven **only** through this Node library, never the `apvm` CLI: a
+CLI-only capability waits for a library release. BackWPup builds from
 a **private** repo, so it needs a GitHub token (`GITHUB_TOKEN`, `GH_TOKEN`, or `gh auth login`),
 asserted **before** any clone; every string APVM emits is scrubbed of tokens and URL userinfo before
 reaching a console or report (`redactBuildText`: invisible format characters dropped first, so none
@@ -167,18 +165,19 @@ Per artifact, via `adm-zip` (read-only: central directory plus one entry):
 2. That directory equals the expected **slug** — one check pinning product _and_ edition.
 3. `<mainFile>` exists there and its `Plugin Name:` header **equals** the expectation (never a prefix:
    `BackWPup` cannot pass for `BackWPup Pro`), cleaned exactly as core's `_cleanup_header_comment()`
-   does, so equality never fails on a value WordPress reads correctly. It is read from the archive's **actual** top-level directory, so a wrong-edition zip still
-   reports its header: two independent witnesses.
+   does, so equality never fails on a value WordPress reads correctly. It is read from the archive's
+   **actual** top-level directory, so a wrong-edition zip still reports its header: two independent
+   witnesses.
 4. Reported, not asserted: header `Version:`, zip filename, source, full commit, SHA-256, origin. The
    header's `Version:` **becomes the artifact's `version`** — what WordPress installs and reports, and
    for a provided zip the only version there is (none is recorded on copy; a `_VERSION` is ignored
    beside it). The build's own report is the fallback for a header declaring none.
 
-| Product / edition | Top-level dir (slug) | Main file       | `Plugin Name:` |
-| ----------------- | -------------------- | --------------- | -------------- |
-| WP Rocket         | `wp-rocket/`         | `wp-rocket.php` | `WP Rocket`    |
-| BackWPup Free     | `backwpup/`          | `backwpup.php`  | `BackWPup`     |
-| BackWPup Pro      | `backwpup-pro/`      | `backwpup.php`  | `BackWPup Pro` |
+| Product / edition | Top-level dir (slug) | Main file | `Plugin Name:` |
+| --- | --- | --- | --- |
+| WP Rocket | `wp-rocket/` | `wp-rocket.php` | `WP Rocket` |
+| BackWPup Free | `backwpup/` | `backwpup.php` | `BackWPup` |
+| BackWPup Pro | `backwpup-pro/` | `backwpup.php` | `BackWPup Pro` |
 
 Ground truth: APVM's builders (`crates/core/src/build/plugins/`) and `wp-media/backwpup-pro`'s
 `gulpfile.ts`, whose `compressPackage` zips `dist/<packageName>` (so the top-level directory _is_ the
@@ -216,7 +215,7 @@ await stageAndInstallPlugin(site.transport, a.zipPath, { activate: true, slug: a
 ```
 
 It returns the role's [`ResolvedArtifact`](../../src/common/artifacts/types.ts)
-(`{ slug, zipPath, zipFilename, source, ref?, commit?, pinRef?, version?, sha256?, origin, resolvedAt }`).
+(role, slug, zip path and name, source, ref/commit/pin, version, SHA-256, origin, time).
 The resolver always sets `sha256`; the parser rejects a malformed one and tolerates its absence (a
 `resolution.json` predating it stays readable for a `--no-deps` run).
 
@@ -271,10 +270,10 @@ the version, the cached zips, the resolved ref) and its `pin` ([`pin.ts`](../../
 which an orchestrator hands the run as `E2E_<ROLE>_REF=<pin.ref>` and, when set,
 `E2E_<ROLE>_VERSION=<pin.version>`:
 
-| Build                         | `pin.ref`       | `pin.version`     | The pinned run, measured with all network denied                                       |
-| ----------------------------- | --------------- | ----------------- | -------------------------------------------------------------------------------------- |
-| Git (branch, PR, tag, commit) | `commit:<sha>`  | the version built | served from the cache; APVM's commit check against GitHub fails and is tolerated       |
-| Release download              | `release:<tag>` | — (its tag's)     | **needs network**: APVM fetches the release from GitHub's API, then copies the cached asset |
+| Build | `pin.ref` | `pin.version` | The pinned run, measured with all network denied |
+| --- | --- | --- | --- |
+| Git (branch, PR, tag, commit) | `commit:<sha>` | the version built | served from the cache; APVM's commit check against GitHub fails and is tolerated |
+| Release download | `release:<tag>` | — (its tag's) | **needs network**: APVM fetches the release from GitHub's API, then copies the cached asset |
 
 - A release is checked first: pinning it to a commit would build the source, not the released zip.
 - The version is the one **built**, never the one requested: APVM's cache is keyed by commit and

@@ -6,13 +6,14 @@ local, Docker or SSH site.
 ## Transport & exec ([`wp/exec.ts`](../../src/common/wp/exec.ts))
 
 Two modules, one API (`exec.ts` re-exports all of [`transport-exec.ts`](../../src/common/wp/transport-exec.ts)):
+
 - **`transport-exec.ts`** runs a command as its caller chooses (`ExecAs`): `execAsTransport` (the
   transport's own user), `execAsSite` (`ssh` only: the site's identity through `sudo` and the wrapper
   below), `execElevated` (root) — plus transfer, root and path resolution.
 - **`exec.ts`** adds `exec`/`wpCli`: they resolve the [site identity](#site-identity-wpsite-identityts)
-  state and run as the identity in `site`, as the transport's user in every other state — **byte for
-  byte the line sent before the identity existed** (`runAs: false`, `docker`/`local`,
-  every `fallback`; pinned in `exec.site.ssh.spec.ts`).
+  state and run as the identity in `site`, as the transport's user in every other state (`runAs: false`,
+  `docker`/`local`, every `fallback`) through `execAsTransport`, with no wrapper (over `ssh`: the plain
+  line below).
 - **Probes run as the transport's user**, never through `exec`: `stat`/`id`/`getent`/`id -u`
   (`owner-probe.ts`), `sudo -n true` (`elevationSupport`), docker `pwd`, `readlink -f`
   (`resolveOnTarget`), the identity's own probes, the web probe's write/sweep/removal, and the
@@ -20,80 +21,73 @@ Two modules, one API (`exec.ts` re-exports all of [`transport-exec.ts`](../../sr
   load `exec.ts`/`ownership.ts` at run time (`layering.spec.ts`), so no probe recurses through the
   resolver it feeds.
 
-A [`Transport`](../../src/common/config/types.ts), discriminated on `mode`:
-
-| Mode     | Fields                                                                                   | Dispatch                                        |
-| -------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| `local`  | `rootDir`, `stagingDir?`, `elevate?`, `fileOwner?`                                       | `execa`, run in `rootDir`.                      |
-| `docker` | `container`, `rootDir?`, `stagingDir?`, `elevate?`, `fileOwner?`                         | `docker exec <container> …` (see `dockerArgv`). |
-| `ssh`    | `host`, `port?`, `username`, `privateKeyPath`, `rootDir`, `stagingDir?`, `elevate?`, `fileOwner?`, `runAs?`, `umask?` | `node-ssh` `execCommand`, one line we build (below). |
-
-Every loaded transport also carries `wpUser`, resolved-only (the site's `username`; a sites file may
-not set it), which `wpCli` passes as `--user` ([below](#wordpress-runs-as-the-sites-administrator---user-wpwp-userts)). `runAs`/`umask` decide the
-[site identity](#site-identity-wpsite-identityts) state `exec`/`wpCli` follow
-([configuration.md](../guides/configuration.md#transport-modes-transport)).
+A [`Transport`](../../src/common/config/types.ts) is discriminated on `mode` (fields:
+[configuration.md](../guides/configuration.md#transport-modes-transport)): `local` runs `execa` in
+`rootDir`; `docker` runs `docker exec <container> …` (`dockerArgv`); `ssh` runs one line we build
+(below) through `node-ssh`'s `execCommand`. Every loaded transport also carries `wpUser`,
+resolved-only (the site's `username`; a sites file may not set it), which `wpCli` passes as `--user`
+([below](#wordpress-runs-as-the-sites-administrator---user-wpwp-userts)); `runAs`/`umask` decide the
+identity state.
 
 - A command is a **file + args array**, never a shell string: no interpolation, no injection.
 - `exec(transport, file, args, opts?)` returns [`ExecResult`](../../src/common/wp/transport-exec.ts)
   `{ exitCode, stdout, stderr }`; callers branch on `exitCode`. Failing to _run_ at all (missing
   binary, unreachable host) **throws** — an environment fault, not an outcome. So does a command
-  **killed by a signal**, on every transport: `CommandKilledError` (`.signal`), so the few callers with
-  another route to their answer tell it from a broken transport — `readDebugLog`/`clearDebugLog` fall
-  back to the direct read/removal, the pre-flight reports a crashed `wp` as WP-CLI's or WordPress's
-  failure (one reading the admin locale is a failed boot the cell's plugin may be blamed for). Over `ssh` this is new with `exec` in the line (below): a login shell that did not `exec`
-  the last command (dash, or bash before 5.1) turned the signal into exit `128 + n`. A channel closing with neither status nor signal (connection disposed)
-  is a plain `Error`.
-  `wpCli(transport, args, opts?)` runs `wp …` and is the primary entry point; it adds `--user`
-  ([below](#wordpress-runs-as-the-sites-administrator---user-wpwp-userts)), `exec(…, "wp", …)` never does.
-- **An exec error names the program and the reason, never the arguments.** The argv carries a
-  `--key=` value and every value a `wp eval` snippet embeds (`phpLiteral`'s base64 is an encoding, not
-  a cipher). execa's messages quote the command line, so on `local`/`docker` the message is built from
-  `isMaxBuffer` (checked first: a child still running past the cap is ended by execa's `SIGTERM`, or
-  by `SIGPIPE` while still writing), `signal` and `code`
-  (`ENOENT` means a missing program or a missing working directory alike). The label is the program
-  only (`wp`, `sudo rm`, `docker exec <container> wp`; `docker cp`'s adds the suite's own paths); a
-  command run as the site's identity is named by its program, never `sudo`. No
-  execa error rides along as a `cause`; a call execa refuses outright is re-raised naming the program.
-  A program or argument no program can be handed unchanged is refused before any transport sees it,
-  by position: a NUL byte (execa's refusal quotes it; ssh2's is a bare `Unable to exec`) or a lone
-  UTF-16 surrogate (no UTF-8 form; sent as `U+FFFD` otherwise). `ssh` messages never quoted anything. Pinned in `exec.spec.ts` and
-  `exec.ssh.spec.ts` with a secret planted in each argv. Not covered: a running command's argv is
-  visible in the host's process list.
+  **killed by a signal**, on every transport: `CommandKilledError` (`.signal`), so callers with another
+  route to their answer tell it from a broken transport — `readDebugLog`/`clearDebugLog` fall back to
+  the direct read/removal; the pre-flight reports a crashed `wp` as WP-CLI's or WordPress's failure
+  (one reading the admin locale as a failed boot the cell's plugin may be blamed for).
+  Over `ssh` this relies on the `exec` in the line (below): a login shell that did not `exec` the last
+  command (dash, bash before 5.1) turns the signal into exit `128 + n`. A channel closing with neither
+  status nor signal (connection disposed) is a plain `Error`.
+- `wpCli(transport, args, opts?)` runs `wp …` and is the primary entry point; it adds `--user`,
+  `exec(…, "wp", …)` never does.
+- **An exec error names the program and the reason, never the arguments.** The argv carries `--key=`
+  values and every value a `wp eval` snippet embeds (`phpLiteral`'s base64 is an encoding, not a
+  cipher). execa's messages quote the command line, so on `local`/`docker` the message is built from
+  `isMaxBuffer` (checked first: a child past the cap is ended by execa's `SIGTERM`, or by `SIGPIPE`
+  while still writing), `signal` and `code` (`ENOENT`: a missing program or a missing working
+  directory alike). The label is the program only (`wp`, `sudo rm`, `docker exec <container> wp`;
+  `docker cp`'s adds the suite's own paths); a command run as the site's identity is named by its
+  program, never `sudo`. No execa error rides along as a `cause`; a call execa refuses outright is
+  re-raised naming the program. A program or argument no program can be handed unchanged is refused
+  before any transport sees it (an argument named by position): a NUL byte (execa's refusal would
+  quote it; ssh2's is a bare `Unable to exec`) or a lone UTF-16 surrogate (no UTF-8 form; sent as
+  `U+FFFD` otherwise). Pinned in `exec.spec.ts`/`exec.ssh.spec.ts` with a secret planted in each
+  argv. Not covered: a running command's argv is visible in the host's process list.
 - **Every command runs in the WordPress root** (`rootDir` for `local`/`ssh`, the container `WORKDIR`
   for `docker`), so a relative path means the same everywhere. A `cwd` that does not exist runs
   nothing: `local` throws, `ssh` returns the failed `cd` (non-zero exit, the shell's reason).
 - **The `ssh` command line** (`sshCommandLine`): `cd -- <cwd> && exec <file> <args…>`, every word —
   the program too — single-quoted by `shellQuote` (`'` → `'\''`, `""` → `''`), sent with no node-ssh
-  `cwd` (its `cd` reads a leading `~/` as the home; before 14.0, `cd <cwd> ;` ran the command in the
-  login's home when `cwd` was missing). node-ssh's own `exec` was dropped: its `shell-escape` lost an
-  empty argument. Refused before connecting:
-  a `cwd` that is not absolute (`cd -- ''` is a no-op; a relative one resolves from the login's home or
-  `CDPATH`) and a program starting with `-` (dash's `exec` takes no `--`). `exec` runs **an executable
-  on the login's `PATH`** — a `wp` shell function or alias (`~/.bashrc`) is never run. The SSH user's
-  **login shell must be POSIX** (sh/dash/bash/zsh): sshd hands it the line, and csh/tcsh read `!`
-  inside single quotes. Pinned in
-  `exec.ssh.spec.ts` against an in-process ssh2 server that **runs** each line with `sh -c`, with a
+  `cwd` (its `cd` reads a leading `~/` as the home). node-ssh's own `exec` is not used: its
+  `shell-escape` lost an empty argument. Refused before connecting: a `cwd` that is not absolute
+  (`cd -- ''` is a no-op; a relative one resolves from the login's home or `CDPATH`) and a program
+  starting with `-` (dash's `exec` takes no `--`). `exec` runs **an executable on the login's
+  `PATH`** — a `wp` shell function or alias (`~/.bashrc`) is never run. The SSH user's **login shell
+  must be POSIX** (sh/dash/bash/zsh): sshd hands it the line, and csh/tcsh read `!` inside single
+  quotes. Tested against an in-process ssh2 server that **runs** each line with `sh -c`, with a
   recording fake `sudo` on its `PATH` and real SFTP writes
   ([`__fixtures__/ssh-server.ts`](../../src/common/__fixtures__/ssh-server.ts); ssh2's server caps a
-  line at ~34 KB, OpenSSH took 64 KiB). Output is collected as buffers and decoded once
-  (`decodeOutput`), with node-ssh keeping no strings of its own (`noBuffer`; up to 13.x they decoded
-  each chunk alone, turning a multi-byte character split between two chunks into `U+FFFD`, measured
-  with 200,000 × `é`; 14.0's can be refused as too large to return, `ERR_OUTPUT_TOO_LARGE`).
+  line at ~34 KB; OpenSSH took a 64 KiB one, measured). Output is collected as buffers and decoded once
+  (`decodeOutput`), node-ssh keeping no strings of its own (`noBuffer`): decoding each chunk alone
+  turns a multi-byte character split between chunks into `U+FFFD` (measured with 200,000 × `é`), and
+  node-ssh 14 can refuse its own strings as too large (`ERR_OUTPUT_TOO_LARGE`).
 - **The `site` state's line** (`sshWrappedLine`): `exec 'sudo' '-n' '-u' <u> '-g' <g> '--' '/bin/sh'
-  '-c' <RUN_AS_SCRIPT> 'e2e-run-as' <umask> <cwd> <file> <args…>` (`runAsArgv`; numeric halves `#id`),
+'-c' <RUN_AS_SCRIPT> 'e2e-run-as' <umask> <cwd> <file> <args…>` (`runAsArgv`; numeric halves `#id`),
   **no outer `cd`**: the wrapper sets the umask and enters `cwd` as the identity, so the SSH user needs
   no access to it; a `cwd` it cannot enter runs nothing (`e2e-run-as: …: cd: can't cd …`). `wp` and
-  every program must be on sudo's `secure_path`. A refusal by
-  `sudo` itself after the state was verified (exit 1, stderr wholly sudo's: `sudo:` lines and/or its
-  explicit deny `Sorry, user … is not allowed to execute '<command>' …`, unprefixed and spanning as
-  many lines as the arguments hold newlines; a rule changed mid-run; `isSudoRefusal`) is no exit of
-  the program's — `wp plugin is-installed` would read "absent" — so `exec` throws
-  `SiteIdentityRefusedError` (program and site only: sudo's deny quotes the arguments) and forgets
-  the resolution it ran on (`forgetSiteIdentity(transport, promise)`: never a newer one, so commands
-  in flight cause one re-resolution, not one each), which the next command resolves again.
+  every program must be on sudo's `secure_path`. A refusal by `sudo` itself after the state was
+  verified (`isSudoRefusal`: exit 1, stderr wholly sudo's — `sudo:` lines and/or its explicit deny
+  `Sorry, user … is not allowed to execute '<command>' …`, unprefixed and spanning as many lines as the
+  arguments hold newlines; e.g. a rule changed mid-run) is no exit of the program's — `wp plugin
+is-installed` would read "absent" — so `exec` throws `SiteIdentityRefusedError` (program and site
+  only: sudo's deny quotes the arguments) and forgets the resolution it ran on
+  (`forgetSiteIdentity(transport, promise)`: never a newer one, so commands in flight cause one
+  re-resolution, not one each).
 - **sudo's unresolvable-host line** ([`wp/sudo-noise.ts`](../../src/common/wp/sudo-noise.ts)): a host
   that cannot resolve its own name makes sudo 1.9.15 print `sudo: unable to resolve host <name>[:
-  <reason>]` on every call (stdout and exit unchanged). The suite never asks for the host to be fixed:
+<reason>]` on every call (stdout and exit unchanged). The suite never asks for the host to be fixed:
   `withoutSudoNoise` removes it wherever sudo carries a command — the `site` line and root over
   `ssh`/`local` (`docker` uses `-u 0:0`) — else `parseCliNotices`, `describeExit`, `evalPhp` errors,
   `stderr || stdout` messages and the content copy's benign-warning check would read it as the
@@ -103,35 +97,34 @@ not set it), which `wpCli` passes as `--user` ([below](#wordpress-runs-as-the-si
   the pre-flight's lookup timing only detects it. The line costs ~4 ms when the resolver answers or
   refuses; a resolver that never answers makes **every** sudo call wait (glibc defaults: ~20 s,
   measured), which the pre-flight times and reports from 1 s, never failing the site
-  (`setup/sudo-lookup.ts`): only where the run sends commands through sudo (`sudoLookupAs`: `site` →
-  `env LC_ALL=C sudo -n -u <user> -g <group> true`, never root; else elevation `available` → `env
-  LC_ALL=C sudo -n true`; never `docker`, nor a site with neither), plus `env LC_ALL=C true` for the
-  round trip only when the line shows. `LC_ALL=C`: a translated line would not be recognised.
+  (`setup/sudo-lookup.ts`): only where the run sends commands through sudo (`sudoLookupAs`: `sudo -n
+  -u <user> -g <group> true` in `site`, never root; else `sudo -n true` when elevation is `available`;
+  never `docker`, nor a site with neither), plus a sudo-free `true` for the round trip only when the
+  line shows, all under `LC_ALL=C` (a translated line would not be recognised).
 - **No command is handed input.** node-ssh ends the channel's input, `local` passes
   `stdin: "ignore"`, `docker exec` without `-i` attaches none. A `[y/n]` prompt (WP-CLI's `confirm()`,
   shown by a destructive command without `--yes`) therefore reads end-of-input and declines at once,
-  exit 0, nothing done — measured on all three modes. With execa's default open stdin the prompt
-  waited forever on `local` (pinned in `exec.spec.ts`), as on `docker` with `-i`.
+  exit 0, nothing done — measured on all three modes. With execa's default open stdin (or `docker exec
+-i`) the prompt waits forever.
 - SSH connections are cached per endpoint; `disposeConnections()` closes them (worker teardown).
-- **A broken SSH link fails the command on it, never the run.** Each connection is probed every 10 s
-  (`SSH_KEEPALIVE`), so a silent link is dropped within ~40 s (unprobed, a command was still waiting
-  after 70 s). node-ssh (14.0) listens for connection errors for the connection's whole life and
-  rejects the running command with the error; the transport records each error too, so that command
-  fails with `the connection to <host> was lost (<reason>) while "<program>" was running` and the next
-  one reconnects. A connection that closes cleanly after the request went out but before the server
-  confirmed the start (ssh2 then says `Unable to exec`, as for a refusal, though the command may have
-  run) fails with `the connection to <host> closed before "<program>" was confirmed started (<reason>),
-  so whether it ran is unknown`. Any other rejection — the server refusing the request on a live
-  connection, or a channel still opening when it closed (`No response from server`: nothing sent) —
-  fails as `"<program>" could not run over SSH on <host>: <code or message>`. Each names the program
-  alone, no argument, no `cause`, and none is retried; a channel closed with neither status nor signal
-  (the connection disposed under it) says so. A connection that died **between** commands costs a reconnect, not a failure: once
-  ssh2 half-closes its socket (after a protocol error or a server's disconnect) it refuses every request with `Not connected` before sending anything,
-  while node-ssh still reports it connected (minutes on a failing link; met twice by a runner waking
-  from sleep). That refusal alone is retried once on a new connection, for commands and uploads
-  (`withConnection`); nothing sent is ever re-sent. An unopenable connection fails as
-  `could not connect to <user>@<host>: <reason>`. Pinned against ssh2's in-process server in
-  `exec.ssh.spec.ts`.
+- **A broken SSH link fails the command on it, never the run.** Each connection is probed every 10 s,
+  3 misses allowed (`SSH_KEEPALIVE`), so a silent link is dropped within ~40 s (unprobed, a command was
+  still waiting after 70 s). node-ssh 14 listens for connection errors for the connection's whole life
+  and rejects the running command; the transport records each error too, so that command fails with
+  `the connection to <host> was lost (<reason>) while "<program>" was running` and the next one
+  reconnects. A connection closing cleanly after the request went out but before the server confirmed
+  the start (ssh2 then says `Unable to exec`, as for a refusal, though the command may have run) fails
+  with `… closed before "<program>" was confirmed started (<reason>), so whether it ran is unknown`.
+  Any other rejection — the server refusing on a live connection, or a channel still opening when it
+  closed (`No response from server`: nothing sent) — fails as
+  `"<program>" could not run over SSH on <host>: <code or message>`. Each names the program alone, no
+  argument, no `cause`; none is retried.
+  A connection that died **between** commands costs a reconnect, not a failure: once ssh2 half-closes
+  its socket (protocol error, server disconnect) it refuses every request with `Not connected` before
+  sending anything, while node-ssh still reports it connected (minutes on a failing link; met by a
+  runner waking from sleep). That refusal alone is retried once on a new connection, for commands and
+  uploads (`withConnection`); nothing sent is ever re-sent. An unopenable connection fails as
+  `could not connect to <user>@<host>: <reason>`.
 
 ### WordPress runs as the site's administrator: `--user` ([`wp/wp-user.ts`](../../src/common/wp/wp-user.ts))
 
@@ -173,18 +166,17 @@ passes its own).
 ### Elevated housekeeping
 
 Outside the `site` state some cleanup cannot be done as the transport's user: a plugin writes as the
-**web-server** user, and
-a directory only that user can write (BackWPup's restore area: `0755 www-data`, from Monolog's `mkdir`
-under the default umask) cannot be emptied by anyone else. An unprivileged `rm -rf` exits 1 and the
-site keeps a database dump from every scenario.
+**web-server** user, and a directory only that user can write (BackWPup's restore area: `0755
+www-data`, from Monolog's `mkdir` under the default umask) cannot be emptied by anyone else — an
+unprivileged `rm -rf` exits 1 and the site keeps a database dump from every scenario.
 
 `execElevated(transport, file, args, opts?)` runs a command with privileges;
 `elevationSupport(transport)` answers `available` / `unavailable` / `disabled` first.
 
-| Mode           | How                                                                                         |
-| -------------- | ------------------------------------------------------------------------------------------- |
-| `local`, `ssh` | `sudo -n -- <file> <args…>` (`sudoArgv`).                                                   |
-| `docker`       | `docker exec -u 0:0 …` — the `wordpress:cli` image ships no `sudo`; the daemon is root.     |
+| Mode | How |
+| --- | --- |
+| `local`, `ssh` | `sudo -n -- <file> <args…>` (`sudoArgv`). |
+| `docker` | `docker exec -u 0:0 …` — the `wordpress:cli` image ships no `sudo`; the daemon is root. |
 
 Limits:
 
@@ -195,29 +187,29 @@ Limits:
   unwritable by the web server. `wpCli` cannot request elevation, so the rule is structural. (Running
   as the site's identity is the web server's own user, not elevation.) Root's line is the same in
   every identity state: `cd -- <cwd> && exec 'sudo' '-n' '--' …`, as the transport's user.
-- **Never on a path a scenario asserts against**: it cannot make a product pass, only removes what the product left, after the
-  verdict.
+- **Never on a path a scenario asserts against**: it cannot make a product pass, only removes what
+  the product left, after the verdict.
 - **Second, never first**: callers try as themselves and escalate only what failed, so a
-  correctly-permissioned host never runs a privileged command, not even the probe. Two exceptions. Ownership normalisation elevates `chmod` and `chown` directly (only the owner or root may `chown`,
-  and the owner is by then known not to be us), yet decides before probing and skips both when the
-  transport user already owns the install or the site is in the `site` identity state ([File ownership](#file-ownership-wpownershipts)). BackWPup's guard around `wp backwpup restore` (`support/content-copy.ts`) copies `wp-content` and
-  puts it back as root from the start (only root reads every file and restores every owner), refusing
-  to run the command where it cannot; so does settling an orphaned copy
-  (`support/content-copy-leftover.ts`). Root acts on the copy only inside its directory, once proved
-  root's, not a link and — for the run that made it — still holding its token (`IN_COPY_SCRIPT`). It
-  never extracts over the live `wp-content` (a web request writing into it fails that, `Directory not
-  empty`): it extracts into a root-only scratch beside it, compares, and swaps by rename
-  (`support/content-copy-scripts.ts`: `PUT_BACK_SCRIPT`, `SWAP_PERL`; `MOUNT_CHECK_PERL` refuses a
-  mount at or under `wp-content`, which the swap would move or the removal of the scratch empty, and
-  probes overlayfs by an atomic exchange — a copy whose directory still holds the probe's, however
-  the probe ended, is kept, never removed: it may hold the site's tree, and the message says how to
-  exchange it back; scratch removals keep to one filesystem); a lease on the
-  host's boot-time clock (`support/content-copy-lease.ts`)
-  and a fence on the restore (`support/content-copy-fence.ts`) let a same-boot leftover be settled.
+  correctly-permissioned host never runs a privileged command, not even the probe. Two exceptions:
+  - Ownership normalisation elevates `chmod` and `chown` directly (only the owner or root may
+    `chown`, and the owner is by then known not to be us), yet decides before probing and skips both
+    when the transport user already owns the install or the site is in the `site` state
+    ([File ownership](#file-ownership-wpownershipts)).
+  - BackWPup's guard around `wp backwpup restore` (`support/content-copy.ts`; the flow:
+    [authoring-tests.md](../guides/authoring-tests.md#backwpups-fixtures)) copies `wp-content` and
+    puts it back as root from the start (only root reads every file and restores every owner),
+    refusing to run the command where it cannot; so does settling an orphaned copy
+    (`support/content-copy-leftover.ts`). Root acts on the copy only inside its directory, once proved
+    root's, not a link and — for the run that made it — still holding its token (`IN_COPY_SCRIPT`). It
+    never extracts over the live `wp-content` (a web request writing into it fails that, `Directory
+    not empty`) but swaps by rename (`support/content-copy-scripts.ts`); `MOUNT_CHECK_PERL` refuses a
+    mount at or under `wp-content` (the swap would move it, the scratch's removal empty it); a copy
+    whose directory still holds the overlayfs probe's, however the probe ended, is kept, never removed
+    (it may hold the site's tree). Scratch removals keep to one filesystem.
 - **In the `site` state "as themselves" is the web server's identity**, which owns what the suite and
   the plugin write: ownership, residue removal, data directories and `debug.log` run no root command
   there unless the identity is refused (a survivor another user left), then only for that
-  (`housekeeping.ssh-twins.spec.ts` asserts zero `USER=root` lines in the twins' sudo log). A data
+  (`housekeeping.ssh-twins.spec.ts`: zero `USER=root` lines in the twins' sudo log). A data
   directory root had to create (with any parent it made) is handed back to the identity by a root
   `chown -h -- <uid>:<gid>`; what was missing is read as root first, so no existing parent changes owner.
 - **Never interactive**: `sudo -n` fails instead of waiting for a password; `--` stops sudo parsing
@@ -236,33 +228,30 @@ The module also owns **file transfer** (same dispatch, same cached SSH connectio
 
 ## Playwright ≥ 1.64 is a floor, not a preference
 
-**Do not downgrade below 1.64** (`package.json` asks for the version tested, ^1.65.1). Two releases
-set it:
+**Do not downgrade below 1.64** (`package.json` asks for the version tested, ^1.65.1):
 
 - **1.64** added the `screen` option fixture, which the `@mobile` profile overrides: on 1.63 a test
   file overriding it does not load (`Fixture "screen" references itself, but does not have a base
   implementation`).
-- **1.62** re-enabled Chromium's `RenderDocument` (below).
+- **1.62** re-enabled Chromium's **`RenderDocument`**, which 1.61 had disabled as a temporary fix for
+  its own CI (microsoft/playwright#37715, tracked by #37714; Chromium fixed the defect in 147+).
 
-On 1.61 an ordinary wp-admin save (post/redirect/get) could leave the tab **permanently unable to
-produce frames**: `requestAnimationFrame` dropped to 0 and stayed there across navigations and
-reloads; only a new tab was clean. Primitives needing a frame broke while DOM reads kept working, so
-it looked like a locator problem:
+On 1.61 (`RenderDocument` disabled) an ordinary wp-admin save (post/redirect/get) could leave the
+tab **permanently unable to produce frames**: `requestAnimationFrame` dropped to 0 and stayed there
+across navigations and reloads; only a new tab was clean. Primitives needing a frame broke while DOM
+reads kept working, so it looked like a locator problem:
 
-| Primitive                                  | Needs a frame                                          | On a wedged tab                    |
-| ------------------------------------------ | ------------------------------------------------------ | ---------------------------------- |
-| `click()` (actionability's `stable` step)  | yes — an unbounded `rAF` loop with no internal timeout | never dispatches; burns the budget |
-| `toBeInViewport()`                         | yes — `IntersectionObserver` + an `rAF` nudge          | never answers                      |
-| `page.screenshot()`, video                 | yes                                                    | hangs / records nothing            |
-| `toBeVisible()`, text, counts, `evaluate`  | no — synchronous layout reads                          | answer instantly                   |
+| Primitive | Needs a frame | On a wedged tab |
+| --- | --- | --- |
+| `click()` (actionability's `stable` step) | yes — an unbounded `rAF` loop with no internal timeout | never dispatches; burns the budget |
+| `toBeInViewport()` | yes — `IntersectionObserver` + an `rAF` nudge | never answers |
+| `page.screenshot()`, video | yes | hangs / records nothing |
+| `toBeVisible()`, text, counts, `evaluate` | no — synchronous layout reads | answer instantly |
 
-Cause: Chromium's **`RenderDocument`**, which Playwright 1.61 disabled as a temporary fix for its own
-CI (microsoft/playwright#37715, tracked by #37714). Chromium fixed the defect in **147+** and
-Playwright re-enabled it in **1.62** (Puppeteer too). Verified on a real cell: on 1.61 the chain
-wedges at the submit and screenshots time out; on 1.62.1 it holds ~61 frames/0.5 s and screenshots
-take ~35 ms. No launch flag involved. The trigger is not fully characterised: it reproduces on a real
-site, but a synthetic POST → 302 → GET (with latency, composited, fixed-position or large documents)
-and `wp-login.php`'s own redirect never wedged. The floor removes the cause regardless.
+Measured on a real cell: on 1.61 the chain wedges at the submit and screenshots time out; on 1.62.1 it
+holds ~61 frames/0.5 s and screenshots take ~35 ms; no launch flag involved. The trigger is not fully
+characterised (a synthetic POST → 302 → GET, with latency, compositing, fixed-position or large
+documents, and `wp-login.php`'s own redirect never wedged); the floor removes the cause regardless.
 
 ## Site staging & file transfer ([`wp/staging.ts`](../../src/common/wp/staging.ts))
 
@@ -272,20 +261,18 @@ shares the runner's filesystem. One directory per site holds such files, by **ca
 ```text
 <WP root>/.e2e_temp/            ← on the SITE, not in the repo
 ├── plugins/<name>.zip          → wp plugin install
-├── imports/<name>.xml          → wp import        (future)
 └── <category>/<name>           → any artifact a test needs on the target
 ```
 
-It sits at the WordPress root (already every transport's working directory) and is generic:
-`plugins/` is just the first category.
+It sits at the WordPress root, already every transport's working directory.
 
-| Function                                                  | Purpose                                                                                                                         |
-| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Function | Purpose |
+| --- | --- |
 | `stageArtifact(transport, localPath, { category, as?, inboxRoot? })` | `mkdir -p` the category, copy the file in (in `site`: [through an inbox](#staging-in-the-site-state-wpsite-stagingts)), return its **absolute target path**. |
-| `stageAndInstallPlugin(transport, localZip, opts?)`       | Stage into `plugins` → `installPlugin`, then **restore the plugin's ownership** when `opts.slug` is given ([File ownership](#file-ownership-wpownershipts)). |
-| `siteStagingDir(transport)`                               | The site's absolute staging directory.                                                                                          |
-| `cleanSiteStaging(transport, ...path)`                    | `rm -rf` the whole area, or one category or entry in it; the whole area in `site` also sweeps the login's hour-old inboxes.      |
-| `stagingPath(root, ...segments)`                          | Pure POSIX path builder; validates each segment.                                                                                |
+| `stageAndInstallPlugin(transport, localZip, opts?)` | Stage into `plugins` → `installPlugin`, then **restore the plugin's ownership** when `opts.slug` is given ([File ownership](#file-ownership-wpownershipts)). |
+| `siteStagingDir(transport)` | The site's absolute staging directory. |
+| `cleanSiteStaging(transport, ...path)` | `rm -rf` the whole area, or one category or entry in it; the whole area in `site` also sweeps the login's hour-old inboxes. |
+| `stagingPath(root, ...segments)` | Pure POSIX path builder; validates each segment. |
 
 ```ts
 const artifact = pluginArtifact("plugin");
@@ -314,15 +301,13 @@ const zip = await stageAndInstallPlugin(site.transport, artifact.zipPath, {
   (`assertResolvedInsideRoot`); an absolute root must not itself be a link and the target must resolve
   inside it. Checked just before the `rm` (a link swapped in between is not seen).
 - **Concurrency**: one worker per site per invocation, so no two workers share a staging area. Runs on
-  one host can still meet in a shared _absolute_ staging root — tracked in the
-  [orchestrator plan](../plans/orchestrator-plan.md) (Phase 0A.3).
+  one host can still meet in a shared _absolute_ staging root (the
+  [orchestrator plan](../plans/orchestrator-plan.md)'s 0A.3).
 - **Exposure**: on our cells the WP root is the docroot, so `.e2e_temp/…` is served — measured on both
   nginx cells: a file there gets 200, one inside a folder only the transport's user may enter 404,
-  directories 403 (not listed). For anything sensitive use such a folder (as BackWPup's private folder
-  does outside the `site` state; in `site` the web server is that user, so it lives in `/tmp`) or stage
-  outside the docroot (the Location override). Wiped in teardown. `staleDirSweepScript(prefix)`
-  (`wp/site-staging.ts`) removes, as whoever runs it, its own first-level `<prefix>*` directories past
-  an age: the inbox sweep and the private folder's.
+  directories 403 (not listed). For anything sensitive use such a folder (BackWPup's private folder
+  outside the `site` state; in `site` the web server is that user, so it lives in `/tmp`) or stage
+  outside the docroot (the location override). Wiped in teardown.
 
 ### Staging in the `site` state ([`wp/site-staging.ts`](../../src/common/wp/site-staging.ts))
 
@@ -346,14 +331,14 @@ group). Every other state, and `docker`/`local`, stage exactly as above. In `sit
 6. in `finally`, once the inbox exists, `rm -rf --` it as the login; a failure warns, never replaces
    the step's error.
 
-`sweepStaleInboxes` (run by `cleanSiteStaging` of the whole area, in `site` only): as the login,
-`find -H /tmp -mindepth 1 -maxdepth 1 -type d -name 'e2e-inbox-*' -user "$(id -u)" -mmin +60 -exec
-rm -rf -- {} +` — `-H` follows the root itself when it is a link (macOS's `/tmp`), links below it
-never; younger inboxes (another run's) kept. `inboxRoot` (default `/tmp`) is a seam for the executing
-ssh server's spec. **Shared absolute root** (`E2E_SITE_STAGING_DIR` applies to every site): sites of
-different identities or states fail on a category another made — a `site` site with the refusal
-above, a fallback site's upload naming the shared root — and never delete it; give each site its own
-`transport.stagingDir`.
+`sweepStaleInboxes` (run by `cleanSiteStaging` of the whole area, in `site` only) removes, as the
+login, its own first-level `e2e-inbox-*` directories in `/tmp` older than 60 min
+(`staleDirSweepScript`, also the private folder's sweep: links below never followed, the root itself
+followed when one — macOS's `/tmp`); younger inboxes (another run's) stay. `inboxRoot` (default
+`/tmp`) is a seam for the executing ssh server's spec. **Shared absolute root**
+(`E2E_SITE_STAGING_DIR` applies to every site): sites of different identities or states fail on a
+category another made — a `site` site with the refusal above, a fallback site's upload naming the
+shared root — and never delete it; give each site its own `transport.stagingDir`.
 
 ## Plugin lifecycle ([`wp/plugin.ts`](../../src/common/wp/plugin.ts))
 
@@ -400,10 +385,10 @@ deactivates first.
 
 Two removal intents, with opposite semantics:
 
-| Function                              | Intent                           | Already absent                    |
-| ------------------------------------- | -------------------------------- | --------------------------------- |
-| `ensurePluginAbsent(transport, slug)` | **Cleanup** (Before/After hooks) | Success (no-op).                  |
-| `uninstallPlugin(transport, slug)`    | **Removal under test**           | Throws `PluginNotInstalledError`. |
+| Function | Intent | Already absent |
+| --- | --- | --- |
+| `ensurePluginAbsent(transport, slug)` | **Cleanup** (Before/After hooks) | Success (no-op). |
+| `uninstallPlugin(transport, slug)` | **Removal under test** | Throws `PluginNotInstalledError`. |
 
 `wp plugin uninstall` exits non-zero for both "not found" and a real failure, so its exit code is not
 trusted. **"Absent" means nothing at the plugin's path**, never "WordPress lists no plugin there" (all
@@ -421,17 +406,26 @@ trusted. **"Absent" means nothing at the plugin's path**, never "WordPress lists
 - `uninstallPlugin` **judges**: anything left at the path throws `PluginUninstallFailedError` naming
   it, left for the cleanup after it; an unlisted plugin throws `PluginNotInstalledError`, naming what
   is at the path, if anything.
+- `ensurePluginAbsent` ends with `flushObjectCache` ([`wp/cache.ts`](../../src/common/wp/cache.ts),
+  `wp cache flush`), even when nothing was there: a plugin clearing its options with raw SQL (BackWPup's
+  `uninstall.php`) never tells a persistent object cache, which would serve the deleted rows to the
+  next install, and a killed run leaves the same state. Our cells run no persistent cache (then it is
+  a no-op answering `flushed`); best-effort: a refusal warns, never fails.
 
 Also: `isPluginInstalled` / `isPluginActive` (WordPress's view), `ensurePluginDeactivated`
-(idempotent, above), `pluginBreaksBoot` (the fatal — or the signal, a crash counting as a failed boot — WordPress
-dies on with the plugin loaded, when it boots with `--skip-plugins=<slug>`; asked only after a failure, since that boot logs the fatal), `activatePlugin`, and `installPlugin(transport, source, opts?)` — a slug, a zip path
-**on the site**, or a URL ([`InstallPluginOptions`](../../src/common/wp/plugin.ts)
-`{ activate?, force? }`); a runner zip goes through `stageAndInstallPlugin`. "Destination folder
-already exists" becomes `PluginDestinationExistsError`, saying whether WordPress lists a plugin in the
-folder. WordPress takes only a folder for one in the way, so a file or a dangling link at the path
-fails as `Warning: Could not create directory. "<path>/"`, exit 1 (measured), which becomes
-`PluginDestinationBlockedError` naming what is there — only when the path is the plugin's own and
-something is at it (an unwritable plugins folder fails the same way with nothing there). The asserted wp-admin flow lives in [`PluginsPage`](../../src/common/pages/plugins.page.ts)
+(idempotent, above), `pluginBreaksBoot` (the fatal — or the signal: a crash counts as a failed boot —
+WordPress dies on with the plugin loaded, when it boots with `--skip-plugins=<slug>`; asked only after
+a failure, since that boot logs the fatal), `activatePlugin`, and `installPlugin(transport, source,
+opts?)` — a slug, a zip path **on the site**, or a URL
+([`InstallPluginOptions`](../../src/common/wp/plugin.ts) `{ activate?, force? }`); a runner zip goes
+through `stageAndInstallPlugin`. "Destination folder already exists" becomes
+`PluginDestinationExistsError`, saying whether WordPress lists a plugin in the folder. WordPress takes
+only a folder for one in the way, so a file or a dangling link at the path fails as `Warning: Could not
+create directory. "<path>/"`, exit 1 (measured), which becomes `PluginDestinationBlockedError` naming
+what is there — only when the path is the plugin's own and something is at it (an unwritable plugins
+folder fails the same way with nothing there).
+
+The asserted wp-admin flow lives in [`PluginsPage`](../../src/common/pages/plugins.page.ts)
 ([authoring-tests.md](../guides/authoring-tests.md)); its `delete` reads WordPress's `delete-plugin`
 answer — `success: false` fails `PluginDeletionFailedError` quoting its `errorMessage`, a non-JSON
 answer (a killed request's gateway page) fails naming its status.
@@ -443,7 +437,7 @@ removal stopped part-way — the QA servers restart PHP-FPM and reboot several t
 part of `<WP_PLUGIN_DIR>/<slug>`, which part following directory order. Both shapes were reproduced
 on the QA servers by SIGTERM-ing core's `delete_plugins()`:
 
-| Shape | Seen on | WordPress | Blocked before this module |
+| Shape | Seen on | WordPress | Left unhealed, blocks |
 | --- | --- | --- | --- |
 | Main file gone | nginx (`backwpup.php` 1st in directory order) | Lists nothing; `delete` says "already deleted" | Every install: "Destination folder already exists" |
 | Main file kept, `vendor` half gone | apache (`backwpup.php` 15th) | Lists it; `uninstall.php` dies on a missing `require_once` | Every uninstall |
@@ -470,14 +464,109 @@ on the QA servers by SIGTERM-ing core's `delete_plugins()`:
   logging in; the healthcheck reports it and changes nothing
   ([`setup/cell-plugin.ts`](../../src/common/setup/cell-plugin.ts)).
 
+## The `@plugin` scenario hooks ([`hooks/plugin.hooks.ts`](../../src/common/hooks/plugin.hooks.ts))
+
+The hooks file only binds to the BDD runtime; the policy is
+[`hooks/plugin-lifecycle.ts`](../../src/common/hooks/plugin-lifecycle.ts), unit-tested without it.
+**Every product's `steps` globs must include `src/common/hooks/**/*.hooks.ts`**: that glob is the
+only importer, so without it the lifecycle is silently absent. A product hands its policy in through
+`ProductConfig`, registered per process by the config factory
+([registries](execution-model.md#credential-handling-the-in-memory-pool-registry)). A drained
+scenario gets neither hook. The edition is never named: the slug is `pluginArtifact("plugin").slug`.
+
+**Before**, in order:
+
+1. Clear `debug.log`.
+2. Stop work the plugin still runs (a killed run's job: `ProductConfig.stopRunningWork`). Having to
+   stop is reported; it fails only if the work won't stop. A stop that fails on a copy WordPress boots
+   only without (`pluginBreaksBoot`) is reported: such a copy runs nothing. A stop that had to act
+   clears `debug.log` again: what that work logged is the earlier run's.
+3. Remove any existing copy (`ensurePluginAbsent`: a fresh install, database footprint included), its
+   deactivation recovered and what is left at its path healed
+   ([Plugin lifecycle](#plugin-lifecycle-wpplugints), [Plugin folders](#plugin-folders-wordpress-cannot-see-wpplugin-dirts)):
+   a forced or unloaded deactivation is a warning plus a `forced-deactivation` attachment, a removal
+   by path one plus a `leftover-plugin-files` attachment; after a failed uninstall `debug.log` is
+   cleared again (that fatal is an earlier run's).
+4. Record the files the plugin edits in place (`ProductConfig.configEdits`,
+   [In-place cleanup](#in-place-cleanup-wpconfig-editsts)), after putting back what a killed run's
+   record says. A failure ends the install; a record folder that is not the identity's own is warned
+   and the scenario runs unrecorded.
+5. Sweep the leftover database footprint (`ProductConfig.siteDbResidue`,
+   [footprint](#left-over-plugin-footprint-wpdb-residuets)), keyed off what is on the site, never off
+   whether the plugin is installed: activation's `add_role()` keeps a leftover role as it is, and a
+   job's leftover event schedules the next install's job of that id.
+6. Write what the product needs before activation (`ProductConfig.prepareActivation`: WP Rocket's
+   dummy-licence must-use plugin, `support/licence.ts`, declared as residue; a `mu-plugins` folder it
+   had to create stays, empty, after the teardown). A failure ends the install; `wp-config.php` is
+   never edited.
+7. Note which install outputs exist (`ProductConfig.installOutputs`).
+8. Stage and install the cell's artifact with `--activate`, its files handed to the site's ownership,
+   then **re-assert the active state**, never inferred from the exit code.
+9. Hand over each install output the install created ([Install
+   outputs](#install-outputs-wpinstall-outputsts)).
+10. Create the declared data directories (`siteResidue`'s plain paths — `{ path, prepare: false }` is
+    only removed — and `resolveSiteDataDirs` for names the plugin picks at runtime, e.g. BackWPup's
+    `uploads/backwpup-restore-<20 hex>`), opened `0777` in **every** state (outside `site` WP-CLI and
+    the web server may be two users, and so are a `site` scenario opting back to the SSH user and the
+    web server) and handed to the site's ownership.
+11. For a product with `settleAfterInstall: "admin-request"` (WP Rocket), a **settling request**
+    ([`hooks/settle-request.ts`](../../src/common/hooks/settle-request.ts)): `GET /wp-admin/` with the
+    scenario's session (a request context from `storageState`, no browser), its final URL checked to
+    be wp-admin (`wp-login.php` → a warning naming `@noauth` or an expired login), then one `GET /`;
+    30 s each; a failure is a warning plus a `settle-request` attachment, never a failure. What the
+    plugin writes only on a web request (WP Rocket's config file, Apache `.htaccess` block) is then
+    there before the first step, written by the web server. It starts work that outlives it (Action
+    Scheduler's async runner, preload); the settle does not wait for it.
+
+To reinstall part-way, a step calls `replacePluginUnderTest` (no log reset, so the teardown judges the
+whole log) with `declaredResidue`, plus a client opener when its product settles (and
+`SETTLE_ALLOWANCE_MS` on its budget); without one the settle is skipped, warned.
+
+**After** — six duties, each always run, independently (the last only after a removal); the log
+verdict wins and other failures are logged:
+
+1. Stop running work, first: a BackWPup job, or WP Rocket's runner and preload, runs in a web request,
+   would outlive the uninstall and logs until it ends. Having to stop is reported; work that _won't_
+   stop is a failure.
+2. Scan `debug.log` with the product's preset: a **PHP fatal fails the scenario**
+   (`DebugLogFatalError`, log attached); warnings and notices are logged.
+3. Remove the plugin as in the Before. A failed uninstall still **fails the scenario**
+   (`PluginUninstallBrokenError`), so does a deactivation only the unloaded last resort took
+   (`PluginDeactivationBrokenError`); the product's force taking is only reported.
+4. Sweep its database footprint.
+5. Clear the files it left (an uninstall keeps its data, and per-scenario reinstalls would fill the
+   disk). What neither the site's commands nor root (no elevation, `elevate: false`) could remove is
+   reported, not failed ([Left-over plugin data](#left-over-plugin-data-wpresiduets)).
+6. Once the plugin is removed, put back the files it edited in place — only what its own declared
+   edits explain, byte for byte; anything else is warned (`config-edits`), never touched; root
+   finishes what the run's commands cannot write ([In-place
+   cleanup](#in-place-cleanup-wpconfig-editsts)).
+
+**Timeouts** are extended **additively** for both hooks (remote WP-CLI + SFTP is slow), each plus
+`LEFT_WORK_ALLOWANCE_MS` (100 s; every `stopRunningWork` must fit it) for stopping work
+(`BEFORE_HOOK_TIMEOUT_MS`, `AFTER_HOOK_TIMEOUT_MS`), the Before also plus `SETTLE_ALLOWANCE_MS` (70 s:
+two 30 s requests plus the client's opening and disposal).
+
+**WP Rocket's `stopRunningWork`**
+([`support/background-work.ts`](../../src/projects/wp-rocket/support/background-work.ts)), run before
+each removal: deactivate WP Rocket so no new request loads it (forced when a plain deactivation leaves
+it active, at most three WP-CLI calls, said even on a quiet site; the force: [Plugin
+lifecycle](#plugin-lifecycle-wpplugints)), then wait until none of its own (`rocket*` groups) claims or
+`in-progress` actions, no `doing_cron` or process lock is live, and Action Scheduler has been quiet
+12 s (the shared runner lock counts only while WP Rocket is on the site). A claim or action older than
+the 65 s wait is stale (a request killed outright): warned, never waited for.
+
 ## Error types ([`wp/errors.ts`](../../src/common/wp/errors.ts))
 
 Distinct classes so steps and reports tell failure modes apart:
 
 - `PluginNotInstalledError` — an expected plugin is not listed; names what is at its path, if anything.
-- `PluginActivationFailedError` / `PluginDeactivationFailedError` — a UI or WP-CLI action failed.
+- `PluginActivationFailedError` / `PluginDeactivationFailedError` — a UI or WP-CLI action failed
+  (activation judged by re-reading the state, so it also catches a zip unpacking under another slug).
 - `PluginUninstallBrokenError` — the plugin's own uninstall failed and cleanup removed it by path; the
   `@plugin` teardown fails the scenario with it.
+- `PluginDeactivationBrokenError` — not even the product's force deactivated it, so cleanup took it off
+  `active_plugins` unloaded; the `@plugin` teardown fails the scenario with it (a warning before one).
 - `PluginUninstallFailedError` — something still at the path after `wp plugin uninstall`, named.
 - `PluginDeletionFailedError` — the admin-UI Delete failed: WordPress refused, gave no answer, or still
   lists the plugin.
@@ -485,9 +574,14 @@ Distinct classes so steps and reports tell failure modes apart:
   advice for the site's elevation state.
 - `PluginDestinationExistsError` — an install met a folder at the plugin's path.
 - `PluginDestinationBlockedError` — an install met a file or a dangling link at the plugin's path.
+- `SiteResidueRemovalFailedError` / `SiteDbResidueRemovalFailedError` — declared files / database
+  footprint still there after cleanup, every survivor named
+  ([below](#left-over-plugin-data-wpresiduets)).
 - `DebugLogFatalError` — PHP wrote a fatal to `debug.log` during a scenario; carries every fatal and
   quotes the first few, so the reporter alone diagnoses it.
 - `CommandKilledError` — the exec layer's: a command ended by a signal (`.signal`), no exit code.
+- `SiteIdentityRefusedError` — `sudo` refused a command after the identity was verified
+  ([Transport & exec](#transport--exec-wpexects)).
 
 ## Debug-log scanning ([`wp/log.ts`](../../src/common/wp/log.ts))
 
@@ -502,24 +596,24 @@ Reads and categorises `wp-content/debug.log` to catch PHP errors a UI assertion 
 - **`wp eval` exits 0 even when its PHP failed** (a denied write to the web server's `debug.log` is
   only a warning), so each snippet reports its own outcome: the clear prints a marked JSON verdict
   (`parseClearVerdict`: `emptied`/`created`/`removed`/`kept`, whether the identity owns what is left,
-  its path), and a read that cannot open an existing log exits non-zero instead of returning `""`. A log that never
-  clears would make one scenario's fatal fail every later one; a read quietly returning `""` would disable the fatal gate.
+  its path), and a read that cannot open an existing log exits non-zero instead of returning `""`. A
+  log that never clears would make one scenario's fatal fail every later one; a read quietly returning
+  `""` would disable the fatal gate.
 - **Clearing leaves a log the web server can append to.** Removing it is not enough: the next PHP
   process to write makes it again under its own owner and umask, and WP-CLI's PHP 8.5 logs
   deprecations on every call, so a fallback state got `ubuntu:ubuntu 644` and PHP-FPM's fatals were
-  lost (measured on the nginx twin, `legacy-777`: BackWPup's `restore_dir` stream hung, three restore
-  scenarios failed). So `CLEAR_DEBUG_LOG` empties a regular file the identity may write **in place**
-  (owner and mode kept), else unlinks it (write on the directory only) and makes an empty one with
-  `O_EXCL`; a link is replaced, never written through. `keepLogWritable` then keeps a log the identity
-  owns in `site` (it is the web server's), and elsewhere only once `normalizeOwnership` answers
-  `normalized` (a root grant + `chown`); any other outcome removes it, as before — `unnecessary`
+  lost (measured on the nginx twin, `legacy-777`: BackWPup's `restore_dir` stream hung, three
+  restore scenarios failed). So `CLEAR_DEBUG_LOG` empties a regular file the identity may write **in
+  place** (owner and mode kept), else unlinks it (write on the directory only) and makes an empty
+  one with `O_EXCL`; a link is replaced, never written through. `keepLogWritable` then keeps a log
+  the identity owns in `site` (it is the web server's), and elsewhere only once `normalizeOwnership`
+  answers `normalized` (a root grant + `chown`); any other outcome removes it — `unnecessary`
   outside `site` (WP-CLI's user owns the install, the web server may be another user), `disabled`,
-  no elevation, a failure, a log outside the root.
-  Another user's log is never handed over. The direct fallback (no WordPress) only removes, escalating
-  when the directory refuses; if the log survives both routes, `clearDebugLog` throws.
+  no elevation, a failure, a log outside the root. Another user's log is never handed over. The
+  direct fallback (no WordPress) only removes, escalating when the directory refuses; if the log
+  survives both routes, `clearDebugLog` throws.
 - The direct read and removal try as the site's commands first and escalate to
-  [root](#elevated-housekeeping) only when refused. In the `site` identity state the web server owns
-  the log and its directory, so the root fallbacks are kept but not needed unless the identity is refused.
+  [root](#elevated-housekeeping) only when refused (in `site`, only when the identity is).
 
 API: `clearDebugLog(transport)` (in a `Before` hook), `readDebugLog(transport)` (`""` if absent),
 `scanDebugLog(transport, opts?)` → [`DebugLogScan`](../../src/common/wp/log.ts)
@@ -529,12 +623,12 @@ only lines matching these (a plugin's path); `raw` is always the whole log.
 
 Presets in `src/projects/<product>/support/debug-log.ts`: `*_LOG_OPTIONS` scans every source;
 `*_OWN_LOG_OPTIONS` only that plugin (BackWPup matches Free and Pro paths; only the installed
-edition's appears). Their one `ignore`: WP Rocket's harmless table-creation race on its own tables
-(`WP_ROCKET_TABLE_CREATE_RACE`: `Table '<prefix>wpr_…' already exists for query CREATE TABLE`).
+edition's appears). The only `ignore` so far is WP Rocket's harmless table-creation race on its own
+tables (`WP_ROCKET_TABLE_CREATE_RACE`: `Table '<prefix>wpr_…' already exists for query CREATE TABLE`).
 
 **Most scenarios need none of this**: a product declares its preset as `ProductConfig.debugLog` and
 the `@plugin` hooks clear the log before a scenario and fail it on a fatal, log attached (see
-[AGENTS.md → Shared scenario hooks](../../AGENTS.md#shared-scenario-hooks)). Call `scanDebugLog` only
+[The `@plugin` scenario hooks](#the-plugin-scenario-hooks-hookspluginhooksts)). Call `scanDebugLog` only
 when a step asserts on the log:
 
 ```ts
@@ -558,9 +652,9 @@ expect(scan.warnings).toEqual([]);
 ## Left-over plugin data ([`wp/residue.ts`](../../src/common/wp/residue.ts))
 
 An uninstall removes a plugin's code and (via `uninstall.php`) its database footprint, but not the
-files it wrote — the user's data. A suite reinstalling per scenario leaks them. BackWPup's uninstall
-touches no files and each install writes under a new random directory: **6.8 GB across 28
-directories** on the QA cell before this existed.
+files it wrote — the user's data. A suite reinstalling per scenario leaks them: BackWPup's uninstall
+touches no files and each install writes under a new random directory (**6.8 GB across 28
+directories** on the QA cell, measured).
 
 - A product declares them as `ProductConfig.siteResidue` (paths relative to the WP root); the `@plugin`
   teardown clears them after every tagged scenario, reading the per-process registry (no product
@@ -579,8 +673,8 @@ directories** on the QA cell before this existed.
   and the elevation that could not clear them) for the plugin folders above; the caller checks
   containment first.
 - **Cost does not grow with what it finds.** Each command is a round-trip (~0.8 s over SSH);
-  one-at-a-time removal (~6 commands each) once took the teardown past its 120 s budget on a site with
-  28. So the root is resolved once (`assertAllResolvedInsideRoot`), a family is checked once via its
+  one-at-a-time removal (~6 commands each) took the teardown past its budget on a site with 28. So the
+  root is resolved once (`assertAllResolvedInsideRoot`), a family is checked once via its
   parent (its members are listed directories, never links, so inside the root exactly when the parent
   is), each pass removes everything in one `rm -rf` (chunked at 200 paths) and re-reads with one
   listing per family plus one `sh` check per path: gone only once nothing is there (a dangling link
@@ -609,28 +703,31 @@ directories** on the QA cell before this existed.
   the docroot (in `site` too: a scenario opting back to the SSH user writes there as well), then
   hands it to the site's ownership with `normalizeOwnership` (`unnecessary` in `site`: the identity
   created it, and what a root `mkdir` made is handed back to the identity first,
-  `handBackWhatRootMakes`). The mode is a floor that holds where ownership cannot be fixed; the correction adds the owner
-  and, where it has anything to do, is **recursive**, reaching a subtree the mode cannot (one an earlier scenario wrote as the web
-  server, or the plugin's activation just created via WP-CLI). Where the transport user already owns
-  the install (`docker`) it is `unnecessary` and only the mode applies; it is best-effort anyway, so a host refusing it still gets prepared directories. Preparation escalates when the site's commands are refused, so it runs the same root-plausibility guard as removal, and refuses a path
-  that is a symlink wherever it leads (`chmod` follows it: a data directory linked at the root once
-  opened the root `0777`) — else a top-level `rootDir` would get world-writable root-owned directories
-  at `/` that teardown then refuses to remove.
+  `handBackWhatRootMakes`). The mode is a floor that holds where ownership cannot be fixed; the
+  correction adds the owner and, where it has anything to do, is **recursive**, reaching a subtree the
+  mode cannot (one an earlier scenario wrote as the web server, or the plugin's activation just created
+  via WP-CLI). Where the transport user already owns the install (`docker`) it is `unnecessary` and
+  only the mode applies; it is best-effort anyway, so a host refusing it still gets prepared
+  directories. Preparation escalates when the site's commands are refused, so it runs the same
+  root-plausibility guard as removal, and refuses a path that is a symlink wherever it leads (`chmod`
+  follows it: a data directory linked at the root once opened the root `0777`) — else a top-level
+  `rootDir` would get world-writable root-owned directories at `/` that teardown then refuses to
+  remove.
   **Why**: outside the `site` state WP-CLI (`ubuntu` over SSH) and the web server (`www-data` under
-  PHP-FPM) differ, and the plugin creates these directories under whichever umask it runs with, so the first
-  writer locks the other out. Observed on the QA cell: `uploads/backwpup-restore` created
-  `drwxrwxr-x ubuntu:ubuntu` by WP-CLI at 15:38:49, the next admin request dead at 15:38:50 on
-  `Folder "…/backwpup-restore" is not writable` (`BackWPup_File::check_folder`). It stayed hidden while removal was failing, because a copy the web server made months earlier never went away. `0777` is what the plugin asks itself
-  (`mkdir($dir, 0777, true)`, narrowed only by the umask) and what `wp_mkdir_p` produces (inheriting
-  `wp-content/uploads`, already `0777` on these cells).
+  PHP-FPM) differ, and the plugin creates these directories under whichever umask it runs with, so the
+  first writer locks the other out. Observed on the QA cell: `uploads/backwpup-restore` created
+  `drwxrwxr-x ubuntu:ubuntu` by WP-CLI, the next admin request dead a second later on `Folder
+"…/backwpup-restore" is not writable` (`BackWPup_File::check_folder`). `0777` is what the plugin asks
+  itself (`mkdir($dir, 0777, true)`, narrowed only by the umask) and what `wp_mkdir_p` produces
+  (inheriting `wp-content/uploads`, already `0777` on these cells).
 - `prepareResolvedDataDirs(transport, resolved, declared)` prepares the same way the directories a
   product resolves after each install (`ProductConfig.resolveSiteDataDirs`) — names only the installed
   plugin knows. Each must be covered by a declaration (`isDeclaredResidue`), or it would never be
-  removed: refused before anything is created. The resolver is asked before any directory is prepared, since asking boots
-  WordPress over WP-CLI as the site's commands run (the transport's user outside `site`). BackWPup's restore working directory is resolved this
-  way: since `214ad9d` it is `uploads/backwpup-restore-<20 hex>`, and a WP-CLI backup listing creates
-  it `0775` as the transport's user, after which every admin page listing backups died with HTTP 500 on
-  develop (measured).
+  removed: refused before anything is created. The resolver is asked before any directory is
+  prepared, since asking boots WordPress over WP-CLI as the site's commands run (the transport's user
+  outside `site`). BackWPup's restore working directory is resolved this way:
+  `uploads/backwpup-restore-<20 hex>`, which a WP-CLI backup listing creates `0775` as the transport's
+  user, after which every admin page listing backups died with HTTP 500 (measured).
 
 **Best-effort against permissions, strict about everything else.** A survivor means privileges did
 not help either: the site cannot escalate (no passwordless `sudo`, or `elevate: false`) or something
@@ -672,13 +769,14 @@ never off `is-installed`.
   11 administrator capabilities. Roles go whole (`remove_role`); a declared capability is taken from
   every other role holding it (`WP_Role::remove_cap`), read from the `<prefix>user_roles` row, not a
   cache. A site whose roles live in code (`$wp_user_roles`) or whose row is unreadable is refused.
-- **Fragments match anywhere in a name**, since a plugin's transients are options whose names do not begin with its prefix
-  (`backwpup_<jobid>_gdrive` is stored as `_site_transient_backwpup_<jobid>_gdrive`, observed). Matched
-  literally (`%`, `_` escaped with `esc_like`). A fragment under three characters is refused: it would
-  sweep the site.
+- **Fragments match anywhere in a name**, since a plugin's transients are options whose names do not
+  begin with its prefix (`backwpup_<jobid>_gdrive` is stored as
+  `_site_transient_backwpup_<jobid>_gdrive`, observed). Matched literally (`%`, `_` escaped with
+  `esc_like`). A fragment under three characters is refused: it would sweep the site.
 - **Ordering is the guarantee**: both callers sweep right after `ensurePluginAbsent`, which throws if
-  anything survives at the plugin's path. Measured: sweeping with the plugin active deletes the rows, and the next request
-  re-creates all 26 options and the table on `init` (a plugin reschedules its events the same way).
+  anything survives at the plugin's path. Measured: sweeping with the plugin active deletes the rows,
+  and the next request re-creates all 26 options and the table on `init` (a plugin reschedules its
+  events the same way).
 - Rows go through **`delete_option`**, not `DELETE`, so WordPress invalidates its caches (no flush
   needed); tables are dropped `IF EXISTS`. Removal is **verified by re-reading** in a second process:
   `DROP` reports success for a table it never touched, and `delete_option` returns false both for
@@ -692,10 +790,11 @@ never off `is-installed`.
   WordPress's tables at declaration time; `PROTECTED_ROLES` / `PROTECTED_CAPABILITIES` (core's
   `populate_roles()` set) / `PROTECTED_CRON_HOOKS` (every hook WordPress 7.1.3 schedules, plus the
   older `wp_https_detection`) refuse a core role, capability or hook, and every role, capability and
-  hook must be lowercase `[a-z0-9_-]` and carry one of the `optionsContaining` fragments (keeps out another plugin's); `PROTECTED_OPTIONS` is checked against what the query
-  actually **matched** (only the site knows what a fragment reaches) and refuses the **whole** sweep
-  before deleting anything if it reached `siteurl`, `active_plugins`, `cron`, the prefixed
-  `user_roles` or the rest of that list — the same bet `PROTECTED_SITE_PATHS` makes for a privileged `rm -rf`.
+  hook must be lowercase `[a-z0-9_-]` and carry one of the `optionsContaining` fragments (keeps out
+  another plugin's); `PROTECTED_OPTIONS` is checked against what the query actually **matched** (only
+  the site knows what a fragment reaches) and refuses the **whole** sweep before deleting anything if
+  it reached `siteurl`, `active_plugins`, `cron`, the prefixed `user_roles` or the rest of that list —
+  the same bet `PROTECTED_SITE_PATHS` makes for a privileged `rm -rf`.
 - **Never elevated** (WP-CLI and SQL only). Verified on both cells: sweeping a clean site leaves
   options, tables, user meta, roles, capabilities and cron byte-identical and runs no privileged
   command.
@@ -719,20 +818,20 @@ file's, both `www-data`, so it picks `direct` and then fails with a plain permis
 **In the `site` identity state none of this applies**: commands run as the web server's user and group
 under the site's umask, so what the suite writes is already the web server's. `planOwnership` answers
 `unnecessary` before comparing anything (`target`: the identity's ownership; `site`: the install's
-owner when readable, and the declared `fileOwner`) and no privileged command runs. `transport.fileOwner` then counts only as `false`
-(`disabled`) or when malformed (`bad-owner`); a declared owner is neither resolved nor enforced (the
-pre-flight's "File owner override" line says so when it names someone else, and "File ownership"
-names the identity as the writer, plus the install's owner when that differs). Every other state keeps
-the handover below.
+owner when readable, and the declared `fileOwner`) and no privileged command runs.
+`transport.fileOwner` then counts only as `false` (`disabled`) or when malformed (`bad-owner`); a
+declared owner is neither resolved nor enforced (the pre-flight's "File owner override" line says so
+when it names someone else, and "File ownership" names the identity as the writer, plus the install's
+owner when that differs). Every other state keeps the handover below.
 
 **The owner is detected, never assumed**: `stat -c '%U:%G:%u:%g'` on `wp-content` (else the WP root).
 It is not always the web server — a docroot deployed over SFTP belongs to the deployment account, the
 web server only sharing the group. Measured:
 
-| Cell   | Web/PHP process user | Docroot owner                |
-| ------ | -------------------- | ---------------------------- |
-| nginx  | `www-data`           | `www-data:www-data`          |
-| apache | `www-data`           | **`sftp_backwpup:www-data`** |
+| Cell | Web/PHP process user | Docroot owner |
+| --- | --- | --- |
+| nginx | `www-data` | `www-data:www-data` |
+| apache | `www-data` | **`sftp_backwpup:www-data`** |
 
 Probing the web-server process would say `www-data` on both — wrong on the second. Override per site
 with `transport.fileOwner` ([configuration.md](../guides/configuration.md#transport-modes-transport)).
@@ -746,28 +845,20 @@ with `transport.fileOwner` ([configuration.md](../guides/configuration.md#transp
 2. **Does nothing** when the transport's user already owns the install with the same uid _and_ gid —
    the `docker` case (wp-cli containers run as `33:33`, like the `wordpress` ones) — before any
    privilege probe.
-3. Otherwise grants the mode **first**, then chowns (`local`/`ssh` shown; `docker` uses
-   `docker exec -u 0:0`):
-
-   ```
-   sudo -n -- sh -c '[ -h "$2" ] && exit 90; exec chmod -R -- "$1" "$2"' e2e-ownership-grant <mode> <abs>
-   sudo -n -- chown -Rh -- <user>:<group> <abs>
-   ```
-
-   The grant (`GRANT_SCRIPT`) refuses a symbolic link at `<abs>` itself (exit 90: warned, `failed`,
-   no chown), since `chmod` follows an operand link — see [Symlinks](#symlinks).
-
-   Chowning first would leave the tree owned by the site's user with no grant yet — locking the
-   transport user out of `wp plugin uninstall`. Granting first means a failed chown leaves the tree as
-   it was.
+3. Otherwise, as root (`sudo -n --`; `docker exec -u 0:0`), grants the mode **first** —
+   `GRANT_SCRIPT`'s `chmod -R`, refusing a symbolic link at the path itself (exit 90: warned,
+   `failed`, no chown), since `chmod` follows an operand link ([Symlinks](#symlinks)) — then
+   `chown -Rh --`. Chowning first would leave the tree owned by the site's user with no grant yet,
+   locking the transport user out of `wp plugin uninstall`; granting first means a failed chown leaves
+   the tree as it was.
 4. **Verifies** by re-reading ownership, never from `chown`'s exit code.
 
 The grant keeps both users working:
 
-| The transport user is…                   | Grant                                           |
-| ---------------------------------------- | ----------------------------------------------- |
-| the target owner, or in the target group | `ug+rwX`                                        |
-| neither                                  | `ug+rwX,o+rwX` — world-writable, and it says so |
+| The transport user is… | Grant |
+| --- | --- |
+| the target owner, or in the target group | `ug+rwX` |
+| neither | `ug+rwX,o+rwX` — world-writable, and it says so |
 
 `ug+rwX` always, because after the chown owner and group are the docroot's pair, and where those are
 two accounts the **group is the web server's only access**. `o+rwX` only when the transport user is
@@ -777,74 +868,82 @@ tightened, and use `X` so directories become traversable without making PHP file
 
 ### Symlinks
 
-The guards in [`wp/paths.ts`](../../src/common/wp/paths.ts) are **lexical**. Whether a link is followed differs per command — measured on GNU coreutils 9.4 (Ubuntu, kernel 6.8) and BusyBox 1.37:
+The guards in [`wp/paths.ts`](../../src/common/wp/paths.ts) are **lexical**. Whether a link is
+followed differs per command — measured on GNU coreutils 9.4 (Ubuntu, kernel 6.8) and BusyBox 1.37:
 
-|             | A link as the **operand**                                  | A link found during **recursion** |
-| ----------- | ---------------------------------------------------------- | --------------------------------- |
-| `chmod -R`  | **followed** — and it recurses into the referent's tree    | not followed                      |
-| `chown -Rh` | not followed — `-h` acts on the link                       | not followed                      |
-| `rm -rf`    | not followed — removes the link                            | not followed                      |
+| | A link as the **operand** | A link found during **recursion** |
+| --- | --- | --- |
+| `chmod -R` | **followed** — and it recurses into the referent's tree | not followed |
+| `chown -Rh` | not followed — `-h` acts on the link | not followed |
+| `rm -rf` | not followed — removes the link | not followed |
 
 Recursion is safe in all three (GNU's `-P` is the default under `-R`; `-h` covers `chown`'s operand).
 But a link in any **parent** is resolved by the kernel first: with `wp-content/uploads` linked out,
 `rm -rf <root>/wp-content/uploads/backwpup` deleted `/out/backwpup` and `mkdir -p` created
 `/out/newdir` (measured), while every lexical guard agreed.
 
-So `assertResolvedInsideRoot` ([`wp/transport-exec.ts`](../../src/common/wp/transport-exec.ts)) asks **where the path really leads**: it resolves the root
-with `readlink -f` (once per batch; one that does not resolve is refused as such), then each target
-**and its parent** with one fixed `sh` script per target, and requires both inside the root — `rm -rf`
-and `chown -h` act on the last entry in its parent, so `<root>/X -> /out` with `/out/name -> <root>/…`
-is refused although `name` leads back in (the root itself as a target skips the parent). A path not yet
-there cannot be a link, so the script walks up to the deepest existing ancestor (GNU and BusyBox
-`readlink -f` tolerate one absent last component, BSD/macOS none), stepping past a component **only
-once it is proved absent**: unseen by `test -e` under a parent the user can enter (`(cd "$p")`, never
-`test -x`, which BusyBox answers from the mode bits). No bound at the root's length: a link may spell
-the root shorter than a `rootDir` alias of it. A dangling link is followed by the script itself, from
-the link's folder (≤ 40 hops): BusyBox's `readlink -f` reads a dangling relative link from the working
-directory (measured: `uploads/evil -> sub/gone` judged `<root>/sub/gone` while the kernel follows
-`uploads/sub`, a link out). Output is exact (`$(… && echo .)`, NUL-separated; macOS's `readlink -f`
-drops a trailing newline, caught by `-ef`), so a sibling `<root> ` or `<root>⏎` never reads as the
-root. Each refusal names its cause: leads outside (the resolved path), exists but cannot be followed
-(a loop, > 40 links, a file where a folder should be), or **cannot be searched**. A folder on the way
-the transport's user cannot enter (`uploads` at `0700`, the web server's) is resolved again by whoever
-can: the site's identity in `site` when the caller passes it (residue removal and data-directory
-preparation do), then root when `elevationSupport` is `available` (`docker`: always); only if none
-can is the target refused — a **host prerequisite**: the transport's user must be able to search every
-folder down to it, or have passwordless `sudo` (no `transport.elevate: false`). (Before 12.15c any
-`readlink` failure stepped up: `<root>/wp-content/link -> /root/x` fails with `EACCES` and the walk
-passed it at the root, measured on the nginx twin.) Cost: one command per target, plus the root once;
-the retries only on that path. A killed `readlink` kills the script (`CommandKilledError`). It runs
-before every privileged path: ownership normalisation (warns, returns `failed`), data-directory
-preparation and residue removal (both throw). Removal is guarded before **both** passes: the unprivileged pass still runs as root when the transport's user is root (a container, a root SSH login), and deleting elsewhere is wrong at any privilege. Verified on a live container: with a linked ancestor, preparation and removal both
-refused and the outside directory kept its contents and `0700` mode.
+So `assertResolvedInsideRoot` ([`wp/transport-exec.ts`](../../src/common/wp/transport-exec.ts)) asks
+**where the path really leads**: it resolves the root with `readlink -f` (once per batch; one that
+does not resolve is refused as such), then each target **and its parent** with one fixed `sh` script
+per target, and requires both inside the root — `rm -rf` and `chown -h` act on the last entry in its
+parent, so `<root>/X -> /out` with `/out/name -> <root>/…` is refused although `name` leads back in
+(the root itself as a target skips the parent). A path not yet there cannot be a link, so the script
+walks up to the deepest existing ancestor (GNU and BusyBox `readlink -f` tolerate one absent last
+component, BSD/macOS none), stepping past a component **only once it is proved absent**: unseen by
+`test -e` under a parent the user can enter (`(cd "$p")`, never `test -x`, which BusyBox answers
+from the mode bits) — stepping past any `readlink` failure let `<root>/wp-content/link -> /root/x`
+(`EACCES`) pass at the root (measured on the nginx twin). No bound at the root's length: a link may
+spell the root shorter than a `rootDir` alias of it. A dangling link is followed by the script
+itself, from the link's folder (≤ 40 hops): BusyBox's `readlink -f` reads a dangling relative link
+from the working directory (measured: `uploads/evil -> sub/gone` judged `<root>/sub/gone` while the
+kernel follows `uploads/sub`, a link out). Output is exact (`$(… && echo .)`, NUL-separated; macOS's
+`readlink -f` drops a trailing newline, caught by `-ef`), so a sibling `<root> ` or `<root>⏎` never
+reads as the root. Each refusal names its cause: leads outside (the resolved path), exists but
+cannot be followed (a loop, > 40 links, a file where a folder should be), or **cannot be searched**.
+A folder on the way the transport's user cannot enter (`uploads` at `0700`, the web server's) is
+resolved again by whoever can: the site's identity in `site` when the caller passes it (residue
+removal and data-directory preparation do), then root when `elevationSupport` is `available`
+(`docker`: always); only if none can is the target refused — a **host prerequisite**: the
+transport's user must be able to search every folder down to it, or have passwordless `sudo` (no
+`transport.elevate: false`). Cost: one command per target, plus the root once; the retries only on
+that path. A killed `readlink` kills the script (`CommandKilledError`). It runs before every
+privileged path: ownership normalisation (warns, returns `failed`), data-directory preparation and
+residue removal (both throw). Removal is guarded before **both** passes: the unprivileged pass still
+runs as root when the transport's user is root (a container, a root SSH login), and deleting
+elsewhere is wrong at any privilege. Verified on a live container: with a linked ancestor,
+preparation and removal both refused and the outside directory kept its contents and `0700` mode.
 
-It is check-then-act: the path could be swapped in between, and `chmod` has no "do not follow" flag. Ownership's grant narrows that for a **link at the path itself** (which resolves inside the root and so passes this check — measured on Ubuntu 24.04: a link to a `700` folder made it `777`): root's own `sh` tests `-h` and `exec`s `chmod` in one command, leaving only the shell's two steps between them.
-Winning that race needs write access to the docroot (on these cells, the plugin under test); before
-the check there was no race, only an open door. Because of the resolution check, a data directory relocated outside the
-root is refused, not followed: point `rootDir` at the real location, or declare a path within it.
+It is check-then-act: the path could be swapped in between, and `chmod` has no "do not follow" flag.
+Ownership's grant narrows that for a **link at the path itself** (which resolves inside the root and
+so passes this check — measured on Ubuntu 24.04: a link to a `700` folder made it `777`): root's own
+`sh` tests `-h` and `exec`s `chmod` in one command, leaving only the shell's two steps between them.
+Winning that race needs write access to the docroot (on these cells, the plugin under test). Because
+of the resolution check, a data directory relocated outside the root is refused, not followed: point
+`rootDir` at the real location, or declare a path within it.
 
 `--` ends option parsing in both commands, because `chown` permutes options anywhere: without it a
-`fileOwner` of `--reference=/etc/hostname` reaches root as a flag and takes ownership from that file (measured; with `--` it is an
-"invalid user" error).
+`fileOwner` of `--reference=/etc/hostname` reaches root as a flag and takes ownership from that file
+(measured; with `--` it is an "invalid user" error).
 
 ### It never fails a run
 
 Ownership is housekeeping, so `normalizeOwnership` **never throws**: it returns `normalized` /
 `unnecessary` / `skipped` / `disabled` / `failed` and warns once per site _per reason_. Without
 passwordless `sudo` it cannot run at all (`chown` needs root); pre-flight and the run-level warning
-report that, as no fault. The elevation probe, like the ownership probes, remembers a `sudo` that **ran and refused**, never a
-transport that could not be asked (one dropped connection must not disable escalation for the rest of
-the worker). Detection, identity and notices are cached **per install**, not per host: one machine
-serves sites that disagree (apache cell: `sftp_backwpup:www-data` and `sftp_wprocket:www-data` under
-one `ubuntu@host`).
+report that, as no fault. The elevation probe, like the ownership probes, remembers a `sudo` that
+**ran and refused**, never a transport that could not be asked (one dropped connection must not
+disable escalation for the rest of the worker). Detection, identity and notices are cached **per
+install**, not per host: one machine serves sites that disagree (apache cell:
+`sftp_backwpup:www-data` and `sftp_wprocket:www-data` under one `ubuntu@host`).
 
 > **MUST — `wp` never runs as root; site commands run as the site's identity. Code that writes into
 > a site's docroot calls `normalizeOwnership` on what it wrote.** Never `chown`/`chmod` directly (root's
-> files would be unwritable by the web server). It hands over outside `site` (`same-user`, `fallback`, `disabled`); in `site`
-> it answers `unnecessary`, so callers never branch on the state. `stageAndInstallPlugin` does it
-> given the `slug` — pass it. Deliberately left alone: the staging area (only the user commands run as reads it), and a mode a
-> scenario sets to test a refusal (`makeLogReadOnly` takes the write bits off a plugin log the scenario's run
-> wrote; handing it back would undo that; it runs unelevated and goes with the plugin's residue).
+> files would be unwritable by the web server). It hands over outside `site` (`same-user`,
+> `fallback`, `disabled`); in `site` it answers `unnecessary`, so callers never branch on the state.
+> `stageAndInstallPlugin` does it given the `slug` — pass it. Deliberately left alone: the staging area
+> (only the user commands run as reads it), and a mode a scenario sets to test a refusal
+> (`makeLogReadOnly` takes the write bits off a plugin log the scenario's run wrote; handing it back
+> would undo that; it runs unelevated and goes with the plugin's residue).
 
 **Linux only.** `stat -c` and `id` are read in GNU form; BusyBox (`wordpress:cli`) differs on unmapped
 ids (`stat -c %U` prints `UNKNOWN`, `id` bare ids) and is handled. Each read is confined to one
@@ -854,13 +953,13 @@ function, so a BSD branch would stay local.
 
 What a plugin's **activation** writes outside its folder (WP Rocket: `wp-content/advanced-cache.php`,
 its cache and config folders) is declared as `ProductConfig.installOutputs` (paths relative to the
-root, validated by `normaliseInstallOutputs` (`normaliseSitePath` per path) when the config is built,
-duplicates dropped). The `@plugin`
-install checks them twice, as whoever commands run as: `recordInstallOutputs` right before the
-install, `settleInstallOutputs` after the active-state re-assert. One `sh -c` per check, the absolute
-paths as its arguments (never in the script): each present path's index and owner (`stat -c`), or `L`
-for a symbolic link (`-h`, never followed; a dangling one counts as present). Then, for each output
-present after but not before:
+root, validated when the config is built: [Path guards](#path-guards-wppathsts),
+`normaliseInstallOutputs`). The `@plugin` install checks them twice, as whoever commands run as:
+`recordInstallOutputs` right before the install, `settleInstallOutputs` after the active-state
+re-assert. One `sh -c` per check, the absolute paths as its arguments (never in the script): each
+present path's index and owner (`stat -c`), or `L` for a symbolic link (`-h`, never followed; a
+dangling one counts as present). Undeclared: no command at all. Then, for each output present after
+but not before:
 
 - `site` state: verified as the identity's (`matches` against `ownershipOf(identity)`); warned otherwise.
 - every other state: `normalizeOwnership` (recursive, so an output inside a new one it handed over is
@@ -876,19 +975,19 @@ its children too. **Except one owned by the transport's user** (by uid, not alre
 when the recursion takes nothing else: never one with another declared output beneath it (a shared
 parent), and only when its whole tree is that user's (`RECLAIM_CHECK_SCRIPT`: `find <p> ! -uid <uid>
 -print -quit` as the transport's user prints nothing and exits 0); otherwise left, warned. Never in
-`site`. Chosen over removing declared residue
-before the install, which would miss outputs that are not residue (`advanced-cache.php`,
-`wp-content/cache`) and must never run on a part-way reinstall. Never throws; a failed check warns and
-hands nothing over; the settle step is bounded (`SETTLE_BUDGET_MS`, 30 s ≈ 7 handovers of ~5 round trips): past it the install
-goes on, warned, and the step ends on its own. Undeclared: no command at all. Validation
-(`normaliseInstallOutputs`) lives in `wp/paths.ts`, so the config build loads no command module. Nothing here creates or removes an output: removal is `siteResidue`'s. As for the
-plugin's own files, fallback's `o+rwX` grant (SSH user outside the group) makes handed-over PHP files
-world-writable.
+`site`. Rejected: removing declared residue before the install, which would miss outputs that are not
+residue (`advanced-cache.php`, `wp-content/cache`) and must never run on a part-way reinstall.
+
+Never throws; a failed check warns and hands nothing over. The settle step is bounded
+(`SETTLE_BUDGET_MS`, 30 s ≈ 7 handovers of ~5 round trips): past it the install goes on, warned, and
+the step ends on its own. Nothing here creates or removes an output (removal is `siteResidue`'s). As
+for the plugin's own files, fallback's `o+rwX` grant (SSH user outside the group) makes handed-over
+PHP files world-writable.
 
 ## In-place cleanup ([`wp/config-edits.ts`](../../src/common/wp/config-edits.ts))
 
-What a plugin edits in files it does not own, put back byte for byte — only where its own edits explain
-the difference. Declared as data, `ProductConfig.configEdits` (validated by
+What a plugin edits in files it does not own, put back byte for byte — only where its own edits
+explain the difference. Declared as data, `ProductConfig.configEdits` (validated by
 [`config-edits-declaration.ts`](../../src/common/wp/config-edits-declaration.ts), pure, when the config
 is built): `files` (text edited in place: `operations`, each a list of `preg_replace` steps — PCRE,
 literal `replacement`, `limit`, an optional `when` read on the operation's input — and `captures`, text
@@ -927,32 +1026,35 @@ patterns, copied verbatim (`support/config-edits.ts`).
   reboot clears `/tmp`. Each adds one round-trip to its hook; a held file (below) adds the sudo probe
   (once per process), two `readlink`s and root's put-back (≤ 20 s, a FIFO's worst) per file and a
   second engine run.
-- **Root fallback** ([`config-edits-root.ts`](../../src/common/wp/config-edits-root.ts)): a file judged
-  restorable (a candidate, or `resumed`) that the identity cannot write, or whose mode it cannot set
-  back, is **held**: the engine keeps the record (reconciling, records nothing yet) and answers what
-  it vouches for — the judged file's dev/inode (decimal strings) and the SHA-256 of its bytes as
-  judged, the copy, its SHA-256, the mode. Root then runs a fixed script (`PUT_BACK_SCRIPT`,
-  `sudo -n -- timeout --preserve-status 20 sh -c …`, every value an argument): GNU `stat`/`sha256sum`
-  there; the folder the identity's `0700`, the copy **opened once** and the opened file the
-  identity's, single link (a link swapped in after the check reaches nothing); the path a regular
-  file, opened read-only, the **opened** file the judged one with one link, the path still leading to
-  it and its bytes still the judged ones (a rewrite in place since is never overwritten); the copy
-  read from its fd into a root-private `mktemp` file that must hold the SHA-256; written through
-  `/dev/fd/3` (truncate, then write: same inode and owner), the SHA-256 re-checked, the path still
-  that file (else `moved`: written, then moved away), the mode set back through the fd. Before it,
-  the path must resolve to exactly `<root>/<declared path>` (no link at it or in any parent; one that
-  does not resolve is refused). The engine then runs again (not holding): it finds the file back and
-  removes the record (or records). Notes `put back as root` / `mode set back … as root`; warnings
-  `replaced`, `moved`, `link`, a refused copy, or root failing to run. Only outside `site` (there the
-  record is the web server's, and a file it cannot write is not the plugin's doing), never with
-  `transport.elevate: false` or without passwordless sudo — then the engine's second run answers
-  `unwritable`, as before. **Only a write that began fails the hook** (bytes not verified, a `TERM`
-  mid-write, an exit not known to precede the write): the record kept, the next run resumes it. A
-  failure known to come before any write — sudo refusing `timeout`, no GNU tools, `mktemp` or a full
-  `/tmp`, a time-out before writing, an implausible root — is warned (`could not be finished as
-  root`) and the second run's answer stands, so a host that always fails it never sticks the site. No
-  free-space pre-check: staging the copy in `/tmp` first fails early on a full disk sharing it, and a
-  write cut short is a strict prefix the next run resumes. `wp`/PHP never run as root.
+- **Root fallback** ([`config-edits-root.ts`](../../src/common/wp/config-edits-root.ts)), only outside
+  `site` (there the record is the web server's, and a file it cannot write is not the plugin's doing),
+  with passwordless sudo and no `transport.elevate: false` (else the file stays `unwritable`). A file
+  judged restorable (a candidate, or `resumed`) that the identity cannot write, or whose mode it cannot
+  set back, is **held**: the engine keeps the record (records nothing yet) and answers what it vouches
+  for — the judged file's dev/inode (decimal strings) and the SHA-256 of its bytes as judged, the copy,
+  its SHA-256, the mode. The path must first resolve to exactly `<root>/<declared path>` (no link at it
+  or in any parent; unresolvable is refused). Root then runs `PUT_BACK_SCRIPT` (`sudo -n -- timeout
+  --preserve-status 20 sh -c …`, every value an argument; GNU `stat`/`sha256sum`), the copy and the
+  target read, checked and written through opened descriptors, so a link or file swapped in after the
+  open reaches nothing:
+  - the record folder the identity's `0700`; the copy opened once, the identity's, one link, copied
+    from its fd into a root-private `mktemp` file that must hold its SHA-256;
+  - the target a regular file, not a link, opened read-only: the judged dev/inode, one link, the
+    path still leading to it, its bytes still the judged ones (a rewrite in place since is never
+    overwritten);
+  - written through `/dev/fd/3` (truncate, write: same inode and owner), SHA-256 re-checked, the path
+    still that file (else `moved`: written, then moved away), the mode set back through the fd.
+
+  The engine then runs again (not holding), finds the file back and removes the record (or, in the
+  Before, records). Notes `put back as root` / `mode set back … as root`; warnings `replaced`,
+  `moved`, `link`, a refused copy, or root failing to run. **Only a write that began fails the
+  hook** (bytes not verified, a `TERM` mid-write, an exit not known to precede the write): the
+  record kept, the next run resumes it. A failure known to come before any write — sudo refusing
+  `timeout`, no GNU tools, `mktemp` or a full `/tmp`, a time-out before writing, an implausible root
+  — is warned (`could not be finished as root`) and the second run's answer stands, so a host that
+  always fails it never sticks the site. No free-space pre-check: staging the copy in `/tmp` fails
+  early on a full disk sharing it, and a write cut short is a strict prefix the next run resumes.
+  `wp`/PHP never run as root.
 - Not handled (warned, left): a created file or folder whose parent the identity cannot write (never
   held: removals stay the identity's), and a `wp-config.php` above the root.
 
@@ -964,76 +1066,80 @@ setup probes each site asking for an identity, registers the verdict in its proc
 `site-identity.json` in the cell's auth folder; each worker's `boundSite` reads it before any site
 command (`setup/identity-verdicts.ts`: `auto` sites only; missing, stale, invalid or incomplete →
 `fallback/unverified`, warned once). The healthcheck keeps its verdicts in memory. The pre-flight's
-"Site identity" check and banner: [AGENTS.md](../../AGENTS.md#improvement-gate-lint)
-"Auth fixture / setup" step 1 ([Phase 12 plan](../plans/phase-12-site-identity-plan.md), 12.9).
+"Site identity" check and banner: [execution-model.md → The auth
+setup](execution-model.md#the-auth-setup-and-the-health-check).
 
-| State       | When                                                                                   | Runs as                 |
-| ----------- | -------------------------------------------------------------------------------------- | ----------------------- |
-| `site`      | `ssh`, `runAs` `"auto"` (owner verified as PHP's identity) or `"user:group"`, run probe passed | the identity, via sudo  |
-| `same-user` | `docker`/`local` (`mode`), or the transport's user already is the identity (`auto`: verified) | the transport's user    |
-| `fallback`  | asked for, not possible: `reason` + `detail` (`FALLBACK_REASONS` gives each its fix)    | the transport's user    |
-| `disabled`  | `runAs: false` (`config`), or an `asTransportUser` copy (`as-transport-user`)           | the transport's user    |
+| State | When | Runs as |
+| --- | --- | --- |
+| `site` | `ssh`, `runAs` `"auto"` (owner verified as PHP's identity) or `"user:group"`, run probe passed | the identity, via sudo |
+| `same-user` | `docker`/`local` (`mode`), or the transport's user already is the identity (`auto`: verified) | the transport's user |
+| `fallback` | asked for, not possible: `reason` + `detail` (`FALLBACK_REASONS` gives each its fix) | the transport's user |
+| `disabled` | `runAs: false` (`config`), or an `asTransportUser` copy (`as-transport-user`) | the transport's user |
 
 - `decideIdentityState(inputs)` is the rule, pure: it returns the state or the next probe it needs
   (`site`: owner via `probeSiteOwnership` + `id`; `run`: the run probe). `resolveSiteIdentity`
   runs those probes as the transport's user and memoises per `installKey` + `runAs` + `umask`
   (concurrent callers share one). **A probe that throws is rethrown, never answered or cached.**
   `describeIdentityState` words a state; `resetSiteIdentityCaches` is for specs.
-- **The run probe** (`runProbeArgv`): the exact wrapper of
-  [`run-as-argv.ts`](../../src/common/wp/run-as-argv.ts) — `sudo -n -u <u> -g <g> -- /bin/sh -c
-'umask "$1" && cd -- "$2" && shift 2 && exec "$@"' e2e-run-as <umask> <root> …` (numeric halves `#id`;
-  `$0` names the wrapper in the shell's errors) — running
+- **The run probe** (`runProbeArgv`): the `site` line's exact wrapper
+  ([`run-as-argv.ts`](../../src/common/wp/run-as-argv.ts), above; `$0` `e2e-run-as` names it in the
+  shell's errors) running
   `echo e2e-run-probe && id && wp --info` in the root, from `/`. `classifyRunProbe` drops sudo's
   `unable to resolve host` lines (`withoutSudoNoise`), reads ids only after the mark, and maps: a
   `sudo:` refusal, sudo's explicit deny (detail `SUDO_DENIED`, never its text: it quotes the
   command) or no sudo → `no-sudo`; `sudo: unknown user|group` → `no-identity`; no mark
   otherwise (the wrapper's `cd`) → `no-root-access`; exit 92 → `no-wp`; other ids → `probe-mismatch`;
   uid/gid 0 → `no-identity`.
-- `auto` needs the pre-flight's verdict, given to the process with `registerSiteIdentityVerdicts`
-  (forgets states already resolved for those installs). With none, `unverified` at once, before any
-  probe (no `stat`/`id`: none could change it); else `owner-is-web` for the owner read now, or
-  `owner-not-web` / `unverified` — checked **before** "the transport's user already is it", so an SSH
-  user owning a docroot PHP reaches through its group falls back. The owner root (uid or gid 0) or
-  unreadable → `no-identity`. A declared `runAs` is re-checked by `runAsIdentity` (a hand-built
-  `root:root` → `no-identity`, no sudo call).
+- An `auto` site's verdict reaches a process through `registerSiteIdentityVerdicts` (forgets states
+  already resolved for those installs). With none, `unverified` at once, before any probe (no
+  `stat`/`id`: none could change it); else `owner-is-web` for the owner read now, or `owner-not-web`
+  / `unverified` — checked **before** "the transport's user already is it", so an SSH user owning a
+  docroot PHP reaches through its group falls back. The owner root (uid or gid 0) or unreadable →
+  `no-identity`. A declared `runAs` is re-checked by `runAsIdentity` (a hand-built `root:root` →
+  `no-identity`, no sudo call).
 - `asTransportUser(transport)`: a frozen copy without `wpUser`, `runAs: false` over `ssh`;
   idempotent; its state is `disabled/as-transport-user` and never reads the original's cache.
-- `planOwnership` in the `site` state answers `unnecessary` with `target` the identity's ownership
-  (`ownershipOf`) and `site` the install's owner and declared `fileOwner` (for the pre-flight's lines);
-  elsewhere it compares the owner with the transport's user (`probeIdentity`'s cache). A state that
-  cannot be resolved is `unknown-identity`, never the transport's user.
+- `planOwnership` ([File ownership](#file-ownership-wpownershipts)) compares the owner with the
+  transport's user (`probeIdentity`'s cache) outside `site`; a state that cannot be resolved is
+  `unknown-identity`, never the transport's user.
 
 **The web probe** ([`wp/web-identity.ts`](../../src/common/wp/web-identity.ts)) asks the web server
-who PHP runs as: `probeWebIdentity(site, request)` sweeps leftovers, writes
-`<root>/e2e-identity-<32 hex>.php` (constant `PROBE_PHP`; `WRITE_SCRIPT`: `printf | dd conv=excl`,
-umask 022 → `0644`; as root only when the transport's user's write was refused for permission, through
-the path guards; `elevate: false` → none), GETs it with its own `request.newContext({ baseURL })` (the
-login's TLS: verified), removes it in a `finally` as its writer (a file the transport's user wrote is
-never removed as root). A failed write is followed by `rm -f` as its writer (a full disk fails `dd`
-after its open created the file), unless it failed on `File exists`; the user's own error stays in
-the detail. **`O_EXCL`, never `set -C`:** the web server's user may own the root and plant a symlink
-between the guards and root's write; `dd conv=excl` refuses any existing last component, a symlink
-included, while dash/bash's `set -C` writes through one to a FIFO or device (measured, Ubuntu 24.04).
-For the parents, root's write (`ROOT_WRITE_SCRIPT`) runs `cd -P` into the root, refuses (exit 3)
-unless `pwd -P` is the root the guards resolved, and writes `./<name>` (measured: a root swapped for a
-symlink is refused; residual: another directory renamed onto the resolved path, which needs write
-access to the root's parent). A `dd` without `conv=excl` (BSD `unknown conversion excl`, BusyBox 1.37
-`invalid argument 'excl' to 'conv'`, older GNU `invalid conversion`) refuses the operand before
-opening: `not-writable` naming that, never retried as root. Result: `identified` (`euid`, `egid`, names, umask, SAPI)
-or `unverified` with a reason — `not-writable`, `unreachable`, `not-served` (any non-200; a 404 is
-WordPress below the URL root), `not-probe-output` (also a declared `Content-Length` or a body past
-16 KiB; a UTF-8 BOM before the JSON is accepted), `no-posix`. Throws only for a transport failure, a
-guard refusing root's **write**, a bad `options.name`, or a `baseURL` that is no URL (`TypeError`,
-before anything is written); a removal that fails or a guard refuses is a warning. The sweep
-(`sweepProbeFiles`): `find <root>/ -mindepth 1 -maxdepth 1 -type f -name … -mmin +60`, each name
-re-checked against `PROBE_FILE_NAME`, removed by `root/<name>` as the transport's user, then as root
-(through the guards) for what that user may not remove.
+who PHP runs as. `probeWebIdentity(site, request)`:
+
+- sweeps leftovers (`sweepProbeFiles`: the root's own probe files over 60 min old, each name
+  re-checked against `PROBE_FILE_NAME`, removed by `root/<name>` as the transport's user, then as
+  root, through the guards, for what that user may not remove);
+- writes `<root>/e2e-identity-<32 hex>.php` (constant `PROBE_PHP`; `WRITE_SCRIPT`: `printf | dd
+  conv=excl`, umask 022 → `0644`), as root only when the transport's user's write was refused for
+  permission, through the path guards (`elevate: false` → never). A failed write is followed by
+  `rm -f` as its writer (a full disk fails `dd` after its open created the file), unless it failed on
+  `File exists`; the user's own error stays in the detail;
+- GETs it with its own `request.newContext({ baseURL })` (the login's TLS: verified);
+- removes it in a `finally` as its writer (a file the transport's user wrote is never removed as root).
+
+**`O_EXCL`, never `set -C`:** the web server's user may own the root and plant a symlink between the
+guards and root's write; `dd conv=excl` refuses any existing last component, a symlink included, while
+dash/bash's `set -C` writes through one to a FIFO or device (measured, Ubuntu 24.04). For the parents,
+root's write (`ROOT_WRITE_SCRIPT`) runs `cd -P` into the root, refuses (exit 3) unless `pwd -P` is the
+root the guards resolved, and writes `./<name>` (measured: a root swapped for a symlink is refused;
+residual: another directory renamed onto the resolved path, which needs write access to the root's
+parent). A `dd` without `conv=excl` (BSD `unknown conversion excl`, BusyBox 1.37 `invalid argument
+'excl' to 'conv'`, older GNU `invalid conversion`) refuses the operand before opening: `not-writable`
+naming that, never retried as root.
+
+Result: `identified` (`euid`, `egid`, names, umask, SAPI) or `unverified` with a reason —
+`not-writable`, `unreachable`, `not-served` (any non-200; a 404 is WordPress below the URL root),
+`not-probe-output` (also a declared `Content-Length` or a body past 16 KiB; a UTF-8 BOM before the
+JSON is accepted), `no-posix`. Throws only for a transport failure, a guard refusing root's **write**,
+a bad `options.name`, or a `baseURL` that is no URL (`TypeError`, before anything is written); a
+removal that fails or a guard refuses is a warning.
+
 `checkWebIdentity` = owner + probe → `webVerdict` (`owner-is-web` when `euid`/`egid` equal the
 owner's uid/gid). `writeSiteIdentityFile(dir, runId, verdicts)` / `readSiteIdentityFile(dir, runId)`:
 `site-identity.json` (`0600`, atomic rename) keyed by `installKey` (user, host, key **path**, root —
 no secret; unmapped names are omitted and read back as absent); a reader gets `read`, `missing`,
-`stale` (another `RUN_ID`) or `invalid` (unreadable included), never a throw.
-The module takes the folder and run id as arguments: `wp/` never imports `run-context.ts`.
+`stale` (another `RUN_ID`) or `invalid` (unreadable included), never a throw. The module takes the
+folder and run id as arguments: `wp/` never imports `run-context.ts`.
 
 ## Path guards ([`wp/paths.ts`](../../src/common/wp/paths.ts))
 

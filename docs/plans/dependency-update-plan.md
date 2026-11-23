@@ -1,8 +1,9 @@
 # Dependency and Node 26 update plan (2026-11-18, done 2026-11-19)
 
-Done. Kept: decisions, the facts behind standing code and config choices (per phase), and open
-obligations ([Deferred](#deferred-open-obligations)). Per-phase detail lives in git (`chore/deps-pN-*`
-merges into `develop`).
+Done: P0 (baseline on Node 24.22.3 and 26.13.1) 2026-11-18, P1–P11 2026-11-19, each merged into
+`develop` (`chore/deps-pN-*`) with CI green; P11 synced the docs (floors raised to the locked versions)
+and ran the final live runs, soak and audit. Kept: decisions, the facts behind standing code and config
+choices (per phase), and open obligations ([Deferred](#deferred-open-obligations)).
 
 ## TLDR
 
@@ -18,8 +19,8 @@ merges into `develop`).
 
 Node 26.13.1 LTS, npm 12.2.3, TypeScript 6.0.3, Playwright 1.65.1 (Chromium 159), playwright-bdd 9.2.1,
 Allure 3.33.0 (allure-playwright 3.15.0), node-ssh 14.0.0 on ssh2 1.17.0, execa 10.2.1, commander
-15.1.0, string-width 9.0.0, pixelmatch 8.0.0, ESLint 10.15.0, typescript-eslint 8.73.0, APVM
-`apvm-napi` 3.3.0.
+15.1.0, string-width 9.0.0, pixelmatch 8.0.0, ESLint 10.15.0, typescript-eslint 8.73.0, Prettier 3.10,
+lint-staged 17.6, APVM `apvm-napi` 3.3.0.
 
 ## Decisions
 
@@ -35,11 +36,7 @@ Allure 3.33.0 (allure-playwright 3.15.0), node-ssh 14.0.0 on ssh2 1.17.0, execa 
 
 ## Phases
 
-### P0 — Baseline · xs/easy · deps: —
-
-Baseline on 24.22.3 and 26.13.1; nothing standing.
-
-### P1 — Node 26 · s/medium · deps: P0
+### P1 — Node 26
 
 - `.nvmrc`/`.node-version` 26, `@types/node` 26, `actions/setup-node@v7`.
 - **ssh2's `sshcrypto` addon does not compile on 26** (mscdex/ssh2#1531): pure-JS fallback, reported
@@ -50,7 +47,7 @@ Baseline on 24.22.3 and 26.13.1; nothing standing.
 - **Homebrew's Node 26 is not the official build** (OpenSSL 4.1, ICU 79.1, npm 11): measure on the
   official one (fnm).
 
-### P2 — npm 12 · s/medium · deps: P1
+### P2 — npm 12
 
 - Unknown or abbreviated flags are errors: every flag in the repo is spelled in full;
   `npm run orchestrator -- …` needs the `--`.
@@ -69,29 +66,29 @@ Baseline on 24.22.3 and 26.13.1; nothing standing.
 - npm 12 prints script banners (`npm notice run …`) on stderr; `cells.sh`'s `npx` passes
   `--loglevel=warn`.
 
-### P3 — execa 10.2, commander 15.1 · xs/easy · deps: P1
+### P3 — execa 10.2, commander 15.1
 
 execa 10.2 kills a child over `maxBuffer` with `SIGTERM` (then `SIGKILL` after 5 s, direct child only);
 `fromExeca` checks `isMaxBuffer` before `signal`, so the outcome is unchanged (`exec.spec.ts` pins it).
 
-### P4 — APVM 3.3.0 · s/medium · deps: P1
+### P4 — APVM 3.3.0
 
 Pin `#v3.3.0` (tags lost the `cli/` prefix). API is a superset (`const enum`s now runtime enums); specs
 stay type-only. Fresh WP Rocket zips keep nested vendor `php*`/`package*` files (new SHA-256). `commit:`
 takes only a SHA. The addon logs nothing; no token text in any error or event (V257 re-run).
 
-### P5 — Lint and format toolchain · xs/easy · deps: P4
+### P5 — Lint and format toolchain
 
 `no-unsafe-enum-assignment`: 3 spec casts are `as unknown as JsBuildPhase`, never the enum members — a
 value import loads the native addon, breaking `apvm.ts`'s only-importer rule.
 
-### P6 — Playwright 1.65.1 · m/medium · deps: P1
+### P6 — Playwright 1.65.1
 
 **Floor 1.64:** presets apply `screen`, an option fixture new in 1.64 (on 1.63 a file overriding it does
 not load). `DeviceProfile.screen`, the sixth override in `fixtures.ts`, is read by `presetScreen`
 (`DeviceDescriptor`'s type omits it); without it the `@mobile` smoke fails.
 
-### P7 — Allure 3.33 · s/medium · deps: P1
+### P7 — Allure 3.33
 
 - **History continues from 3.18:** lines keyed by `retryHash` = 3.18's `historyId`; no reset needed.
 - **`overrides: { allure: { glob: "^14.0.6" } }`** clears its audit findings; glob 14 accepts every
@@ -102,7 +99,7 @@ not load). `DeviceProfile.screen`, the sixth override in `fixtures.ts`, is read 
 - **No git facts:** the `local` detector wrote the origin URL (credentials), branch and commit;
   `allureEnv` sets `GIT_DIR=NO_GIT_DIR`. CI detectors read env vars only (no credentials).
 
-### P8 — node-ssh 14 · m/hard · deps: P1
+### P8 — node-ssh 14
 
 - **`@types/ssh2` override** (`{ "@types/node": "$@types/node" }`), else a nested `@types/node` 18 stays
   in the lockfile as `invalid`.
@@ -114,22 +111,18 @@ not load). `DeviceProfile.screen`, the sixth override in `fixtures.ts`, is read 
   server closing the session.
 - `noBuffer: true`: no `ERR_OUTPUT_TOO_LARGE`; the ssh path has no output cap of its own.
 
-### P9 — string-width 9 · s/medium · deps: P1
+### P9 — string-width 9
 
 v9 counts regional indicators 2, keycaps (`[#*0-9]`+U+20E3) 1, lone surrogates 1 (`withoutControls`
 makes text well-formed first). **Rule (D2):** `codePointWidth` counts U+1F1E6–U+1F1FF as 1, alone and in
 a sum (flag 2, lone 1). Basis: tmux 3.8's drawn columns (the only terminal measured) and "never below
 what a terminal draws".
 
-### P10 — pixelmatch 8 · xs/easy · deps: P1
+### P10 — pixelmatch 8
 
 Metric YIQ → OKLab lightness + HyAB; `threshold` keeps its 0–1 scale. Playwright 1.65.1 still bundles a
 YIQ pixelmatch, so our 0.2 equals its number, not its sensitivity (blue vs navy: v7 0.16, v8 0.32).
 `compare.spec.ts` pins the metric with three colour pairs.
-
-### P11 — Docs sync and final audit · s/easy · deps: P1–P10
-
-Docs synced to the locked versions (floors raised to them); final live runs, soak and audit green.
 
 ## Deferred (open obligations)
 
@@ -161,22 +154,3 @@ Docs synced to the locked versions (floors raised to them); final live runs, soa
   "versions unknown". A warning only; scenarios unaffected. Cause unconfirmed (PHP-FPM briefly
   unreachable after a reset is a guess): reproduce, read the twin's Apache and PHP-FPM logs, then fix
   the twin or retry the read once.
-
-## Status
-
-All phases done (P0 2026-11-18, P1–P11 2026-11-19), each merged into `develop` with CI green.
-
-| Phase | Outcome                                                                        |
-| ----- | ------------------------------------------------------------------------------ |
-| P0    | Baseline green on Node 24 and 26; audit 18                                     |
-| P1    | Node 26.13.1, @types/node 26                                                   |
-| P2    | npm 12.2.3 (`devEngines`), CI's own `~/.npm` cache, APVM deny key kept         |
-| P3    | execa 10.2.1, commander 15.1.0; maxBuffer outcome unchanged                    |
-| P4    | apvm-napi `#v3.3.0`                                                            |
-| P5    | ESLint 10.15, typescript-eslint 8.73, prettier 3.10, lint-staged 17.6          |
-| P6    | Playwright 1.65.1; `screen` override, floor 1.64                               |
-| P7    | Allure 3.33.0; history kept, glob 14 override, loopback, no git facts; audit 0 |
-| P8    | node-ssh 14.0.0; rejection mapping                                             |
-| P9    | string-width 9.0.0; regional indicator 1                                       |
-| P10   | pixelmatch 8.0.0; HyAB metric pinned                                           |
-| P11   | Docs synced; final runs green                                                  |

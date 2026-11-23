@@ -5,13 +5,16 @@ product into Playwright projects.
 
 ## Vocabulary
 
-| Term         | Meaning                                                                                                | Where it lives                                                                            |
-| ------------ | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
-| **Product**  | A plugin under test (`wp-rocket`, `backwpup`), with its features, steps, sites, optional service credentials. | `src/projects/<product>/config/<product>.config.ts`, listed in `src/projects/products.ts` |
-| **Cell**     | A named environment (`apache`, `nginx`, `pro@nginx`), **data-driven**: the keys of the sites files.     | `sites.json` / `sites.*.json`                                                             |
-| **Pool**     | The interchangeable sites backing one cell; scenarios are spread over it by worker.                    | a cell's `sites` array                                                                    |
-| **Run unit** | One `(product × cell)`: one invocation, one report directory.                                          | `E2E_CELL=<cell>` pins it (or `--project=<cell>`)                                         |
-| **Edition**  | `free` / `pro`, for products shipped as two packages (BackWPup); editionless products (WP Rocket) omit it.         | a cell's optional `edition` field                                                         |
+- **Product** — a plugin under test (`wp-rocket`, `backwpup`): features, steps, sites, optional
+  service credentials; `src/projects/<product>/config/<product>.config.ts`, listed in
+  `src/projects/products.ts`.
+- **Cell** — a named environment (`apache`, `nginx`, `pro@nginx`), **data-driven**: the top-level keys
+  of the sites files (`sites.json` / `sites.*.json`).
+- **Pool** — a cell's interchangeable sites (its `sites` array); scenarios are spread over it by worker.
+- **Run unit** — one `(product × cell)`: one invocation, one report directory; `E2E_CELL=<cell>` pins
+  it (or `--project=<cell>`).
+- **Edition** — `free` / `pro` (a cell's optional `edition`), for products shipped as two packages
+  (BackWPup); editionless products (WP Rocket) omit it.
 
 ## Worker → site binding (the load-bearing invariant)
 
@@ -29,10 +32,10 @@ cell's pool size and **fails fast** when more than one known cell is selected.
 
 `bddgen` generates every BDD config the product's config registers (one per cell), deleting each
 cell's specs before rewriting them. With every cell in the config, one run's `bddgen` deletes the specs
-another run of the product is loading: two runs of different cells started together failed 2 in 80
-when found, 4 in 80 when re-measured beside the fix, which failed none (`ENOENT`,
-`Cannot find module`). `bddgen` takes no `--project` and npm passes `-- args` to a script's last
-command only, so the environment is the one channel reaching `bddgen`, the runner and every worker.
+another run of the product is loading (measured: 2–4 in 80 paired runs of two cells failed, `ENOENT` /
+`Cannot find module`; pinned, none). `bddgen` takes no `--project` and npm passes `-- args` to a
+script's last command only, so the environment is the one channel reaching `bddgen`, the runner and
+every worker.
 
 `E2E_CELL=<cell>` ([`cell-pin.ts`](../../src/common/config/cell-pin.ts)) is that channel:
 
@@ -51,10 +54,10 @@ command only, so the environment is the one channel reaching `bddgen`, the runne
 
 Unpinned, `--project=<cell>` runs one cell but its `bddgen` regenerates every cell's specs: safe only
 when no other run of the product is going. A blank `E2E_CELL` is no pin. `.env` is read from the
-working directory into every process, so a pin there pins every run started from that folder. The
-orchestrator builds each run's environment from an allowlist with `E2E_LOAD_DOTENV=false`, so neither
-a `.env` nor an inherited variable reaches it. The healthcheck and the artifact warm ignore the pin:
-they span cells (`--cell` narrows the warm).
+working directory into every process, so a pin there pins every run started from that folder. An
+orchestrator run gets neither a `.env` nor an inherited variable
+([its environment](../guides/orchestrator.md#what-a-run-is)). The healthcheck and the artifact warm
+ignore the pin: they span cells (`--cell` narrows the warm).
 
 **The `[cell]` notice.** Nothing else on the terminal names a run's cell, so the first reporter
 ([`reporting/cell-notice.ts`](../../src/common/reporting/cell-notice.ts)) prints one line before the
@@ -127,88 +130,77 @@ and clears `debug.log` again when it had to, so recovery from a kill is complete
 
 ## Watching a run: the terminal, the results stream and the summary
 
-Three always-on reporters of the suite's own, given the run's facts (`RunDescription`,
-`reporting/run-description.ts`) as options by the config factory:
+Three of the suite's own always-on reporters (cell notice and run facts: below), given the run's
+facts (`RunDescription`, `reporting/run-description.ts`) as options by the config factory:
 
 - **The terminal reporter** ([`reporting/terminal.reporter.ts`](../../src/common/reporting/terminal.reporter.ts)),
-  in Playwright's `list`'s place (after the stream): after the `[cell]` notice, a header —
+  in Playwright's `list`'s place (after the stream). After the `[cell]` notice, a header —
   `[run] product · cell (edition) · RUN_ID · ref <E2E_REQUESTED_REF> · N scenarios · suite <version>`
-  (`package.json`'s, `config/suite-version.ts`; `unknown` when unreadable or invalid), on a
-  terminal with Unicode the same words in a `━━` rule; one line per test at its final attempt
-  (`✔ 18.4s  Feature › Scenario`; the word — `✘ failed`, `⚠ flaky`, `■ stopped` (drained), `— skipped`,
-  `■ interrupted` — kept unless a coloured terminal shows a mark no other status shares; `· attempt
-  2/3` past the first attempt or on a failure with retries; `· retry not run` for one settled at the end;
-  `· passed unexpectedly` for a `test.fail()` that passed; `· timed out`); a `↻ retry` line per attempt
-  due a retry, with how it ended (`failed`, `timed out`, `passed unexpectedly`, `not run: its group
-  failed` — a failed `beforeAll` skipped it) and its first error's line (past a bare `Error:` label);
-  errors outside any test (`✘ error`, call log dropped, 12 lines at most; "No tests found" a `⚠
-  warning`). Setups count as tests, not scenarios. Lines live in `terminal-lines.ts` (pure).
-  - **Failure blocks** (`failure-block.ts`, pure): under a test's final failure or interrupted final
-    attempt, aligned `Label  value` lines — `Step` (the failing Gherkin step; else `Hook` with the hook
-    or fixture's path; never a `pw:api`/`expect` title, which can quote what was typed — `failedStep`
-    in `results.ts`), `Feature` (the `.feature` file, no line: the reported location is the generated
-    spec), `Error` (the first line), each `Screenshot` and `Trace` path (from the working directory,
-    shell-quoted), and `Rerun`. When no step carries the error (a timeout, a crash), `Step` names the
-    body's last step begun, `· running when the attempt ended`: never `After Hooks` or `Worker
-    Cleanup` (they begin after the body), and a Before hook only if it never ended (a worker that died
-    in it, Playwright's `duration: -1`); a body that failed with no step of its own (a setup's plain
-    `throw`) gets no `Step` line.
+  (`config/suite-version.ts`; `unknown` when unreadable or invalid), in a `━━` rule on a Unicode
+  terminal; one line per test at its final attempt (`✔ 18.4s  Feature › Scenario`; a status's word —
+  `failed`, `flaky`, `stopped` (drained), `skipped`, `interrupted` — kept unless a coloured terminal
+  shows a mark no other status shares; suffixes `· attempt 2/3` past the first attempt or on a
+  failure with retries, `· retry not run` for one settled at the end, `· passed unexpectedly` for a
+  `test.fail()` that passed, `· timed out`); a `↻ retry` line per attempt due a retry, with how it
+  ended (`failed`, `timed out`, `passed unexpectedly`, or `not run: its group failed` for a failed
+  `beforeAll`) and its first error's line (past a bare `Error:`
+  label); errors outside any test (`✘ error`, call log dropped, ≤ 12 lines; "No tests found" a `⚠
+  warning`). Setups count as tests, not scenarios. Lines: `terminal-lines.ts` (pure).
+  - **Failure blocks** (`failure-block.ts`, pure), under a test's final failure or interrupted final
+    attempt, aligned `Label  value` lines: `Step` (the failing Gherkin step; else `Hook` with the
+    hook or fixture's path; **never** a `pw:api`/`expect` title, which can quote what was typed —
+    `failedStep` in `results.ts`), `Feature` (the `.feature` file, no line: the reported location is
+    the generated spec), `Error` (first line), each `Screenshot` and `Trace` path (from the working
+    directory, shell-quoted), `Rerun`. With no step carrying the error (a timeout, a crash), `Step`
+    names the body's last step begun, `· running when the attempt ended` — never `After Hooks` or
+    `Worker Cleanup`, a Before hook only if it never ended (Playwright's `duration: -1`); a body
+    failing with no step of its own (a setup's plain `throw`) gets none. A failed setup's block
+    opens with `Setup  <project> — no scenario of its cell runs without it`. Values are plain,
+    masked, then capped. An attempt due a retry keeps its one error line.
   - **The rerun command**: `E2E_CELL=<cell> [E2E_PLUGIN_REF=<ref> [E2E_PLUGIN_VERSION=<v>] |
     E2E_PLUGIN_ZIP=<zip>] npm run test:<product> -- --grep=<pattern>` (or `--project=<setup>`). The
-    cell is the test's own — in a run of every cell too, so the rerun runs that cell alone and its pin
-    applies. The pin (`pluginPin`) is what the cell's artifacts setup recorded, in the form a pinned run
-    is handed ([plugin-artifacts.md](plugin-artifacts.md#pre-warming)): the operator's zip when it used
-    one, else `release:<tag>` for a release download, else `commit:<sha>` with the version its zip
-    declares; with no record (the setup failed or never ran), what the operator set (`pluginRef`,
-    `pluginZip`, `pluginVersion`, which the config factory hands the reporters) — only in a run that
-    targeted the cell, as a run of every cell ignores them. The pattern is the **raw** titles from
-    `titlePath()` — the generated spec's path, the Feature, any Rule or Outline, the scenario — each
-    regex-escaped and followed by `(?: @\S+)*`, joined by spaces, after a space and up to `$`,
-    between slashes: Playwright then matches it case-sensitively, with no flags, against
-    `_grepTitleWithTags()` (project, file, describes and title, each followed by its tags), so only
-    that scenario and its exact duplicates are selected — not `Create a backup encrypted` nor
-    `Untagged Create a backup`. Every control, format character, line separator, lone surrogate and
-    combining mark past the eighth in a run is written as a `\uXXXX` escape, so the command holds only
-    visible characters and still selects the test. Values are single-quoted when a shell would read
-    them otherwise (`=` included: zsh expands `=cmd` in an assignment). The command is never cut: one
-    quoting a credential's shape, holding a control (a zip path, ref or version can), or past 2,000
-    characters is refused, `Rerun  not shown: <why>`. A credential-shaped title also withholds the
-    `Screenshot`/`Trace` paths (`not shown: …`): Playwright names the folder after the title, cut and
-    hashed, past what masking can find. A failed setup's block opens with `Setup  <project> — no
-    scenario of its cell runs without it`. Every other value is plain, masked, then capped; the
-    glyphs are the palette's (ASCII under plain output). One block per final failure; an attempt due a
-    retry keeps its one error line.
-  - **Worker output** (`onStdOut`/`onStdErr`; Playwright's `BaseReporter` only stores it, so without
-    this the `[artifacts]`, `[site]`, `[auth]` lines and worker warnings vanish): printed **as it
-    comes**, line by line, on a terminal and in a pipe alike, in a `  │` gutter — so a run SIGKILLed
-    mid-scenario (the orchestrator's escalation) leaves the hung scenario's last whole lines in
-    `run.log`. Parallel workers interleave: whenever the next output line's source (a test's attempt,
-    or output outside any test) is not the last line's, a begin line names it first (`▸ Feature ›
-    Scenario`, `· attempt 2/3` past the first, `▸ outside any test`); the attempt's own line still
-    comes at its end, after its open lines. Cut into lines by `worker-output.ts` per source and
-    stream (stdout and stderr apart; UTF-8 decoded per source). Output outside any test names no
-    worker (Playwright gives none), so each of its chunks is a line of its own, never joined to
-    another worker's. Bounds: 200 lines per stream of a test's attempt (then `… N more lines of
-    output not shown: the HTML report keeps them`), and of output outside any test until a test ends
-    (then the count alone: no report keeps it); a line is held up to 64 KiB, a memory bound — past it,
-    it loses the word the cut fell in (a credential has no whitespace, so no half of one survives) and
-    ends `[cut: the line was too long]`. Each line is made plain (`plain`; workers run with
-    `FORCE_COLOR=1`), masked whole (`redactSecrets`), then capped at 500 code points — so is every
-    title and error. `--quiet` drops worker output, as `list` did. A global timeout ends the run
-    before the running tests: their open lines print with their own late `onTestEnd`, a test that
-    never ends has its open line printed in `onExit`. Output stays bounded: the 64 KiB log tail a
-    failed run's reason quotes keeps `bddgen`'s cause.
+    cell is the test's own, also in a run of every cell, so its pin applies. The plugin
+    (`pluginPin`) is what the cell's artifacts setup recorded, in the form a pinned run is handed
+    ([plugin-artifacts.md](plugin-artifacts.md#pre-warming)): the operator's zip, else
+    `release:<tag>`, else `commit:<sha>` with its zip's version; with no record (the setup failed or
+    never ran), what the operator set — only in a run that targeted the cell, as a run of every cell
+    ignores it. The pattern is the **raw** `titlePath()` titles (spec path, Feature, any Rule or
+    Outline, scenario), each regex-escaped and followed by `(?: @\S+)*`, joined by spaces, anchored
+    by a leading space and `$`: matched case-sensitively against `_grepTitleWithTags()`, it selects
+    only that scenario and its exact duplicates (not `Create a backup encrypted` nor `Untagged
+    Create a backup`). Controls, format characters, line separators, lone surrogates and combining
+    marks past the eighth are `\uXXXX` escapes, so the command shows only visible characters and
+    still selects the test. Values are single-quoted when a shell would read them otherwise (`=`
+    too: zsh expands `=cmd`). Never cut: one quoting a credential's shape, holding a control (a zip
+    path, ref or version can) or past 2,000 characters is refused, `Rerun  not shown: <why>`. A
+    credential-shaped title also withholds the `Screenshot`/`Trace` paths (`not shown: …`):
+    Playwright names the folder after the title, cut and hashed, past what masking can find.
+  - **Worker output** (`onStdOut`/`onStdErr`; Playwright's `BaseReporter` only stores it, so the
+    `[artifacts]`, `[site]`, `[auth]` lines and worker warnings would vanish): printed **as it comes**,
+    terminal and pipe alike, in a `  │` gutter — so a run SIGKILLed mid-scenario (the orchestrator's
+    escalation) leaves the hung scenario's last whole lines in `run.log`. Workers interleave: whenever
+    a line's source (a test's attempt, or outside any test) differs from the last line's, a begin line
+    names it (`▸ Feature › Scenario`, `· attempt 2/3`, `▸ outside any test`); the attempt's own line
+    still comes at its end. Cut into lines per source and stream (`worker-output.ts`); output outside
+    any test names no worker (Playwright gives none), so each chunk is its own
+    line. Bounds: 200 lines per stream of an attempt (then `… N more lines of output not shown: the
+    HTML report keeps them`), and of output outside any test until a test ends (the count alone: no
+    report keeps it); a line held up to 64 KiB loses the word the cut fell in (a credential has no
+    whitespace, so no half survives) and ends `[cut: the line was too long]`. Each line is made plain
+    (workers run with `FORCE_COLOR=1`), masked whole (`redactSecrets`), then capped at 500 code points
+    — as is every title and error. `--quiet` drops it, as `list` did. A global timeout ends the run
+    before its running tests: their open lines print with their late `onTestEnd`, or in `onExit`.
+    Bounded so the 64 KiB `run.log` tail an orchestrator failure quotes still holds `bddgen`'s cause.
   - **One writer** ([`reporting/terminal-sink.ts`](../../src/common/reporting/terminal-sink.ts)): it
     registers a sink as it is built; the `[cell]` notice and the stream's and run facts' warnings print
     through it (`printLine`), on stdout, plain and masked but **never cut** (`suiteLine`: the suite's
-    own few lines, which name paths and commands). With no sink (a reporter alone, `--list`, `--ui`,
-    `PW_TEST_REPORTER`) they write their stream as before. The registry hangs on `globalThis` (a
-    reporter module loaded twice still finds it); the sink is released in `onExit`.
-  - **Styling**: `detectCapabilities` (`src/common/terminal/`) with `E2E_OUTPUT` (`auto|plain|fancy`,
-    read and validated by the config factory — a bad value fails the run as its config loads) decides
-    colour and Unicode; a pipe, a file or the orchestrator's `run.log` (its environment carries no
-    colour variable, its stdout is a file) get plain bytes, `FORCE_COLOR` honoured. Nothing styled
-    reaches `results.jsonl` or the reports. Setup projects' lines (`[artifacts]`, the elevation and
+    own lines name paths and commands). With no sink (a reporter alone, `--list`, `--ui`,
+    `PW_TEST_REPORTER`) they write their own stream. The registry hangs on `globalThis` (a reporter
+    module loaded twice still finds it); `onExit` releases the sink.
+  - **Styling**: `detectCapabilities` (`src/common/terminal/`) with `E2E_OUTPUT` (validated by the
+    config factory: a bad value fails the run as its config loads) decides colour, live and Unicode
+    ([the rules](../guides/configuration.md#terminal-output)). Nothing styled reaches
+    `results.jsonl` or the reports. Setup projects' lines (`[artifacts]`, the elevation and
     plugin-folder banners, APVM's progress) use `workerPalette` (`config/output.ts`): never coloured,
     ASCII under `plain`, `TERM=dumb` or a C locale; a thrown report (`buildReport`,
     `formatFailureReport`) is plain Unicode text (`TEXT_PALETTE`) — the printer styles, never the
@@ -218,41 +210,44 @@ Three always-on reporters of the suite's own, given the run's facts (`RunDescrip
     per line, indent kept.
   - **Live block** ([`live-block.ts`](../../src/common/reporting/live-block.ts) rows,
     [`live-session.ts`](../../src/common/reporting/live-session.ts) lifecycle): only when
-    `capabilities.live` — a TTY ≥ 20 columns whose `TERM` moves the cursor, not `plain`, not `CI`
-    unless `fancy`, not quiet; never in a pipe or `run.log`. From the first scenario's begin (setup
-    lines print plain before it) to `onEnd`, bottom-pinned: `███░░ 23/52 · 44% · 20 passed · 1 flaky ·
-    3 running · 4m 12s` (the summary's counts, `RunTally`) and one `▸ Feature › Scenario · site ·
-    1m 03s` row per busy worker (`sites` option: `siteLabel` per `parallelIndex` — no user, password,
-    query, fragment or `;` parameter, nothing before an `@` in the path). Narrow: the bar goes, then
-    `running`, then the counts are cut — the time stays; a worker row drops the feature path before
-    the name and site are cut. Redrawn on every event, on a 500 ms tick and on `resize`; taller than
-    the terminal, `… N more running`. **Stdio capture** ([`terminal/stdio-capture.ts`](../../src/common/terminal/stdio-capture.ts)):
-    meanwhile the runner's own `process.stdout.write` (and `stderr`'s, when a TTY; redirected, it keeps
-    its bytes) is replaced: foreign writes (Playwright's warnings, `emitWarning`, another reporter's
-    `console.*`) are cut into lines — a partial line held until its end or 64 KiB — masked
-    (`redactSecrets`) and printed above the block; the region writes through a `bypassWriter`, so its
-    bytes never loop; a child's writes to an inherited fd cannot be seen. **Ending**: `onEnd` clears it
-    before the settled lines, reports' hints and summary (plain lines); a callback's throw, a throw
-    while drawing (warned once, never retried), a failed write and `exit` close it too — capture,
-    `resize`/`exit`/signal listeners and tick undone. `SIGTERM`/`SIGHUP` while live: cleared, drained
-    ≤ 500 ms, then re-sent when no other listener handles it, so the exit status stays 143/129.
-    `SIGKILL` cannot be heard: the block stays, the shell's next lines over it. `onExit` drains ≤ 2 s,
-    then makes a drained terminal blocking again; a paused one (Ctrl-S) stays non-blocking, and the run
-    ends when it is resumed (Playwright waits for stdout itself). One block per terminal: a second
-    terminal reporter (`--add-reporter`) prints plain lines above the first's.
-  - **Quiet** (prints nothing, registers no sink; `terminal-mode.ts`) for `--list` (`_mode`), `--ui`
-    (`--ui*` in `argv`, or `process.stdout.write` replaced on the stream — Playwright's stdio
-    interception, an editor's test server too) and `PW_TEST_REPORTER` (a second reporter prints).
-    Quiet, `printsToStdio()` is `false`, so Playwright adds its own terminal reporter (`line`, `dot`
-    under CI; its listing for `--list`): a `PW_TEST_REPORTER=junit` or `null` run is never silent —
-    and that fallback prints worker output as it is, unmasked. Watch mode (`PWTEST_WATCH`) does not
-    intercept stdio: the reporter prints there. `--add-reporter` is not detected: an added printing
-    reporter prints every line twice, an added `list` prints errors unmasked — the caller's choice.
-  - **Never fails a run**: callbacks are caught (one `[terminal]` warning on stderr; missing options
-    are told apart, so a later throw is still told). While it owns stdout it listens for its `error`
-    event, so a closed pipe (`EPIPE`, `… | head -1`) never crashes the runner: the run ends as it
-    would, `run.end` written. A failed write stops its output for good, and the listener then stays
-    after `onExit`, so the summary's writes fail silently too.
+    `capabilities.live` ([when](../guides/configuration.md#terminal-output)) and not quiet. From the
+    first scenario's begin (setup lines print plain before it) to `onEnd`, bottom-pinned: `███░░ 23/52
+    · 44% · 20 passed · 1 flaky · 3 running · 4m 12s` (`RunTally`'s counts) and one `▸ Feature ›
+    Scenario · site · 1m 03s` row per busy worker (`siteLabel`: no user, password, query, fragment or
+    `;` parameter, nothing before an `@` in the path). Narrow: the bar goes, then `running`, then the
+    counts are cut (the time stays); a worker row drops the feature path first; taller than the
+    terminal, `… N more running`. Redrawn on every event, a 500 ms tick and `resize`. **Stdio capture**
+    ([`terminal/stdio-capture.ts`](../../src/common/terminal/stdio-capture.ts)): meanwhile the runner's
+    own `process.stdout.write` (and `stderr`'s, when a TTY) is replaced, so foreign writes
+    (Playwright's warnings, `emitWarning`, another reporter's `console.*`) are cut into lines (a
+    partial one held until its end or 64 KiB), masked and printed above the block; the region writes
+    through a `bypassWriter`; a child's writes to an inherited fd cannot be seen. **Ending**: `onEnd`
+    clears it before the settled lines and summary; a callback's or drawing's throw (warned once), a
+    failed write and `exit` close it too, undoing capture, listeners and tick. `SIGTERM`/`SIGHUP`:
+    cleared, drained ≤ 500 ms, re-sent when no other listener handles it (exit status 143/129).
+    `SIGKILL` leaves the block. `onExit` drains ≤ 2 s, then makes a drained terminal blocking again; a
+    paused one (Ctrl-S) stays non-blocking and the run ends once resumed. A second terminal reporter
+    (`--add-reporter`) prints plain lines above the first's block.
+  - **Quiet** (prints nothing, registers no sink; `terminal-mode.ts`) for `--list`, `--ui` (`--ui*` in
+    `argv`, or `process.stdout.write` replaced — Playwright's stdio interception, an editor's test
+    server too) and `PW_TEST_REPORTER`. Quiet, `printsToStdio()` is `false`, so Playwright adds its own
+    terminal reporter (`line`, `dot` under CI; its listing for `--list`): a `PW_TEST_REPORTER=junit` or
+    `null` run is never silent — but that fallback prints worker output **unmasked**. Watch mode
+    (`PWTEST_WATCH`) does not intercept stdio: the reporter prints there. `--add-reporter` is not
+    detected: an added printing reporter doubles every line, an added `list` prints errors unmasked.
+  - **Never fails a run**: callbacks are caught (one `[terminal]` warning on stderr). While it owns
+    stdout it listens for its `error` event, so a closed pipe (`EPIPE`, `… | head -1`) never crashes
+    the runner: the run ends as it would, `run.end` written; a failed write stops its output for
+    good, the listener kept after `onExit` so the summary's writes fail silently too.
+  - **Terminal primitives** ([`src/common/terminal/`](../../src/common/terminal/), side-effect free,
+    shared with the orchestrator's screen): `capabilities.ts` (colour/live/Unicode, every input a
+    parameter), `palette.ts` (semantic colours via `styleText`, ASCII fallback, `TEXT_PALETTE` for
+    thrown text), `layout.ts` (display width, grapheme-safe cuts, width 20–120, 500-code-point
+    `capLine`), `stream.ts` (`openLiveTerminal` — non-blocking TTY stdout plus a no-op `error`
+    listener — is the only way to a live region; `drainTerminal` before exit; `writeSafely`, backlog
+    bound), `live.ts` (the region: byte-exact `\r\n` cursor contract, throttled, one repaint per
+    print burst, SGR-only style, dead after a failed write), `stdio-capture.ts` (the process's own
+    writes printed above a live block, restored exactly: below).
 
 - **The results stream** ([`reporting/results-stream.ts`](../../src/common/reporting/results-stream.ts))
   appends one JSON line per event to `<report dir>/results.jsonl` as it happens: `run.begin`,
@@ -267,11 +262,10 @@ Three always-on reporters of the suite's own, given the run's facts (`RunDescrip
 - **The end-of-run summary** ([`reporting/run-summary.ts`](../../src/common/reporting/run-summary.ts)),
   the last reporter, prints in `onExit`, below everything (Playwright's counts included), after a blank
   line and with none after it. Its header is a heavy rule as wide as the terminal (`COLUMNS`, else 80,
-  in a pipe; never cutting its words); colours (by palette token: its `Styler`), the verdict's mark and
-  its own glyphs (frame, separators, breadcrumbs, dashes, ellipses) come from the terminal palette, so
-  `E2E_OUTPUT=plain` (its `output` option) makes it colourless with those glyphs ASCII (`== backwpup .
-  pro@nginx (pro) == x FAILED ==`, `F > S - When x`, `1 failed . 2 passed`); the phrases it shares
-  with the reports (the plugin, the site) keep their `·`. The verdict
+  in a pipe; never cutting its words); colours, the verdict's mark and its own glyphs come from the
+  terminal palette, so `E2E_OUTPUT=plain` makes it colourless and ASCII (`== backwpup . pro@nginx
+  (pro) == x FAILED ==`); the phrases it shares with the reports (the plugin, the site) keep their
+  `·`. The verdict
   (`✔ PASSED`, `✘ FAILED`, `✘ COULD NOT TEST` for a failed setup, `■ INTERRUPTED`, `■ STOPPED` when the
   drain skipped a scenario, `NO TESTS` only when no error came from outside a test — a spec that would
   not load plans none either and is `FAILED`); the counts (drain skips as `stopped`) and duration;
@@ -312,7 +306,7 @@ so they never disagree:
 
 ## Saying what a run tested: the run facts
 
-A third reporter, [`reporting/run-facts.reporter.ts`](../../src/common/reporting/run-facts.reporter.ts),
+Another reporter, [`reporting/run-facts.reporter.ts`](../../src/common/reporting/run-facts.reporter.ts),
 puts what the run tested up front in every report. Facts and formats are pure, in
 [`reporting/run-facts.ts`](../../src/common/reporting/run-facts.ts): product, cell, edition, `RUN_ID`,
 the display-only `E2E_RUN_NAME` and `E2E_REQUESTED_REF`, the plugin zips (ref, full commit, zip,
@@ -347,11 +341,16 @@ then; schema v1); the verdict is the summary's (`verdictOf`).
   stderr). Nothing for
   `--list`, nor with a command-line `--reporter` (it replaces every configured reporter).
 
-**Credentials** are masked before any cut by one helper, `redactSecrets` ([`text.ts`](../../src/common/text.ts)),
-wherever the suite's reporters show what a setup, step, site or the environment said: the stream
-(`cleanMessage`), summary and facts (`displayText`), the site-info attachment and APVM's output. It masks a GitHub token, a URL's user and password (to the authority's last `@`), a credential URL parameter (`?access_token=`), an `Authorization` header and a WordPress login cookie — the URL shapes measured: Playwright's navigation errors quote a basic-auth
+**Credentials** are masked before any cut by one helper, `redactSecrets`
+([`text.ts`](../../src/common/text.ts)), wherever the suite's reporters show what a setup, step, site
+or the environment said: the stream (`cleanMessage`), summary and facts (`displayText`), the site-info
+attachment and APVM's output. It masks by shape: a GitHub token, a URL's user and password (to the
+authority's last `@`), a credential URL parameter (`?access_token=`), an `Authorization` header, a
+WordPress login cookie. The URL shapes are measured: Playwright's navigation errors quote a basic-auth
 `baseURL` whole; git quotes a URL parameter (it hides URL credentials itself; APVM never puts its token
-in a URL). A credential with no shape (a legacy 40-hex token, a bare password) is masked only by value (`maskValues`: APVM's output, against `GITHUB_TOKEN`/`GH_TOKEN`). Playwright's own reports, traces and Allure results keep errors as Playwright wrote them.
+in a URL). A credential with no shape (a legacy 40-hex token, a bare password) is masked only by value
+(`maskValues`: APVM's output, against `GITHUB_TOKEN`/`GH_TOKEN`). Playwright's own reports, traces and
+Allure results keep errors as Playwright wrote them.
 
 ## The product list
 
@@ -377,13 +376,17 @@ healthcheck, the artifact warm and the orchestrator (`productByName`, `playwrigh
   `typeof import()` (from TypeScript's syntax tree), and refuses a computed `import()` path outside test
   code.
 - **The orchestrator's boundary**: `orchestrator/**` imports from the suite only what
-  `orchestrator/suite-imports.json` admits (the list among them). ESLint refuses the rest by spelling;
-  `orchestrator/import-boundary.spec.ts` judges each import where it really leads, walks all an admitted
-  module can load (never `load-env.ts` or `run-context.ts`, even lazily) and imports the code in a fresh
-  Node to prove the process unchanged (`probeImports`: environment, listeners, working directory, exit code, and more — see [AGENTS.md → Improvement gate](../../AGENTS.md#improvement-gate-lint)). Both refuse the builtins and names that load or run code no guard reads (`module`,
-  `worker_threads`, `vm`, `inspector`, `repl`, `process.getBuiltinModule`, `eval`, `Function`), and the
-  spec keeps it ES modules only (no `.cts`, `.cjs` or `package.json`): CommonJS hands every module a
-  `require`.
+  `orchestrator/suite-imports.json` admits (the list among them). ESLint refuses the rest by
+  spelling; `orchestrator/import-boundary.spec.ts` judges each import where it really leads, walks
+  all an admitted module can load (never `load-env.ts` or `run-context.ts`, even lazily) and imports
+  the code in a fresh Node to prove the process unchanged (`probeImports`: environment, listeners,
+  working directory, exit code, umask, listener limits, `Error.stackTraceLimit`; `fetch`,
+  `process.exit`, `process.cwd`, `process.chdir`, `fs.close`, `fs.closeSync` not replaced — except
+  graceful-fs's patch from Playwright's bundle, accepted only with all four of its marks,
+  `GRACEFUL_FS_PATCH`). Admit a module only once that spec passes. Both refuse the builtins and
+  names that load or run code no guard reads (`module`, `worker_threads`, `vm`, `inspector`, `repl`,
+  `process.getBuiltinModule`, `eval`, `Function`), and the spec keeps it ES modules only (no `.cts`,
+  `.cjs` or `package.json`): CommonJS hands every module a `require`.
 
 ## The config factory
 
@@ -418,6 +421,88 @@ Per-project knobs:
   Measured worst navigation it bounds: 5.6 s (a cell's whole run); a call's own `timeout` still wins
   (measured), so the restore wizard's minutes-long waits keep theirs.
 
+## The auth setup and the health check
+
+[`auth.setup.ts`](../../src/common/auth/auth.setup.ts) (`setup:<cell>`, above) runs before the
+scenarios, in three steps, per real site; it is skipped when a cell has only placeholder sites.
+
+1. **Pre-flight** ([`setup/preflight.ts`](../../src/common/setup/preflight.ts)), gating:
+   - First, settle what the product's killed runs left (`ProductConfig.settleLeftovers`; best-effort,
+     a refusal is a warning; never in the healthcheck; on `ssh` only once the login shell passed),
+     since that damage can stop WordPress booting.
+   - The transport works (ssh: connection, WP-CLI, `rootDir`; docker: container up, WP-CLI inside;
+     local: `rootDir`, WP-CLI on `PATH`) and `wp core is-installed` passes — a WordPress that cannot
+     boot (old PHP, DB down, a fatal) is reported as that, never as "not installed".
+   - Over `ssh` the **login shell** must pass a quoted string back unchanged and alone (`printf '%s'`
+     of `!`, newline, `\\`, quotes, as the SSH user; csh/tcsh/fish fail it, `getent` names the shell;
+     text a startup file prints around it fails too; a dropped connection is "could not be
+     checked"): checked before settling and before anything the pre-flight writes, reported after the
+     transport's gates ([`setup/login-shell.ts`](../../src/common/setup/login-shell.ts)).
+   - A site asking for an identity (`transport.runAs` `"auto"`/`"user:group"`) has its **web server
+     asked who PHP runs as** (`checkWebIdentity`); the verdict is registered in the setup process at
+     once, so what follows runs as scenarios will, and written to `site-identity.json` for the workers
+     ([Site identity](wordpress-automation.md#site-identity-wpsite-identityts)). `auto` without it runs
+     `fallback/unverified`, warned; `runAs: false` gets no probe.
+   - The **admin UI is English** (`determine_locale()` for the configured user, so per-user setting,
+     site option, `WPLANG` and filters all count): page objects match English names, and a translated
+     site would otherwise fail as many locator timeouts.
+   - When WordPress cannot boot for that check but boots with the cell's own slug skipped
+     (`--skip-plugins=<slug>`), the cell's plugin is a broken copy every login would die on: the setup
+     removes it (`ensurePluginAbsent`) and says so in a **Plugin under test** line; the healthcheck
+     only reports it ([`setup/cell-plugin.ts`](../../src/common/setup/cell-plugin.ts)).
+   - A gate failure throws a formatted report and skips the scenarios.
+   - Four **reports, never gates**: **File ownership** (the same `planOwnership` decision
+     `normalizeOwnership` acts on, so report and action agree), **Elevation** (passwordless `sudo`?),
+     **Site identity** (state, fallback reason + fix, the web server's identity and umask vs the run's,
+     the login's `--user` check, `!log_allowed` from `sudo -n -l` where site commands do or would go
+     through sudo, the SSH user's `~/.wp-cli/config.yml` in `site`, a world-writable umask, each sudo
+     call's wait on a host name that does not resolve — only from 1 s
+     ([`setup/sudo-lookup.ts`](../../src/common/setup/sudo-lookup.ts)), never advice to edit the
+     host; ⚠ when any line warns) and **Plugin folders** (a folder WordPress lists no plugin in at the
+     cell's slug, which its next `@plugin` scenario removes). No report fails a site for a property of
+     the host; the one exception is an unparsable `transport.fileOwner` (our config, unreadable).
+   - Reports fold into banners per run
+     ([`setup/elevation-report.ts`](../../src/common/setup/elevation-report.ts)): elevation, silent when
+     every site can elevate or opted out, naming the ownership cost only where a handover was needed;
+     leftover plugin folders; site identity, silent when every site is `site`/`same-user`, verified
+     over HTTP, and its sudo keeps command lines out of its log, or opted out (`runAs: false`: noted on
+     its check line only) — except a sudo call waiting ≥ 1 s on the host's name, listed in any state
+     (headed "to note", no fix).
+2. **Authentication** ([`authenticate.ts`](../../src/common/auth/authenticate.ts)): end the session
+   the cell's previous run saved (`auth/session.ts`: that token only, that host only, via
+   `WP_Session_Tokens`), log in once through the UI, save `storageState`. A failing or timed-out setup
+   ends the sessions it saved (from `afterEach`, `endSessionsWhenSetupFails` — a timeout abandons the
+   body). Not at run end: the `--no-deps` loop reuses the login and an interrupted run skips
+   teardown. Best-effort, bounded by `BEST_EFFORT_ALLOWANCE_PER_SITE_MS` (added to the setup's
+   timeout): a session left open is a warning and expires in two days.
+   [`auth/login.ts`](../../src/common/auth/login.ts) checks each field kept its value before
+   submitting: WordPress re-focuses the username field, and a re-focus mid-`fill()` diverts text,
+   failing much later as "login never settled". The password goes in with `enterSecret` and is
+   checked with `holdsSecret`, both in the page ([`pages/secret-field.ts`](../../src/common/pages/secret-field.ts)).
+3. **Site versions** — Site Health's "Copy site info", cut **in the page** to a whitelist (a traced
+   call records what it returns): WordPress, the web server's PHP and SAPI, web server, database and
+   its extension ([`setup/site-info.ts`](../../src/common/setup/site-info.ts)); a `[site]` line and
+   `site-info.json`. A failure is a warning and an `error` entry.
+
+**Secrets:** the setup traces without DOM snapshots and turns off its tests' `error-context.md` page
+snapshot (`keepSecretsOutOfFailureSnapshots`, via the undocumented `PLAYWRIGHT_NO_COPY_PROMPT`)
+([config factory](#the-config-factory));
+[`secrets.run.spec.ts`](../../src/common/auth/secrets.run.spec.ts) proves no site password reaches a
+report, through the real runner.
+
+**Fleet health check** ([`healthcheck.ts`](../../healthcheck.ts), `npm run healthcheck`): the
+pre-flight and login standalone (no test run, no `storageState` written) on **every** product × cell ×
+site. Products run one section at a time, their sites concurrently; each site prints as soon as it is
+done, with every check it ran (ownership, elevation and site identity reports included; the web
+probe's verdict stays in memory, no file) and hints on failure; a summary per product ends it. The
+banners are the auth setup's renderers, printed to **stdout** so `healthcheck > fleet.log` keeps it.
+Its lines ([`setup/healthcheck-lines.ts`](../../src/common/setup/healthcheck-lines.ts)) are styled for
+stdout as a run's are: no escape when redirected unless `FORCE_COLOR`; `E2E_OUTPUT=plain`,
+`TERM=dumb` or a C locale spell its symbols in ASCII; a check's detail and hint, and the banners' site
+values, are printed plain and masked (`printableLines`). Placeholder cells are skipped. Exit `0` only
+if every real site passed. Knobs:
+[configuration.md](../guides/configuration.md#fleet-health-check-npm-run-healthcheck).
+
 ## Credential handling: the in-memory pool registry
 
 Playwright writes a project's `metadata` **verbatim into reports**, so it must never carry secrets
@@ -429,33 +514,42 @@ Playwright writes a project's `metadata` **verbatim into reports**, so it must n
   worker rebuilds its pool from the sites files, never from a report-bound channel.
 
 The same channel carries the rest of a product's policy to the **shared hooks**, which must not import
-product code: its debug-log preset (`registerDebugLogOptions` / `getDebugLogOptions` — RegExps, which
-JSON cannot hold), the paths it leaves on disk (`registerSiteResidue` / `getSiteResidue` — RegExps too,
-for runtime-named directory families), its database footprint (`registerSiteDbResidue` /
-`getSiteDbResidue` — would fit metadata, but one channel is easier to follow), how to ask its installed
-plugin for runtime-named data directories (`registerSiteDataDirResolver` / `getSiteDataDirResolver`),
-what its install writes before activation (`registerPrepareActivation` / `getPrepareActivation`; WP
-Rocket's licence), what it asks of the site over HTTP once active (`registerSettleAfterInstall` /
-`getSettleAfterInstall`; data, but product policy like the rest), how to stop work it may still run (`registerStopRunningWork` / `getStopRunningWork`) and how to deactivate its plugin when a plain deactivation leaves it active (`registerForceDeactivate` / `getForceDeactivate`; WP Rocket with an unwritable `wp-config.php`) (functions: metadata could never carry them),
-what its activation writes outside its folder (`registerInstallOutputs` / `getInstallOutputs`) and the
-files its plugin edits in place with its own transforms (`registerConfigEdits` / `getConfigEdits`) — the
-two registries that validate as they register, so a bad declaration fails the config build. The auth setup's preflight reads one more: how to settle what its killed runs left on a site (`registerSettleLeftovers` / `getSettleLeftovers`), run before the gates that damage could fail; the healthcheck never settles. Hooks read files, footprint, resolver, install outputs, the activation preparer, the settle, the forced deactivation and the in-place edits together through `declaredResidue(product)`
+product code, and much of which JSON cannot hold (RegExps, functions). Each `register…` has a `get…`
+twin:
+
+- `registerDebugLogOptions` — the `debug.log` preset (RegExps);
+- `registerSiteResidue` — paths left on disk (RegExps for runtime-named directory families);
+- `registerSiteDbResidue` — the database footprint (would fit metadata; one channel is easier to follow);
+- `registerSiteDataDirResolver` — how to ask the installed plugin for runtime-named data directories;
+- `registerInstallOutputs` — what activation writes outside the plugin's folder; validated as registered;
+- `registerConfigEdits` — files the plugin edits in place, with its own transforms; validated as
+  registered;
+- `registerPrepareActivation` — what the install writes before activation (WP Rocket's licence);
+- `registerSettleAfterInstall` — what it asks of the site over HTTP once active;
+- `registerStopRunningWork` — how to stop work it may still run;
+- `registerForceDeactivate` — how to deactivate it when a plain deactivation leaves it active (WP
+  Rocket with an unwritable `wp-config.php`);
+- `registerSettleLeftovers` — for the auth preflight: settling what killed runs left, before the gates
+  that damage could fail (never in the healthcheck).
+
+The two validating registries make a bad declaration fail the config build. Hooks read everything but
+the debug-log preset, the work stop and the leftover settle through `declaredResidue(product)`
 (`hooks/plugin-lifecycle.ts`), as does a product step reinstalling mid-scenario, so the two never
-prepare or sweep different things. Unlike `getPool`, none throws — declaring none is legitimate and
-costs no round-trip: residue getters return an empty value, `getStopRunningWork`,
-`getSiteDataDirResolver`, `getInstallOutputs`, `getConfigEdits`, `getPrepareActivation`, `getSettleAfterInstall` and `getSettleLeftovers` return `undefined` ("nothing
-to ask").
+prepare or sweep different things. Unlike `getPool`, no getter throws — declaring none is legitimate
+and costs no round-trip: residue getters return an empty value, `getDebugLogOptions` `{}` (the
+strictest scan: a forgotten preset is too strict, never lax), the others `undefined` ("nothing to
+ask").
 
 ## Artifact directories & lifecycle
 
 [`run-context.ts`](../../src/common/config/run-context.ts) resolves all paths via `dirs(product, cell)`:
 
-| Kind                      | Path shape                                                       | Lifecycle                                                                                                                              |
-| ------------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| **report** (accumulates)  | `<REPORT_ROOT>/<product>/<cell>/<RUN_ID>/`                       | One per run — the three reports, `results.jsonl`, `run-facts.json`; pruned as each run ends ([Report retention](#report-retention)). |
-| **output**                | `<OUTPUT_ROOT>/<product>/<cell>/`, or `…/<product>/_all/<cell>/` | Ephemeral: Playwright empties it as a run selecting one of its projects starts (below).                                                |
-| **auth / bdd**            | `<*_ROOT>/<product>/<cell>/`                                     | Ephemeral, stable per `(product, cell)`; overwritten in place.                                                                         |
-| **artifacts** (ephemeral) | `<ARTIFACTS_ROOT>/<product>/<cell>/`                             | **Wiped whole** and re-resolved each run: the role zips + `resolution.json`.                                                           |
+| Kind | Path shape | Lifecycle |
+| --- | --- | --- |
+| **report** (accumulates) | `<REPORT_ROOT>/<product>/<cell>/<RUN_ID>/` | One per run — the three reports, `results.jsonl`, `run-facts.json`; pruned as each run ends ([Report retention](#report-retention)). |
+| **output** | `<OUTPUT_ROOT>/<product>/<cell>/`, or `…/<product>/_all/<cell>/` | Ephemeral: Playwright empties it as a run selecting one of its projects starts (below). |
+| **auth / bdd** | `<*_ROOT>/<product>/<cell>/` | Ephemeral, stable per `(product, cell)`; overwritten in place. |
+| **artifacts** (ephemeral) | `<ARTIFACTS_ROOT>/<product>/<cell>/` | **Wiped whole** and re-resolved each run: the role zips + `resolution.json`. |
 
 - `RUN_ID` is auto-stamped (filesystem-safe, lexically sortable) unless an orchestrator pins it to
   share one token across a batch. One formatter and one strict parser,

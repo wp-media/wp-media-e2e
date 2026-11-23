@@ -2,7 +2,8 @@
 
 End-to-end tests for WP Media products (WP Rocket, BackWPup), on [Playwright](https://playwright.dev) +
 [playwright-bdd](https://vitalets.github.io/playwright-bdd/) (Cucumber/Gherkin). ESM, Node 26,
-npm 12, TypeScript 6 (strict). Design: [`docs/plans/e2e-modernization-plan.md`](docs/plans/e2e-modernization-plan.md).
+npm 12, TypeScript 6 (strict). Contributor and agent guide: [`AGENTS.md`](AGENTS.md); design:
+[`docs/plans/e2e-modernization-plan.md`](docs/plans/e2e-modernization-plan.md).
 
 ## Quick start
 
@@ -19,33 +20,29 @@ skipped and the `@noauth` smoke scenarios pass, proving the harness is wired. `-
 
 ## Concepts
 
-- **Product** — `wp-rocket` / `backwpup`, each with its features, steps, sites and (BackWPup only)
-  service credentials; configs in `src/projects/<product>/config/`.
+- **Product** — `wp-rocket` / `backwpup`: its features, steps and sites; configs in
+  `src/projects/<product>/config/`.
 - **Cell** — a named environment (`apache`, `nginx`, `pro@nginx`): the merged top-level keys of a
   product's sites files.
-- **Pool** — a cell's interchangeable WordPress sites; each worker binds to one by `parallelIndex`, spreading
-  scenarios over the pool.
-- **Run unit** — one `(product × cell)`. Run exactly one cell per invocation, pinned with
-  `E2E_CELL=<cell>`; two cells at once fail fast (the global `parallelIndex` would overflow the smaller
-  pool — [execution-model.md](docs/architecture/execution-model.md)).
+- **Pool** — a cell's interchangeable WordPress sites; each worker binds to one by `parallelIndex`.
+- **Run unit** — one `(product × cell)`: one cell per invocation, pinned with `E2E_CELL=<cell>`
+  ([execution-model.md](docs/architecture/execution-model.md)).
 
 ## Running
 
 ```bash
 E2E_CELL=<cell> npm run test:wp-rocket     # one product, one cell
-E2E_CELL=<cell> npm run test:backwpup
+E2E_CELL=<cell> npm run test:backwpup      # also test:<product>:ui and test:<product>:headed
 E2E_CELL=apache npm run test:wp-rocket -- --grep @smoke
 ```
 
-`E2E_CELL` pins `bddgen`, the runner and its workers to one cell (the config holds it alone), so `bddgen` regenerates only its
-specs and runs of different cells of one product can go side by side. `--project=<cell>` also runs one
-cell, but `bddgen` never sees it and deletes and regenerates **every** cell's specs, breaking another
-run of the product started beside it. Each run prints a `[cell]` line before `Running …`: its cell, how
-it was chosen, its workers and report folder. A pin naming no cell of the product, or a `--project`
-selecting none of the pinned cell's projects, fails at once naming `E2E_CELL`. With a pin, `--project` narrows within the cell (`--project=artifacts:<cell>` resolves its zips only).
-
-Never set `E2E_CELL` in `.env`: read from the working directory, it would pin every run started there.
-A command-line `--reporter` replaces the configured reporters, the `[cell]` line with them.
+`E2E_CELL` pins `bddgen`, the runner and its workers to one cell, so runs of different cells of one
+product can go side by side. `--project=<cell>` also runs one cell, but `bddgen` regenerates **every**
+cell's specs, breaking another run of the product started beside it; with a pin, `--project` narrows
+within the cell (`--project=artifacts:<cell>` resolves its zips only). Each run prints a `[cell]` line:
+its cell, how it was chosen, its workers and report folder. Never set `E2E_CELL` in `.env`: it would pin
+every run started there. A command-line `--reporter` replaces the configured reporters, the `[cell]`
+line with them.
 
 ## Health check
 
@@ -54,16 +51,14 @@ npm run healthcheck       # headless
 npm run healthcheck:ui    # same checks, browser visible (watch a login, debug a flaky site)
 ```
 
-Checks every configured site across **all** products, cells and pools (`healthcheck.ts`): transport,
-WP-CLI, a real installed WordPress, a POSIX login shell, who site commands run as (an `ssh` site with
-`runAs` absent — the default, `"auto"` —, `"auto"` or `"user:group"` has its web server probed; nothing is written but the probe's short-lived file), a working
-UI login. Output is grouped per product; each site is
-checked independently and printed as soon as it finishes (✔/✘/⚠), listing every check it ran, with the
-failing check and a hint on failure. Styled on a terminal only (`NO_COLOR`, `E2E_OUTPUT=plain` and a
-redirect honoured: `npm run healthcheck > fleet.log` holds no escape unless `FORCE_COLOR` is set); what a
-site or tool wrote into a check is printed plain, credentials masked. A placeholder-only cell is skipped, not failed. Exits `0` only
-when every real site passed, else `1` (fit for CI or cron). Tune with `HEALTHCHECK_CONCURRENCY` /
-`HEALTHCHECK_LOGIN_TIMEOUT_MS`.
+Checks every configured site across **all** products, cells and pools: transport, WP-CLI, a real
+installed WordPress, a POSIX login shell, who site commands run as, a working UI login — each site
+printed as soon as it finishes, with the failing check and a hint. It writes nothing on a site but
+the identity probe's short-lived file. Placeholder-only cells are skipped. Exits `0` only when every
+real site passed (fit for CI or cron); `npm run healthcheck > fleet.log` holds no escape codes
+unless `FORCE_COLOR` is set. Details: [execution-model.md → The auth setup and the health
+check](docs/architecture/execution-model.md#the-auth-setup-and-the-health-check); tuning:
+[configuration.md](docs/guides/configuration.md#fleet-health-check-npm-run-healthcheck).
 
 ## Orchestrator (cells in loops)
 
@@ -85,10 +80,9 @@ Install, config fields, stopping, kept files, refusals: [docs/guides/orchestrato
 ## Configuring sites
 
 Sites are declared in git-ignored JSON files (they hold credentials) under
-`src/projects/<product>/config/`: `sites.json` plus any `sites.<name>.json` overlays (`sites.docker.json`,
-`sites.ssh.json`, …), merged alphabetically; each file owns disjoint cells (a cell in two files is a hard
-error). With none, the committed `sites.example.json` (placeholder `.example.test` data) is used, so a
-fresh checkout still loads and passes the `@noauth` smoke.
+`src/projects/<product>/config/`: `sites.json` plus any `sites.<name>.json` overlays, merged
+alphabetically; each file owns disjoint cells (a cell in two files is a hard error). With none, the
+committed `sites.example.json` (placeholder data) is used.
 
 ```bash
 cp src/projects/wp-rocket/config/sites.example.json src/projects/wp-rocket/config/sites.json
@@ -99,10 +93,10 @@ Credentials live only in sites files and never enter Playwright reports. Schema:
 
 ## Environment
 
-Copy `.env.example` to `.env` and fill what you need (BackWPup storage credentials, optional runtime flags).
-Real environment variables always win; `E2E_LOAD_DOTENV=false` in the environment skips the file.
-Terminal output (`E2E_OUTPUT=auto|plain|fancy`, `NO_COLOR`, `FORCE_COLOR`, `TERM`, the locale; the
-orchestrator and its runs included): [configuration.md → Terminal output](docs/guides/configuration.md#terminal-output).
+Copy `.env.example` to `.env` and fill what you need (BackWPup storage credentials, optional runtime
+flags). Real environment variables always win; `E2E_LOAD_DOTENV=false` in the environment skips the
+file. Terminal output (`E2E_OUTPUT=auto|plain|fancy`, `NO_COLOR`, `FORCE_COLOR`, `TERM`, the locale):
+[configuration.md → Terminal output](docs/guides/configuration.md#terminal-output).
 
 ## Browsers
 
@@ -113,8 +107,8 @@ so it runs even where install scripts are disabled globally. If browsers are mis
 ## Local WordPress (Docker) — the `docker` transport
 
 [`docker/`](docker/) runs two **independent** installs over one MariaDB — **Apache** on `:8100`,
-**Nginx** (php-fpm) on `:8101` — each with a kept-alive `wp-cli` container the suite drives via
-`docker exec`.
+**Nginx** (php-fpm) on `:8101` (`APACHE_PORT` / `NGINX_PORT` override; then change the copied sites
+file's `baseURL`s) — each with a kept-alive `wp-cli` container the suite drives via `docker exec`.
 
 ```bash
 npm run env:up      # start containers + install both sites (idempotent); needs the Docker daemon
@@ -143,24 +137,21 @@ Each run writes `reports/<product>/<cell>/<RUN_ID>/`:
 - **`cucumber/`** — the Gherkin report: one portable HTML, screenshots/video embedded on failure;
   `REPORT_MODE=rich` makes it external with the trace viewer embedded (serve over http, not `file://`).
 - **`allure-results/`** — raw results for **Allure** (history/trends, flaky detection, dashboard).
-- **`results.jsonl`** — every attempt and the totals, one JSON line each, written as the run goes:
-  what a script watches and what the orchestrator reads at the end. Schema:
-  [`results-schema.ts`](src/common/reporting/results-schema.ts).
+- **`results.jsonl`** — every attempt and the totals, one JSON line each, written as the run goes
+  (schema: [`results-schema.ts`](src/common/reporting/results-schema.ts)).
 - **`run-facts.json`** — what the run tested: the plugin (ref, full commit, zip, **SHA-256**), each
-  site's WordPress, PHP, web server and database, the suite's version, the run's name and verdict. Rewritten as each setup
-  ends, so a killed run's still says what it had (`"status": "running"`).
+  site's WordPress, PHP, web server and database, the suite's version, the run's name and verdict;
+  rewritten as each setup ends, so a killed run's still says what it had.
 
 **Every report says up front what it tested**, in one line —
 `backwpup · pro@nginx (pro) · BackWPup Pro 9.99.99 · develop @ 1dceea8966 · WordPress 7.1.3 · PHP 8.5.11 64bit · <run>`,
-plus `RUNNING`, `INTERRUPTED`, `STOPPED`, `COULD NOT TEST` or `NO TESTS` (which the reports cannot say
-themselves) — as the Playwright report's title (every fact in its Metadata panel, with
-`#?show-metadata-other` in the URL), a banner above the Cucumber report (expand it for every fact), and
-the Allure report's name and Metadata. An unknown fact says why (`site unknown: auth setup failed`).
-`E2E_RUN_NAME` names the run and `E2E_REQUESTED_REF` shows the ref asked for (both display only); a
-`PLAYWRIGHT_HTML_TITLE` you set wins.
+plus `RUNNING`, `INTERRUPTED`, `STOPPED`, `COULD NOT TEST` or `NO TESTS` — as the Playwright report's
+title (every fact in its Metadata panel, with `#?show-metadata-other` in the URL), a banner above the
+Cucumber report, and the Allure report's name and Metadata. `E2E_RUN_NAME` names the run and
+`E2E_REQUESTED_REF` shows the ref asked for (both display only); a `PLAYWRIGHT_HTML_TITLE` you set wins.
+How: [execution-model.md → run facts](docs/architecture/execution-model.md#saying-what-a-run-tested-the-run-facts).
 
-Under each scenario that fails for good, the terminal prints a block: the Gherkin step it failed in,
-its `.feature` file, the first error, the screenshot and trace paths, and a command that reruns just
+Under each scenario that fails for good, the terminal prints a block with a command that reruns just
 that scenario on the same cell and plugin build:
 
 ```text
@@ -173,18 +164,10 @@ that scenario on the same cell and plugin build:
   Rerun       E2E_CELL=pro@nginx E2E_PLUGIN_REF=commit:af1ab5c4d2… E2E_PLUGIN_VERSION=9.99.99 npm run test:backwpup -- --grep='/ \.features-gen/…/backups\.feature\.spec\.js(?: @\S+)* Backups(?: @\S+)* Create a backup(?: @\S+)*$/'
 ```
 
-The `--grep` matches the scenario's generated file, Feature and title literally and case-sensitively,
-anchored at the end, so `Create a backup encrypted` is not rerun with it; only an exact duplicate is.
-The build is the one the run tested: the release tag (`release:3.17.4`) or commit it built, else the
-zip, ref and version you set. A run of every cell reruns the scenario's own cell. A failed setup gets
-its own block, rerunning `--project=<setup>`. A title shaped like a credential gets no command, and
-its screenshot and trace paths (its folder carries the title) are not shown.
-
-The run ends with a summary below everything: the verdict (`✘ COULD NOT TEST` when a setup failed,
-`■ STOPPED` when stopped), counts, the failed scenarios with their failed step (ten, then `and N
-more`), the plugin and sites tested, how to open each report, and which old reports it pruned. Its rule
-spans the terminal; `E2E_OUTPUT=plain` makes it colourless and its own glyphs ASCII, the counts'
-separators included (the plugin and site phrases it shares with the reports keep their `·`).
+The `--grep` selects that scenario and only an exact duplicate (not `Create a backup encrypted`).
+The run ends with a summary: the verdict, counts, the failed scenarios, the plugin and sites tested,
+how to open each report, and which old reports it pruned. Rules: [execution-model.md → Watching a
+run](docs/architecture/execution-model.md#watching-a-run-the-terminal-the-results-stream-and-the-summary).
 
 **Old reports are pruned as each run ends**, for its cell only: at most `E2E_REPORTS_KEEP` (20; `0`
 lifts the cap, not the age rules), none older than 30 days except the cell's newest complete report,
@@ -212,33 +195,19 @@ machine, tunnel to the port Allure prints: `ssh -L <port>:127.0.0.1:<port> <runn
 
 It lands in `reports/<product>/<cell>/<RUN_ID>/allure/`, named by the run's facts line, one HTML file
 per plugin (traces included) that opens from disk. **Trends accumulate** via a per-cell
-`reports/<product>/<cell>/allure-history.jsonl`, so the trend chart fills from the second run; flaky
-tests are flagged per run from retries. Each line is tagged with its run (`"e2eRun": "<RUN_ID>"`): a run
-reported again (a rebuilt bundle, a later `report:allure`) replaces its own line, keeping its place and
-time, and Allure is given only the lines before it, so the trend has one point per run and a report
-made again draws the trend it drew first. The history keeps the newest 100 runs (at most 64 MiB); a
-line Allure could not read, or a FIFO or device at its path (an edit by hand), is dropped, with a warning. Generation works on a copy in a hidden folder of
-the run and replaces the report and history only once Allure succeeded: a failure, or Ctrl-C (exit
-130), leaves both as they were. Empty results and a malformed result are refused (Allure would report
-them as an empty or partial success). A run's end summary prints the command for that very run.
-Allure 3's plugins hard-code a Google Tag Manager loader; generation removes that exact block from
-every page (a page where it is not recognised is left as written, and the command warns).
-Content (categories, widgets, single-file output, the server's host) is set in [`allurerc.mjs`](allurerc.mjs); the code
-is [`allure-report.ts`](src/common/reporting/allure-report.ts).
+`reports/<product>/<cell>/allure-history.jsonl` (one line per run, the newest 100, at most 64 MiB), so
+the trend chart fills from the second run; a run reported again replaces its own line and draws the
+trend it drew first. Flaky tests are flagged per run from retries. Generation replaces the report and
+history only once Allure succeeded: a failure, or Ctrl-C (exit 130), leaves both as they were; empty or
+malformed results are refused. Allure 3's plugins hard-code a Google Tag Manager loader, which
+generation removes from every page (warning where it is not recognised). A run's end summary prints
+the command for that very run. Content (categories, widgets, single-file output, the server's host):
+[`allurerc.mjs`](allurerc.mjs); the code: [`allure-report.ts`](src/common/reporting/allure-report.ts).
 
-A run's **download bundle** ([`report-bundle.ts`](src/common/reporting/report-bundle.ts),
-`buildReportBundle`; the orchestrator builds one after each run, as `reports.bundle` says, and Slack
-gives the command that downloads and unpacks it) puts only what a person opens —
-a landing `index.html`, `playwright/`, `cucumber/`, a fresh `allure/` and `run-facts.json`, never
-`allure-results/` or `results.jsonl` — in `<run>/report/` (0700) and/or `<run>/report.tar.gz` (0600),
-whose one top-level entry is `<product>-<cell>-<RUN_ID>/` (never starting with `-`, `.` or `@`, no
-`/` or `:`, which tar or scp would read otherwise). Inside the reports only folders and regular files
-are copied: links, FIFOs and sockets are left out and logged. The landing page opens from disk; where a
-report needs HTTP (Playwright's trace viewer, rich Cucumber, an Allure that keeps traces) it gives the
-command, run from the unpacked folder: `npx playwright show-report playwright`, `npx allure open allure`.
-Its Allure leaves Playwright's traces out by default (one HTML file per page; the traces stay in
-`playwright/`). A failed run of 6–7 MB packs to about 6 MB, 16 MB unpacked, in under 2 s; a small
-passing one to about 4 MB (Allure's pages). Modes, the fetch command and sizes:
+A run's **download bundle** ([`report-bundle.ts`](src/common/reporting/report-bundle.ts), built by the
+orchestrator after each run) holds only what a person opens — a landing `index.html`, `playwright/`,
+`cucumber/`, a fresh `allure/`, `run-facts.json` — as `<run>/report/` and/or `<run>/report.tar.gz`;
+Slack gives the command that fetches and unpacks it. Modes, contents, sizes:
 [orchestrator guide → Report bundle](docs/guides/orchestrator.md#report-bundle).
 
 ## Visual regression
@@ -260,8 +229,8 @@ await expectOptimizedToMatchUnoptimized(page, "/pricing", {
 It loads the bypassed and the optimized page, stabilises each (scrolls to load lazy media, waits for
 fonts) and fails if they differ beyond tolerance, attaching both renders and a highlighted diff. A size
 difference fails too (a layout change is a regression). Tolerances:
-[`src/common/config/visual.ts`](src/common/config/visual.ts). Tag such scenarios `@visual` to run them as a group, and run
-them in the Playwright container image for pixel-deterministic rendering:
+[`src/common/config/visual.ts`](src/common/config/visual.ts). Tag such scenarios `@visual` to run them as
+a group, and run them in the Playwright container image for pixel-deterministic rendering:
 `mcr.microsoft.com/playwright:v<installed @playwright/test version>-noble`, which ships Node 26 (from
 v1.65). Its npm is Node's own (11), so `npm install --global npm@12.2.3` there first:
 
@@ -272,11 +241,13 @@ E2E_CELL=apache npm run test:wp-rocket -- --grep @visual
 ## Quality gates
 
 ```bash
-npm run typecheck    # tsc --noEmit
+npm run typecheck    # tsc (type-check only: noEmit)
 npm run lint         # eslint .
 npm run format:check # prettier --check .
 npm run test:unit    # unit/integration specs
 ```
 
-On each suite release, bump `package.json`'s version (`npm version <x.y.z> --no-git-tag-version`):
-the `[run]` header, run facts, the orchestrator and Slack show it.
+CI ([`ci.yml`](.github/workflows/ci.yml)) runs these (the unit tests in two shards) and the `@noauth`
+smoke on both products. On each suite release, bump `package.json`'s version
+(`npm version <x.y.z> --no-git-tag-version`): the `[run]` header, run facts, the orchestrator and Slack
+show it.
