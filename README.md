@@ -8,9 +8,8 @@ npm 12, TypeScript 6 (strict). Contributor and agent guide: [`AGENTS.md`](AGENTS
 ## Quick start
 
 ```bash
-npm install --global npm@12.2.3   # once: Node 26 ships npm 11, which package.json's devEngines refuses
-npm --version                     # 12.x: another npm 11 first on PATH (e.g. Homebrew's) still fails
-npm install                       # also downloads Chromium (see "Browsers")
+npm --version   # must be 12.x: devEngines refuses npm 11 (Node 26's, Homebrew's too)
+npm install     # also downloads Chromium (see "Browsers")
 E2E_CELL=apache npm run test:wp-rocket
 ```
 
@@ -232,7 +231,7 @@ difference fails too (a layout change is a regression). Tolerances:
 [`src/common/config/visual.ts`](src/common/config/visual.ts). Tag such scenarios `@visual` to run them as
 a group, and run them in the Playwright container image for pixel-deterministic rendering:
 `mcr.microsoft.com/playwright:v<installed @playwright/test version>-noble`, which ships Node 26 (from
-v1.65). Its npm is Node's own (11), so `npm install --global npm@12.2.3` there first:
+v1.65). Its npm is Node's own (11), so put npm 12 there first:
 
 ```bash
 E2E_CELL=apache npm run test:wp-rocket -- --grep @visual

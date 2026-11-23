@@ -31,8 +31,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 - No file ownership handover when commands already run as the site's user.
 - CI: unit tests in two shards; SSH twins in CI.
 - **Requires Node ≥ 26.13.1 and npm ≥ 12.2.3** (`engines`, `devEngines`: npm 11 fails every npm
-  command in the checkout). Node 26 ships npm 11 (Homebrew's too): `npm install --global npm@12.2.3`,
-  first on `PATH`.
+  command in the checkout). Node 26 ships npm 11 (Homebrew's too): put npm 12 first on `PATH`.
 - Dependencies at their latest stable; `npm audit` 18 → 0:
   - Playwright 1.65.1 (Chromium 159); `@mobile` reports the Pixel 5 screen (393×851).
   - Allure 3.33: history from 3.18 reports continues; its server listens on `127.0.0.1` only

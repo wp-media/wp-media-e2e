@@ -16,7 +16,7 @@ End-to-end (E2E) tests for WP Media plugins: WP Rocket (performance), BackWPup (
 ## Key technologies
 
 - **Runtime:** Node ≥ 26.13.1 (`engines`; `.nvmrc` and `.node-version` pin 26), ESM (`"type": "module"`).
-- **Package manager:** npm ≥ 12.2.3 (`devEngines`; Node 26 ships 11: `npm install --global npm@12.2.3`);
+- **Package manager:** npm ≥ 12.2.3 (`devEngines`; Node 26 ships 11, which it refuses);
   dependency install scripts only as `allowScripts` lists them, git dependencies only as
   [`.npmrc`](.npmrc) allows.
 - **Language:** TypeScript 6, strict (`tsc` type-checks only — Playwright transpiles via Babel).

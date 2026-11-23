@@ -13,9 +13,8 @@ change needs a restart. Design and decisions:
 
 ## Install on the runner
 
-1. Tools: Node ≥ 26.13.1 and npm ≥ 12.2.3 (`npm install --global npm@12.2.3`: Node 26 ships npm 11,
-   which `package.json`'s `devEngines` refuses, so `npm ci` and `npm run orchestrator` fail with
-   `EBADDEVENGINES`); git; for BackWPup builds composer (PHP CLI) and `gulp-cli`
+1. Tools: Node ≥ 26.13.1 and npm ≥ 12.2.3 (Node 26 ships npm 11, which `package.json`'s
+   `devEngines` refuses, so `npm ci` and `npm run orchestrator` fail with `EBADDEVENGINES`); git; for BackWPup builds composer (PHP CLI) and `gulp-cli`
    (`npm install --global gulp-cli`); `tmux`. Chromium's system libraries, once:
    `npx playwright install-deps chromium` (it asks for `sudo`); `npm ci` installs Chromium itself.
    No X server: runs are headless. ssh2's optional native crypto does not build on Node 26
