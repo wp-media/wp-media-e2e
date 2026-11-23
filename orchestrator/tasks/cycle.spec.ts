@@ -1773,7 +1773,7 @@ test.describe("runOnce — the run's download bundle", () => {
     );
     expect(seen.lines.slice(outcome + 1, outcome + 3)).toEqual([
       `bpng bpng-1 report: ${shown}/report.tar.gz · raw: ${shown}`,
-      `bpng bpng-1 fetch: scp auto-e2e:${archive} ${NAME()}.tar.gz && tar -xzf ${NAME()}.tar.gz && rm ${NAME()}.tar.gz`,
+      `bpng bpng-1 fetch: R=${NAME()} && scp auto-e2e:${archive} "$R.tar.gz" && tar -xzf "$R.tar.gz" && rm "$R.tar.gz" && cd "./$R"`,
     ]);
     // The build's own line, with its sizes, before the outcome.
     expect(

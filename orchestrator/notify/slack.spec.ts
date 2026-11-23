@@ -578,19 +578,21 @@ test.describe("slackMessage — the Report line with a bundle", () => {
       .find((line) => line.startsWith("Report: "));
   }
 
-  test("an archive is one command: download, unpack, then remove — its && escaped as Slack requires", () => {
+  test("an archive is one command: name, download, unpack, remove, cd — its && escaped as Slack requires", () => {
     expect(reportLine({ bundle: ARCHIVE }, "auto-e2e")).toBe(
-      `Report: \`scp auto-e2e:${DIR}/report.tar.gz ${NAME}.tar.gz &amp;&amp; tar -xzf ${NAME}.tar.gz &amp;&amp; rm ${NAME}.tar.gz\``,
+      `Report: \`R=${NAME} &amp;&amp; scp auto-e2e:${DIR}/report.tar.gz "$R.tar.gz" &amp;&amp; tar -xzf "$R.tar.gz" &amp;&amp; rm "$R.tar.gz" &amp;&amp; cd "./$R"\``,
     );
   });
 
-  test("a folder is one scp -r into a folder named after the run", () => {
+  test("a folder is one scp -r into a folder named after the run, then cd", () => {
     expect(
       reportLine(
         { bundle: { kind: "folder", path: `${DIR}/report`, name: NAME } },
         "auto-e2e",
       ),
-    ).toBe(`Report: \`scp -r auto-e2e:${DIR}/report ${NAME}\``);
+    ).toBe(
+      `Report: \`R=${NAME} &amp;&amp; scp -r auto-e2e:${DIR}/report "$R" &amp;&amp; cd "./$R"\``,
+    );
   });
 
   test("without sshHost: the bundle's path", () => {
@@ -617,20 +619,20 @@ test.describe("slackMessage — the Report line with a bundle", () => {
         "auto-e2e",
       ),
     ).toBe(
-      `Report: \`scp auto-e2e:'/srv/my e2e/it'\\''s/R/report.tar.gz' ${NAME}.tar.gz &amp;&amp; tar -xzf ${NAME}.tar.gz &amp;&amp; rm ${NAME}.tar.gz\``,
+      `Report: \`R=${NAME} &amp;&amp; scp auto-e2e:'/srv/my e2e/it'\\''s/R/report.tar.gz' "$R.tar.gz" &amp;&amp; tar -xzf "$R.tar.gz" &amp;&amp; rm "$R.tar.gz" &amp;&amp; cd "./$R"\``,
     );
   });
 
   test("a command longer than Slack shows once escaped is never cut: the archive's path instead", () => {
-    // Fits raw, not escaped: the four `&` grow by 16 characters.
+    // Fits raw, not escaped: the eight `&` grow by 32 characters.
     const fixed =
-      `scp h: ${NAME}.tar.gz && tar -xzf ${NAME}.tar.gz && rm ${NAME}.tar.gz`
+      `R=${NAME} && scp h: "$R.tar.gz" && tar -xzf "$R.tar.gz" && rm "$R.tar.gz" && cd "./$R"`
         .length;
     const path = `/${"p".repeat(MAX_SHOWN - fixed - 5 - 15)}/report.tar.gz`;
     const bundle = { kind: "archive", path, name: NAME } as const;
-    const raw = `scp h:${path} ${NAME}.tar.gz && tar -xzf ${NAME}.tar.gz && rm ${NAME}.tar.gz`;
+    const raw = `R=${NAME} && scp h:${path} "$R.tar.gz" && tar -xzf "$R.tar.gz" && rm "$R.tar.gz" && cd "./$R"`;
     expect(raw.length).toBe(MAX_SHOWN - 5);
-    expect(escapeSlack(raw).length).toBe(MAX_SHOWN + 11);
+    expect(escapeSlack(raw).length).toBe(MAX_SHOWN + 27);
     expect(reportLine({ bundle }, "h")).toBe(`Report: \`${path}\``);
     // One that fits escaped is given whole.
     const short = { ...bundle, path: "/r/report.tar.gz" };
@@ -651,7 +653,7 @@ test.describe("slackMessage — the Report line with a bundle", () => {
         text: string;
       };
       expect(body.text).toContain(
-        `tar -xzf ${NAME}.tar.gz &amp;&amp; rm ${NAME}.tar.gz\``,
+        `tar -xzf "$R.tar.gz" &amp;&amp; rm "$R.tar.gz" &amp;&amp; cd "./$R"\``,
       );
       expect(body.text).not.toMatch(/[^;]&&/);
     } finally {

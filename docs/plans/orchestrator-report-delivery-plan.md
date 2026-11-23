@@ -94,10 +94,14 @@ Allure 3.18 unless dated; MB = 10⁶ bytes.
   with `-C`, never `--transform`/`-s`. Names refused: empty, `.`/`..`, a separator, a control, a
   leading `-`, `.` or `@`, a `:`, over 255 bytes. Copies are folders and regular files only.
   `report/` 0700, `report.tar.gz` 0600.
-- Slack's command (`bundleCommand`): `scp <host>:<archive> <name>.tar.gz && tar -xzf <name>.tar.gz
-  && rm <name>.tar.gz`. `&&` keeps the archive after a failed download or unpack; plain `rm`, never
-  `-f`/`-r`; re-running rewrites the same folder. Every word through `shellWord`. Never cut (a cut
-  command is a broken one): too long for Slack, the archive's path instead. `folder`: `scp -r`.
+- Slack's command (`bundleCommand`): `R=<name> && scp <host>:<archive> "$R.tar.gz" && tar -xzf
+  "$R.tar.gz" && rm "$R.tar.gz" && cd "./$R"` — the name once in `R` (2026-11-22; it was repeated in
+  three words), `"$R"` always quoted (any `IFS`), the `cd` `./`-anchored (any `CDPATH`); POSIX shells
+  only (fish, csh/tcsh stop at `R=`). `&&` keeps the archive after a failed download or unpack; plain
+  `rm`, never `-f`/`-r`; re-running from the same folder (not from inside the unpacked one, where the
+  `cd` left the shell) rewrites it. The name and paths through `shellWord`. Never cut (a cut command
+  is a broken one): too long for Slack, the archive's path instead. `folder`: `R=<name> && scp -r
+  <host>:<run>/report "$R" && cd "./$R"`.
   `none`, or a missing or failed bundle: the raw-folder hint.
 - Best-effort, one 240 s budget for Allure, copy and tar: reports are derived, so no failure changes
   the run's status; it is one log line and a `null` `report.bundle`.

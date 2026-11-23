@@ -575,7 +575,7 @@ test.describe("start — --once", () => {
         text?: string;
       };
       expect(body.text).toContain(
-        `Report: \`scp auto-e2e:${archive} ${name}.tar.gz &amp;&amp; tar -xzf ${name}.tar.gz &amp;&amp; rm ${name}.tar.gz\``,
+        `Report: \`R=${name} &amp;&amp; scp auto-e2e:${archive} "$R.tar.gz" &amp;&amp; tar -xzf "$R.tar.gz" &amp;&amp; rm "$R.tar.gz" &amp;&amp; cd "./$R"\``,
       );
     } finally {
       await sink.close();

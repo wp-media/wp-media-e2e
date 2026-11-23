@@ -267,17 +267,20 @@ The landing page opens from disk and names what needs HTTP, with the command to 
 folder: Playwright's trace viewer (`npx playwright show-report playwright`), rich Cucumber
 (`REPORT_MODE=rich`: `npx playwright show-report cucumber`), a `keep` Allure. Slack's `Report:` line,
 pasted in a POSIX shell (checked: macOS `zsh`/`bash`/`sh` with bsdtar, Ubuntu 24.04 `bash`/`sh` with
-GNU tar 1.35; as root or not), leaves only
-`./<name>/` (`index.html` inside), no archive, nothing on stderr — `<name>` is
-`<product>-<cell>-<RUN_ID>`, so runs unpacked side by side never mix:
+GNU tar 1.35; as root or not; not fish nor csh/tcsh, where it stops at `R=` having done nothing),
+leaves only `./<name>/` (`index.html` inside), no archive, nothing on stderr, and the shell in it —
+`<name>` is `<product>-<cell>-<RUN_ID>`, so runs unpacked side by side never mix:
 
 ```sh
-scp auto-e2e:/…/reports/backwpup/pro@nginx/<RUN_ID>/report.tar.gz backwpup-pro@nginx-<RUN_ID>.tar.gz && tar -xzf backwpup-pro@nginx-<RUN_ID>.tar.gz && rm backwpup-pro@nginx-<RUN_ID>.tar.gz
+R=backwpup-pro@nginx-<RUN_ID> && scp auto-e2e:/…/reports/backwpup/pro@nginx/<RUN_ID>/report.tar.gz "$R.tar.gz" && tar -xzf "$R.tar.gz" && rm "$R.tar.gz" && cd "./$R"
 ```
 
-`&&` stops at a failed download or unpack, keeping the archive; re-running it rewrites the same
-folder. `folder`: `scp -r <host>:<run>/report <name>` (into an existing `./<name>/` it nests as
-`<name>/report/`: remove it first). A command Slack would not show whole (over 600 characters once
+The name is written once, in the shell variable `R` (left set in the reader's shell); `"$R"` is
+always quoted (any `IFS`) and the `cd` `./`-anchored (any `CDPATH`). `&&` stops at a failed download
+or unpack, keeping the archive. It ends inside `./<name>/`, so paste the next one from the parent
+folder (`cd ..` first): pasted from inside, it unpacks within this one. Re-run from the same folder,
+it rewrites the same folder. `folder`: `R=<name> && scp -r <host>:<run>/report "$R" && cd "./$R"`
+(into an existing `./<name>/` it nests as `<name>/report/`: remove it first). A command Slack would not show whole (over 600 characters once
 escaped, `&&` being `&amp;&amp;`) is never cut: the bundle's path instead. The terminal follows the
 same rule under the run's end (`report: <bundle> · raw: <folder>`, then `fetch: <command>`), after
 the build's own line with its sizes; `fetch:` is never wrapped (the terminal soft-wraps it, so a copy
